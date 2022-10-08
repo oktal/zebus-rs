@@ -1,0 +1,18 @@
+[package]
+name = "zebus-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+prost = "0.11.0"
+prost-types = "0.11.1"
+zmq = "0.9.2"
+
+[dependencies.uuid]
+version = "1.2.0"
+features = [
+    "v4",
+    "fast-rng"
+]
