@@ -3,6 +3,8 @@ mod originator_info;
 mod send_context;
 mod transport_message;
 pub mod zmq;
+use std::borrow::Cow;
+
 use crate::{Peer, PeerId};
 
 pub use originator_info::OriginatorInfo;
@@ -29,7 +31,7 @@ pub trait Transport {
 
     /// Get the associated endpoint that has been bound by the transport layer
     /// This can fail if the transport layer has not been configured properly
-    fn inbound_endpoint(&self) -> Result<String, Self::Err>;
+    fn inbound_endpoint(&self) -> Result<Cow<'_, str>, Self::Err>;
 
     /// Send a `message` to a list of `peers`
     fn send(

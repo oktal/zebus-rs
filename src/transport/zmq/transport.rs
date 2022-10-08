@@ -1,11 +1,11 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     io,
     sync::{self, mpsc},
     thread::JoinHandle,
 };
 
-use super::outbound::ZmqOutboundSocket;
 use crate::{
     transport::{
         zmq::{ZmqSocketOptions, ZmqTransportConfiguration},
@@ -14,12 +14,19 @@ use crate::{
     Peer, PeerId,
 };
 
+use super::inbound::ZmqInboundSocket;
+use super::{inbound, outbound::ZmqOutboundSocket};
+
 const OUTBOUND_THREAD_NAME: &'static str = "outbound";
+const INBOUND_THREAD_NAME: &'static str = "inbound";
 
 /// Associated Error type with zmq
 pub enum Error {
     /// Error from zmq
     Zmq(zmq::Error),
+
+    /// Inbound error
+    Inbound(inbound::Error),
 
     /// IO Error
     Io(io::Error),
@@ -32,9 +39,7 @@ pub enum Error {
 enum OuboundSocketAction {
     Send {
         message: TransportMessage,
-
         peers: Vec<Peer>,
-
         context: SendContext,
     },
 
@@ -50,28 +55,23 @@ enum Inner {
     },
     Configured {
         configuration: ZmqTransportConfiguration,
-
         options: ZmqSocketOptions,
-
         peer_id: PeerId,
-
         environment: String,
     },
     Started {
         configuration: ZmqTransportConfiguration,
-
         options: ZmqSocketOptions,
-
         peer_id: PeerId,
-
         environment: String,
-
         context: zmq::Context,
 
+        inbound_socket: ZmqInboundSocket,
+        inbound_endpoint: String,
+        inbound_thread: JoinHandle<()>,
+
         outbound_thread: JoinHandle<()>,
-
         outbound_socket_action_tx: sync::mpsc::Sender<OuboundSocketAction>,
-
         outbound_sockets: HashMap<PeerId, ZmqOutboundSocket>,
     },
 }
@@ -95,7 +95,9 @@ impl ZmqTransport {
     }
 }
 
-fn outbound_worker(rx: mpsc::Receiver<OuboundSocketAction>) {}
+fn inbound() {}
+
+fn outbound(rx: mpsc::Receiver<OuboundSocketAction>) {}
 
 impl Transport for ZmqTransport {
     type Err = Error;
@@ -135,11 +137,30 @@ impl Transport for ZmqTransport {
                 // Create zmq context
                 let context = zmq::Context::new();
 
+                // Create the inbound socket
+                let mut inbound_socket = ZmqInboundSocket::new(
+                    context.clone(),
+                    peer_id.clone(),
+                    configuration.inbound_endpoint.clone(),
+                    options,
+                );
+
+                // Bind the inbound socket
+                let inbound_endpoint = inbound_socket.bind().map_err(Error::Inbound)?;
+
+                // Spawn inbound thread
+                let inbound_thread = std::thread::Builder::new()
+                    .name(INBOUND_THREAD_NAME.into())
+                    .spawn(move || {
+                        inbound();
+                    })
+                    .map_err(Error::Io)?;
+
                 // Spawn outbound thread
                 let outbound_thread = std::thread::Builder::new()
                     .name(OUTBOUND_THREAD_NAME.into())
                     .spawn(move || {
-                        outbound_worker(outbound_socket_action_rx);
+                        outbound(outbound_socket_action_rx);
                     })
                     .map_err(Error::Io)?;
 
@@ -151,6 +172,9 @@ impl Transport for ZmqTransport {
                         peer_id,
                         environment,
                         context,
+                        inbound_socket,
+                        inbound_endpoint,
+                        inbound_thread,
                         outbound_thread,
                         outbound_socket_action_tx,
                         outbound_sockets: HashMap::new(),
@@ -177,8 +201,14 @@ impl Transport for ZmqTransport {
         }
     }
 
-    fn inbound_endpoint(&self) -> Result<String, Self::Err> {
-        todo!()
+    fn inbound_endpoint(&self) -> Result<Cow<'_, str>, Self::Err> {
+        match self.inner.as_ref() {
+            Some(Inner::Started {
+                ref inbound_endpoint,
+                ..
+            }) => Ok(Cow::Borrowed(inbound_endpoint.as_str())),
+            _ => Err(Error::InvalidOperation),
+        }
     }
 
     fn send(

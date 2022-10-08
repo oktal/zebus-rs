@@ -9,7 +9,7 @@ enum State {
     Connected,
 }
 
-pub(crate) struct ZmqOutboundSocket {
+pub(super) struct ZmqOutboundSocket {
     /// Underlying zmq socket
     socket: zmq::Socket,
 
@@ -25,12 +25,12 @@ pub(crate) struct ZmqOutboundSocket {
 
 impl ZmqOutboundSocket {
     /// Create a new zmq outbound socket from a zmq [`Context`] and an associated [`PeerId`] and default [`ZmqSocketOptions`]
-    pub(crate) fn new(context: &Context, peer_id: PeerId) -> zmq::Result<Self> {
+    pub(super) fn new(context: &Context, peer_id: PeerId) -> zmq::Result<Self> {
         Self::new_with_options(context, peer_id, ZmqSocketOptions::default())
     }
 
     /// Create a new zmq outbound socket from a zmq [`Context`] with an associated [`PeerId`] and [`ZmqSocketOptions`]
-    pub(crate) fn new_with_options(
+    pub(super) fn new_with_options(
         context: &Context,
         peer_id: PeerId,
         opts: ZmqSocketOptions,
@@ -44,7 +44,7 @@ impl ZmqOutboundSocket {
     }
 
     /// Connect the underlying zmq socket to the specified `endpoint`
-    pub(crate) fn connect(&mut self, endpoint: &str) -> zmq::Result<()> {
+    pub(super) fn connect(&mut self, endpoint: &str) -> zmq::Result<()> {
         self.socket.connect(endpoint)?;
         self.endpoint = Some(endpoint.to_string());
         self.state = State::Connected;
@@ -53,12 +53,12 @@ impl ZmqOutboundSocket {
 
     /// Get the endpoint associated with the connection.
     /// Returns [`None`] if the socket is not connected
-    pub(crate) fn endpoint(&self) -> Option<&str> {
+    pub(super) fn endpoint(&self) -> Option<&str> {
         self.endpoint.as_deref()
     }
 
     /// Returns `true` if the underlying socket is connected
-    pub(crate) fn is_connected(&self) -> bool {
+    pub(super) fn is_connected(&self) -> bool {
         self.state == State::Connected
     }
 
