@@ -1,65 +1,101 @@
+use std::io::{self, Write};
+
 use zmq::Context;
 
 use crate::{transport::zmq::ZmqSocketOptions, PeerId};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum State {
-    Closed,
-    Opened,
-    Connected,
+/// Outbound socket error
+pub enum Error {
+    /// Zmq error
+    Zmq(zmq::Error),
+
+    /// An operation was attempted while the socket was not in a valid state
+    InvalidOperation,
+}
+
+pub(super) type Result<T> = std::result::Result<T, Error>;
+
+enum Inner {
+    Init {
+        context: zmq::Context,
+        peer_id: PeerId,
+        options: ZmqSocketOptions,
+    },
+    Connected {
+        socket: zmq::Socket,
+        endpoint: String,
+        peer_id: PeerId,
+    },
 }
 
 pub(super) struct ZmqOutboundSocket {
-    /// Underlying zmq socket
-    socket: zmq::Socket,
-
-    /// Peer Id
-    peer_id: PeerId,
-
-    /// Endpoint to connect
-    endpoint: Option<String>,
-
-    /// State of the underlying connection
-    state: State,
+    inner: Option<Inner>,
 }
 
 impl ZmqOutboundSocket {
     /// Create a new zmq outbound socket from a zmq [`Context`] and an associated [`PeerId`] and default [`ZmqSocketOptions`]
-    pub(super) fn new(context: &Context, peer_id: PeerId) -> zmq::Result<Self> {
+    pub(super) fn new(context: Context, peer_id: PeerId) -> Self {
         Self::new_with_options(context, peer_id, ZmqSocketOptions::default())
     }
 
     /// Create a new zmq outbound socket from a zmq [`Context`] with an associated [`PeerId`] and [`ZmqSocketOptions`]
     pub(super) fn new_with_options(
-        context: &Context,
+        context: Context,
         peer_id: PeerId,
-        opts: ZmqSocketOptions,
-    ) -> zmq::Result<Self> {
-        Ok(Self {
-            socket: Self::create_socket(context, opts)?,
-            peer_id,
-            endpoint: None,
-            state: State::Opened,
-        })
+        options: ZmqSocketOptions,
+    ) -> Self {
+        Self {
+            inner: Some(Inner::Init {
+                context,
+                peer_id,
+                options,
+            }),
+        }
     }
 
     /// Connect the underlying zmq socket to the specified `endpoint`
-    pub(super) fn connect(&mut self, endpoint: &str) -> zmq::Result<()> {
-        self.socket.connect(endpoint)?;
-        self.endpoint = Some(endpoint.to_string());
-        self.state = State::Connected;
-        Ok(())
+    pub(super) fn connect(&mut self, endpoint: &str) -> Result<()> {
+        let (inner, res) = match self.inner.take() {
+            Some(Inner::Init {
+                context,
+                peer_id,
+                options,
+            }) => {
+                // Create the zmq socket
+                let socket = Self::create_socket(&context, options).map_err(Error::Zmq)?;
+
+                // Connect the socket
+                socket.connect(endpoint).map_err(Error::Zmq)?;
+
+                // Transition to connected state
+                (
+                    Some(Inner::Connected {
+                        socket,
+                        endpoint: endpoint.to_string(),
+                        peer_id,
+                    }),
+                    Ok(()),
+                )
+            }
+            x => (x, Err(Error::InvalidOperation)),
+        };
+
+        self.inner = inner;
+        res
     }
 
     /// Get the endpoint associated with the connection.
-    /// Returns [`None`] if the socket is not connected
-    pub(super) fn endpoint(&self) -> Option<&str> {
-        self.endpoint.as_deref()
+    /// Returns [`Error`] `InvalidOperation` if the socket is not connected
+    pub(super) fn endpoint(&self) -> Result<&str> {
+        match self.inner.as_ref() {
+            Some(Inner::Connected { ref endpoint, .. }) => Ok(endpoint),
+            _ => Err(Error::InvalidOperation),
+        }
     }
 
     /// Returns `true` if the underlying socket is connected
     pub(super) fn is_connected(&self) -> bool {
-        self.state == State::Connected
+        matches!(self.inner, Some(Inner::Connected { .. }))
     }
 
     fn create_socket(context: &Context, opts: ZmqSocketOptions) -> zmq::Result<zmq::Socket> {
@@ -88,5 +124,24 @@ impl ZmqOutboundSocket {
         }
 
         Ok(socket)
+    }
+}
+
+impl Write for ZmqOutboundSocket {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.inner.as_ref() {
+            Some(Inner::Connected { ref socket, .. }) => socket
+                .send(buf, 0)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+                .map(|()| buf.len()),
+            // TODO(oktal): Figure-out what we want to do with our error types to make them
+            // implement `Error` trait
+            _ => panic!("not handled yet"),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // There is no explicit command for flushing a specific message or all messages from the message queue.
+        Ok(())
     }
 }

@@ -29,3 +29,10 @@ pub struct TransportMessage {
     #[prost(message, repeated, tag = "7")]
     pub persistent_peer_ids: Vec<PeerId>,
 }
+
+impl TransportMessage {
+    /// Returns `true` if this message is persistent
+    pub fn is_persistent(&self) -> bool {
+        self.persistent_peer_ids.len() > 0
+    }
+}

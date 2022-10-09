@@ -2,6 +2,7 @@ use super::ZmqSocketOptions;
 use crate::PeerId;
 use std::io::{self, Read};
 
+/// Inbound socket error
 pub enum Error {
     /// Zmq error
     Zmq(zmq::Error),

@@ -11,13 +11,21 @@ pub use originator_info::OriginatorInfo;
 pub use send_context::SendContext;
 pub use transport_message::TransportMessage;
 
+/// Trait that represents a callback to be called after receiving a [`TransportMessage`]
+pub trait MessageReceived: Fn(TransportMessage) + 'static + Send + Sync {}
+
 /// Transport layer trait
 pub trait Transport {
     /// The associated error type which can be returned from the transport layer
     type Err;
 
     /// Configure this transport layer with a [`PeerId`]
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err>;
+    fn configure(
+        &mut self,
+        peer_id: PeerId,
+        environment: String,
+        on_message_received: impl MessageReceived,
+    ) -> Result<(), Self::Err>;
 
     /// Start the transport layer
     fn start(&mut self) -> Result<(), Self::Err>;
