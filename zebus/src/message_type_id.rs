@@ -6,7 +6,7 @@ pub(crate) mod proto {
     #[derive(Clone, prost::Message)]
     pub struct MessageTypeId {
         #[prost(string, tag = "1")]
-        pub(crate) full_name: String,
+        pub full_name: String,
     }
 }
 

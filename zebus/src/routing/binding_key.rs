@@ -1,0 +1,156 @@
+use crate::{BindingKeyFragment, Message};
+
+pub(crate) mod proto {
+    #[derive(Clone, prost::Message)]
+    pub struct BindingKey {
+        #[prost(string, repeated, tag = "1")]
+        pub parts: Vec<String>,
+    }
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct BindingKey(zebus_core::BindingKey);
+
+impl From<zebus_core::BindingKey> for BindingKey {
+    fn from(binding_key: zebus_core::BindingKey) -> Self {
+        Self(binding_key)
+    }
+}
+
+impl BindingKey {
+    pub(crate) fn create<M: Message>(message: &M) -> Self {
+        Self(message.get_binding())
+    }
+
+    pub fn fragment(&self, index: usize) -> Option<&BindingKeyFragment> {
+        if let Some(ref fragments) = self.0.fragments {
+            fragments.get(index)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.fragments.is_none()
+    }
+
+    pub fn as_proto(&self) -> proto::BindingKey {
+        let parts = if let Some(ref fragments) = self.0.fragments {
+            fragments
+                .iter()
+                .map(|fragment| match fragment {
+                    BindingKeyFragment::Value(s) => s.clone(),
+                    BindingKeyFragment::Star => "*".to_string(),
+                    BindingKeyFragment::Sharp => "#".to_string(),
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
+        proto::BindingKey { parts }
+    }
+
+    pub fn into_proto(self) -> proto::BindingKey {
+        let parts = if let Some(fragments) = self.0.fragments {
+            fragments
+                .into_iter()
+                .map(|fragment| match fragment {
+                    BindingKeyFragment::Value(s) => s,
+                    BindingKeyFragment::Star => "*".to_string(),
+                    BindingKeyFragment::Sharp => "#".to_string(),
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
+        proto::BindingKey { parts }
+    }
+}
+
+impl From<Vec<&str>> for BindingKey {
+    fn from(parts: Vec<&str>) -> Self {
+        let parts = parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        Self(parts.into())
+    }
+}
+
+impl From<Vec<String>> for BindingKey {
+    fn from(parts: Vec<String>) -> Self {
+        Self(parts.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zebus_core::fragment;
+
+    #[derive(crate::Command)]
+    #[zebus(namespace = "Abc.Test")]
+    struct RoutableCommand {
+        #[zebus(routing_position = 1)]
+        name: String,
+
+        #[zebus(routing_position = 2)]
+        id: u32,
+    }
+
+    #[derive(crate::Command)]
+    #[zebus(namespace = "Abc.Test")]
+    struct UnorderedRoutableCommand {
+        #[zebus(routing_position = 3)]
+        name: String,
+
+        #[zebus(routing_position = 1)]
+        id: u32,
+
+        #[zebus(routing_position = 2)]
+        flag: bool,
+    }
+
+    #[test]
+    fn default_is_empty() {
+        assert_eq!(BindingKey::default().is_empty(), true);
+    }
+
+    #[test]
+    fn create_from_routable_command() {
+        let cmd = RoutableCommand {
+            name: "routable_command".into(),
+            id: 9087,
+        };
+
+        let binding_key = BindingKey::create(&cmd);
+        assert_eq!(
+            binding_key.fragment(0),
+            Some(&fragment!["routable_command"])
+        );
+        assert_eq!(binding_key.fragment(1), Some(&fragment![9087]));
+        assert_eq!(binding_key.fragment(2), None);
+        assert_eq!(binding_key, vec!["routable_command", "9087"].into());
+    }
+
+    #[test]
+    fn create_from_unordered_routable_command() {
+        let cmd = UnorderedRoutableCommand {
+            name: "unordered_routable_command".into(),
+            id: 9087,
+            flag: true,
+        };
+
+        let binding_key = BindingKey::create(&cmd);
+        assert_eq!(
+            binding_key.fragment(2),
+            Some(&fragment!["unordered_routable_command"])
+        );
+        assert_eq!(binding_key.fragment(0), Some(&fragment![9087]));
+        assert_eq!(binding_key.fragment(1), Some(&fragment![true]));
+        assert_eq!(binding_key.fragment(4), None);
+        assert_eq!(
+            binding_key,
+            vec!["9087", "true", "unordered_routable_command"].into()
+        );
+    }
+}

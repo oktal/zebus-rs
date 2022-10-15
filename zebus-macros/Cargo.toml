@@ -1,0 +1,14 @@
+[package]
+name = "zebus-macros"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.65"
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "1.0" }
+zebus-core = { version = "0.1.0", path = "../zebus-core" }
+
+[lib]
+proc-macro = true
