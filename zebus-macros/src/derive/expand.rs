@@ -1,10 +1,13 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{hash_map::Entry, HashMap};
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DataStruct, DeriveInput, Fields, spanned::Spanned};
+use syn::{spanned::Spanned, Data, DataStruct, DeriveInput, Fields};
 
-use super::{field::Field, attrs::{ZebusStructAttrs, find_attrs}};
+use super::{
+    attrs::{find_attrs, ZebusStructAttrs},
+    field::Field,
+};
 
 /// A field with a `routing_position` attribute
 struct RoutingField {
@@ -53,7 +56,7 @@ fn routing_fields<'a>(fields: &[Field]) -> syn::Result<Vec<RoutingField>> {
                         format!("duplicated field with routing_position. already defined by `{orig_field_name}`"),
                     )
                 );
-            },
+            }
             Entry::Vacant(e) => e.insert(field),
         };
     }
@@ -147,7 +150,10 @@ fn message_impl(
     routing_fields: &[RoutingField],
     derive: proc_macro2::TokenStream,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let namespace = attrs.namespace.ok_or(syn::Error::new(attrs.span.unwrap_or(ident.span()), "missing required attribute `namespace`"))?;
+    let namespace = attrs.namespace.ok_or(syn::Error::new(
+        attrs.span.unwrap_or(ident.span()),
+        "missing required attribute `namespace`",
+    ))?;
     let name = ident.to_string();
     let full_name = format!("{namespace}.{name}");
 
@@ -210,9 +216,18 @@ fn message(input: TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<
             fields: Fields::Named(fields),
             ..
         }) => Ok(fields.named.into_iter().collect::<Vec<_>>()),
-        Data::Struct(..) => Err(syn::Error::new(span, "Command can bot derive for a struct with unnamed fields")),
-        Data::Enum(..) => Err(syn::Error::new(span, "Command can not be derived for an enum")),
-        Data::Union(..) => Err(syn::Error::new(span, "Command can not be derived for a union")),
+        Data::Struct(..) => Err(syn::Error::new(
+            span,
+            "Command can bot derive for a struct with unnamed fields",
+        )),
+        Data::Enum(..) => Err(syn::Error::new(
+            span,
+            "Command can not be derived for an enum",
+        )),
+        Data::Union(..) => Err(syn::Error::new(
+            span,
+            "Command can not be derived for a union",
+        )),
     }?;
 
     let root_attrs: ZebusStructAttrs = find_attrs(&input.attrs[..], "zebus")?;
@@ -236,9 +251,9 @@ fn message(input: TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<
 }
 
 pub(crate) fn command(input: TokenStream) -> syn::Result<TokenStream> {
-    message(input, quote!{ ::zebus_core::Command })
+    message(input, quote! { ::zebus_core::Command })
 }
 
 pub(crate) fn event(input: TokenStream) -> syn::Result<TokenStream> {
-    message(input, quote!{ ::zebus_core::Event })
+    message(input, quote! { ::zebus_core::Event })
 }

@@ -7,6 +7,12 @@ pub struct MessageId {
     value: Guid,
 }
 
+impl MessageId {
+    pub fn to_uuid(&self) -> uuid::Uuid {
+        self.value.to_uuid()
+    }
+}
+
 impl From<uuid::Uuid> for MessageId {
     fn from(uuid: uuid::Uuid) -> Self {
         Self { value: uuid.into() }

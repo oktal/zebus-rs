@@ -1,9 +1,9 @@
-use crate::{PeerId, proto};
+use crate::{proto, Peer};
 
 #[derive(Clone, prost::Message)]
 pub struct PeerDescriptor {
     #[prost(message, required, tag = 1)]
-    pub peer: PeerId,
+    pub peer: Peer,
 
     #[prost(message, repeated, tag = 2)]
     pub subscriptions: Vec<proto::Subscription>,

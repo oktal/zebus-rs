@@ -6,6 +6,13 @@ pub struct Guid {
     hi: u64,
 }
 
+impl Guid {
+    pub fn to_uuid(&self) -> uuid::Uuid {
+        let (lo, hi) = (self.lo, self.hi);
+        uuid::Uuid::from_u64_pair(lo, hi)
+    }
+}
+
 impl From<uuid::Uuid> for Guid {
     fn from(uuid: uuid::Uuid) -> Self {
         let (lo, hi) = uuid.as_u64_pair();
@@ -26,6 +33,7 @@ pub enum TimeSpanScale {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
 pub enum DateTimeKind {
     Unspecified = 0,
     Utc = 1,
@@ -41,7 +49,6 @@ pub struct TimeSpan {
     pub scale: i32,
 }
 
-
 #[derive(Copy, Clone, prost::Message)]
 pub struct DateTime {
     #[prost(int64, tag = 1)]
@@ -52,4 +59,14 @@ pub struct DateTime {
 
     #[prost(enumeration = "DateTimeKind", tag = 3)]
     pub kind: i32,
+}
+
+impl From<chrono::DateTime<chrono::Utc>> for DateTime {
+    fn from(dt: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            value: (dt.timestamp_nanos() / 100),
+            scale: TimeSpanScale::Ticks as i32,
+            kind: DateTimeKind::Utc as i32,
+        }
+    }
 }

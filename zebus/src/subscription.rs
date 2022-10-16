@@ -1,6 +1,6 @@
 use std::any::TypeId;
 
-use crate::{BindingKey, MessageTypeId, MessageTypeDescriptor};
+use crate::{BindingKey, MessageTypeDescriptor, MessageTypeId};
 use crate::{Message, MessageBinding};
 
 pub(crate) mod proto {
@@ -17,7 +17,7 @@ pub(crate) mod proto {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Subscription {
     message_type_id: MessageTypeId,
-    binding_key: BindingKey
+    binding_key: BindingKey,
 }
 
 impl Subscription {
@@ -40,14 +40,14 @@ impl Subscription {
             full_name: M::name().to_string(),
             r#type: TypeId::of::<M>(),
             is_persistent: !M::TRANSIENT,
-            is_infrastructure: M::INFRASTRUCTURE
+            is_infrastructure: M::INFRASTRUCTURE,
         };
 
         let message_type_id = MessageTypeId::from_descriptor(message_descriptor);
 
         Self {
             message_type_id,
-            binding_key
+            binding_key,
         }
     }
 

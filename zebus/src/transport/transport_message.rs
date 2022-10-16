@@ -1,3 +1,5 @@
+use crate::{Message, Peer};
+
 use crate::{message_type_id::proto, transport::OriginatorInfo, MessageId, PeerId};
 
 /// Envelope for a message send through the bus
@@ -34,5 +36,55 @@ impl TransportMessage {
     /// Returns `true` if this message is persistent
     pub fn is_persistent(&self) -> bool {
         self.persistent_peer_ids.len() > 0
+    }
+
+    pub(crate) fn create<M: Message + prost::Message>(
+        sender: &Peer,
+        environment: String,
+        message: &M,
+    ) -> (uuid::Uuid, Self) {
+        let uuid = uuid::Uuid::new_v4();
+        let id = MessageId::from(uuid.clone());
+        let message_type_id = crate::proto::MessageTypeId {
+            full_name: M::name().to_string(),
+        };
+
+        // TODO(oktal): Reuse buffer
+        let content = message.encode_to_vec();
+
+        let sender_id = sender.id.clone();
+        let sender_endpoint = sender.endpoint.clone();
+
+        // TODO(oktal): Correctly fill that up
+        let originator = OriginatorInfo {
+            sender_id,
+            sender_endpoint,
+            sender_machine_name: None,
+            initiator_user_name: None,
+        };
+
+        // Create TransportMessage
+        (
+            uuid,
+            Self {
+                id,
+                message_type_id,
+                content,
+                originator,
+                environment: Some(environment),
+                was_persisted: Some(false),
+                persistent_peer_ids: vec![],
+            },
+        )
+    }
+
+    pub(crate) fn is<M: Message>(&self) -> bool {
+        self.message_type_id.is::<M>()
+    }
+
+    pub(crate) fn decode_as<M: Message + prost::Message + Default>(
+        &self,
+    ) -> Option<Result<M, prost::DecodeError>> {
+        self.is::<M>().then_some(M::decode(&self.content[..]))
     }
 }

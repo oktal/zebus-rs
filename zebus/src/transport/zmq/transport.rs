@@ -1,16 +1,19 @@
-use prost::Message;
+use prost::{bytes::Bytes, Message};
 use std::{
     borrow::Cow,
     collections::HashMap,
     io::{self, Read, Write},
-    sync::{self, mpsc},
+    sync::{
+        self,
+        mpsc::{self, TryRecvError},
+    },
     thread::JoinHandle,
 };
 
 use crate::{
     transport::{
         zmq::{ZmqSocketOptions, ZmqTransportConfiguration},
-        MessageReceived, SendContext, Transport, TransportMessage,
+        Receiver, SendContext, Transport, TransportMessage,
     },
     Peer, PeerId,
 };
@@ -22,9 +25,14 @@ const OUTBOUND_THREAD_NAME: &'static str = "outbound";
 const INBOUND_THREAD_NAME: &'static str = "inbound";
 
 /// Associated Error type with zmq
+#[derive(Debug)]
 pub enum Error {
     /// Inbound error
     Inbound(inbound::Error),
+
+    /// A function call that returns an [`std::ffi::OsStr`] or [`std::ffi::OsString`] yield
+    /// invalid UTF-8 sequence
+    InvalidUtf8,
 
     /// Outbound error
     Outbound(outbound::Error),
@@ -65,14 +73,12 @@ enum Inner {
         options: ZmqSocketOptions,
         peer_id: PeerId,
         environment: String,
-        on_message_received: Box<dyn MessageReceived>,
     },
     Started {
         configuration: ZmqTransportConfiguration,
         options: ZmqSocketOptions,
         peer_id: PeerId,
         environment: String,
-        on_message_received: Box<dyn MessageReceived>,
 
         context: zmq::Context,
 
@@ -106,25 +112,28 @@ impl ZmqTransport {
     }
 }
 
-struct InboundWorker<C: Fn(&[u8]) + 'static + Send> {
+struct InboundWorker {
     shutdown_rx: mpsc::Receiver<()>,
     inbound_socket: ZmqInboundSocket,
-    on_message_received: C,
+    rcv_tx: tokio::sync::mpsc::Sender<TransportMessage>,
 }
 
-impl<C: Fn(&[u8]) + 'static + Send> InboundWorker<C> {
+impl InboundWorker {
     fn start(
         inbound_socket: ZmqInboundSocket,
-        on_message_received: C,
-    ) -> Result<(mpsc::Sender<()>, JoinHandle<()>), Error> {
+    ) -> Result<(mpsc::Sender<()>, Receiver, JoinHandle<()>), Error> {
         // Create channel to shutdown inbound worker thread
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+        // Create the channel to receive transport messages
+        // TODO(oktal): remove hardcoded bound limit
+        let (rcv_tx, rcv_rx) = tokio::sync::mpsc::channel(1024);
 
         // Create inbound worker
         let mut inbound_worker = InboundWorker {
             shutdown_rx,
             inbound_socket,
-            on_message_received,
+            rcv_tx,
         };
 
         // Spawn inbound thread
@@ -135,20 +144,28 @@ impl<C: Fn(&[u8]) + 'static + Send> InboundWorker<C> {
             })
             .map_err(Error::Io)?;
 
-        Ok((shutdown_tx, inbound_thread))
+        Ok((shutdown_tx, rcv_rx, inbound_thread))
     }
 
     fn run(&mut self) {
-        let mut rcv_buf = vec![0u8; 1024];
         loop {
-            if let Err(_) = self.shutdown_rx.try_recv() {
+            if let Ok(_) = self.shutdown_rx.try_recv() {
                 break;
             }
+            let mut rcv_buf = [0u8; 4096];
 
             // TODO(oktal): Handle error properly
-            self.inbound_socket.read_to_end(&mut rcv_buf).unwrap();
-
-            rcv_buf.clear();
+            match self.inbound_socket.read(&mut rcv_buf[..]) {
+                Ok(size) => {
+                    match TransportMessage::decode(&rcv_buf[..size]) {
+                        Ok(message) => self.rcv_tx.blocking_send(message).unwrap(),
+                        Err(e) => eprintln!("Failed to decode: {e}. bytes {rcv_buf:?}"),
+                    };
+                }
+                Err(_) => {
+                    //println!("{}", e.kind());
+                }
+            };
         }
     }
 }
@@ -268,12 +285,7 @@ impl OutboundWorker {
 impl Transport for ZmqTransport {
     type Err = Error;
 
-    fn configure(
-        &mut self,
-        peer_id: PeerId,
-        environment: String,
-        on_message_received: impl MessageReceived,
-    ) -> Result<(), Self::Err> {
+    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Unconfigured {
                 configuration,
@@ -285,7 +297,6 @@ impl Transport for ZmqTransport {
                     options,
                     peer_id,
                     environment,
-                    on_message_received: Box::new(on_message_received),
                 }),
                 Ok(()),
             ),
@@ -295,14 +306,13 @@ impl Transport for ZmqTransport {
         res
     }
 
-    fn start(&mut self) -> Result<(), Self::Err> {
+    fn start(&mut self) -> Result<Receiver, Self::Err> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Configured {
                 configuration,
                 options,
                 peer_id,
                 environment,
-                on_message_received,
             }) => {
                 // Create zmq context
                 let context = zmq::Context::new();
@@ -316,14 +326,16 @@ impl Transport for ZmqTransport {
                 );
 
                 // Bind the inbound socket
-                let inbound_endpoint = inbound_socket.bind().map_err(Error::Inbound)?;
+                let mut inbound_endpoint = inbound_socket.bind().map_err(Error::Inbound)?;
+                let hostname = gethostname::gethostname();
+                let host_str = hostname.to_str().ok_or(Error::InvalidUtf8)?;
+                inbound_endpoint = inbound_endpoint.replace("0.0.0.0", &host_str);
 
                 // Start outbound worker
                 let (actions_tx, outbound_thread) = OutboundWorker::start(context.clone())?;
 
                 // Start inbound worker
-                let (shutdown_tx, inbound_thread) =
-                    InboundWorker::start(inbound_socket, |bytes| {})?;
+                let (shutdown_tx, rcv_rx, inbound_thread) = InboundWorker::start(inbound_socket)?;
 
                 (
                     // Transition to Started state
@@ -332,7 +344,6 @@ impl Transport for ZmqTransport {
                         options,
                         peer_id,
                         environment,
-                        on_message_received,
                         context,
                         inbound_endpoint,
                         inbound_thread,
@@ -340,7 +351,7 @@ impl Transport for ZmqTransport {
                         actions_tx,
                         shutdown_tx,
                     }),
-                    Ok(()),
+                    Ok(rcv_rx),
                 )
             }
             x => (x, Err(Error::InvalidOperation)),

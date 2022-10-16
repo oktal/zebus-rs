@@ -12,18 +12,20 @@ pub struct RoutingField {
 pub enum BindingKeyFragment {
     Value(String),
     Star,
-    Sharp
+    Sharp,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BindingKey {
-    pub fragments: Option<Vec<BindingKeyFragment>>
+    pub fragments: Option<Vec<BindingKeyFragment>>,
 }
 
 impl From<Vec<String>> for BindingKey {
     fn from(value: Vec<String>) -> Self {
         let fragments = value.into_iter().map(BindingKeyFragment::Value).collect();
-        Self { fragments: Some(fragments) }
+        Self {
+            fragments: Some(fragments),
+        }
     }
 }
 
@@ -50,7 +52,7 @@ impl<T> Default for Binding<T> {
     fn default() -> Self {
         Self {
             fragment: BindingKeyFragment::Star,
-            _phantom: PhantomData
+            _phantom: PhantomData,
         }
     }
 }
@@ -87,7 +89,6 @@ pub trait Command: Message {}
 
 /// A message that can be published to multiple peers, notifying that an action has been performed
 pub trait Event: Message {}
-
 
 #[macro_export]
 macro_rules! fragment {

@@ -9,4 +9,9 @@ impl PeerId {
     pub fn new(value: String) -> Self {
         Self { value }
     }
+
+    pub(crate) fn directory(instance_id: usize) -> Self {
+        let value = format!("Abc.Zebus.Directory.{instance_id}");
+        Self { value }
+    }
 }

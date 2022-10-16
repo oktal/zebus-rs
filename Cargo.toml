@@ -2,5 +2,7 @@
 members = [
     "zebus",
     "zebus-core",
-    "zebus-macros"
+    "zebus-macros",
+
+    "examples"
 ]

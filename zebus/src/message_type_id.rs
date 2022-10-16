@@ -1,12 +1,19 @@
+use crate::MessageTypeDescriptor;
 use std::any::TypeId;
 
-use crate::MessageTypeDescriptor;
-
 pub(crate) mod proto {
+    use crate::Message;
+
     #[derive(Clone, prost::Message)]
     pub struct MessageTypeId {
         #[prost(string, tag = "1")]
         pub full_name: String,
+    }
+
+    impl MessageTypeId {
+        pub fn is<M: Message>(&self) -> bool {
+            self.full_name == M::name()
+        }
     }
 }
 

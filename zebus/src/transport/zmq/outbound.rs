@@ -5,6 +5,7 @@ use zmq::Context;
 use crate::{transport::zmq::ZmqSocketOptions, PeerId};
 
 /// Outbound socket error
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     /// Zmq error
     Zmq(zmq::Error),

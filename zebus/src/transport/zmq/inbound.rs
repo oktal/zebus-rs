@@ -3,6 +3,7 @@ use crate::PeerId;
 use std::io::{self, Read};
 
 /// Inbound socket error
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum Error {
     /// Zmq error
     Zmq(zmq::Error),
