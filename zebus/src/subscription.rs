@@ -62,10 +62,8 @@ impl Subscription {
 
 #[cfg(test)]
 mod tests {
-    use zebus_core::binding_key;
-
     use super::*;
-    use crate::BindingKey;
+    use zebus_core::binding_key;
 
     #[derive(crate::Command)]
     #[zebus(namespace = "Abc.Test")]

@@ -113,7 +113,7 @@ macro_rules! binding_key {
 
     ($($x:tt),*) => {
         zebus_core::BindingKey {
-            fragments: Some(vec![$(crate::fragment![$x]),+])
+            fragments: Some(vec![$(::zebus_core::fragment![$x]),+])
         }
     };
 }

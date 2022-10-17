@@ -5,7 +5,9 @@
 //! For a given definition of a message:
 //!
 //! ```
-//! #[derive(zebus::Command)]
+//! use zebus_macros::Command;
+//!
+//! #[derive(Command)]
 //! #[zebus(namespace = "Abc.Namespace")]
 //! struct MyCommand {
 //!     pub name: String,
@@ -19,7 +21,7 @@
 //! ```
 //! [`Command`] and [`Event`] derive proc macros will expand to the following:
 //!
-//! ```
+//! ```ignore
 //! struct MyCommandBinding {
 //!     pub segment: Binding<u32>,
 //!
@@ -40,7 +42,7 @@
 //! }
 //! ```
 //!
-//! ```
+//! ```ignore
 //! impl Message for MyCommand {
 //!     fn name() -> &'static str {
 //!         "Abc.Namespace.MyCommand"
