@@ -1,6 +1,6 @@
 use crate::{proto, Message};
 
-#[derive(prost::Message, crate::Event)]
+#[derive(Clone, prost::Message, crate::Event)]
 #[zebus(namespace = "Abc.Zebus.Core")]
 pub struct MessageExecutionCompleted {
     #[prost(message, required, tag = 1)]

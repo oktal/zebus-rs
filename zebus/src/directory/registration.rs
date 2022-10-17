@@ -1,6 +1,7 @@
 use std::{
     future::Future,
     pin::Pin,
+    ptr::NonNull,
     task::{Context, Poll},
     time::Duration,
 };
@@ -14,38 +15,56 @@ use crate::{
     Peer,
 };
 
-/// Provides a [`std::future::Future`] of a registration request to a directory
-/// Safety note:
-/// Even though there is no direct `unsafe` call, this type, and especially the
-/// [`std::future::Future`] implementation of our type is not safe regarding futures.
-///
-/// The unsafety-ness of the type is due to the fact that we are using a transport
-/// [`Receiver`] to receive messsages from the [`Transport`] layer, which is a tokio mpsc
-/// receiver. However, as implied by their name, receivers are "single consumer", which means
-/// that we can not clone them. The lack of `Clone` means that we need to move the `Receiver`
-/// inside our future, but we need to give it back to the original caller of the `register`
-/// function to be able to keep receiving messages.
-///
-/// This is where the `poll` implementation of the [`std::future::Future`] is a little bit tricky
-/// as we need to move back the `Receiver` when resolving the future, but we are behind a
-/// [`std::pin::Pin`]. To safely move the [`Receiver`] back, we then wrap it inside an `Option`
-/// that we `take()` every-time we attempt to `poll` the tokio receiver. When the corresponding
-/// [`RegisterPeerResponse`] has been successfully received, we then resolve the future (by
-/// returning `Poll::Pending` and *only at that moment*, move the receiver back to the output
-/// of the future.
-pub(crate) struct RegistrationFuture {
+#[derive(Debug, Clone)]
+pub enum RegistrationError {
+    /// Failed to deserialize a [`TransportMessage`]
+    Decode(TransportMessage, prost::DecodeError),
+
+    /// Failed to deserialize a [`MessageExecutionCompleted`]
+    InvalidResponse(MessageExecutionCompleted, prost::DecodeError),
+
+    /// An unexpected message was received as a response
+    UnexpectedMessage(TransportMessage),
+}
+
+#[derive(Debug)]
+pub struct Registration {
+    pub(crate) pending_messages: Vec<TransportMessage>,
+    pub(crate) result: Result<RegisterPeerResponse, RegistrationError>,
+}
+
+impl Registration {
+    fn new(
+        pending_messages: Vec<TransportMessage>,
+        result: Result<RegisterPeerResponse, RegistrationError>,
+    ) -> Self {
+        Self {
+            pending_messages,
+            result,
+        }
+    }
+}
+
+struct Inner {
     /// The [`RegisterPeerCommand`] original message id
     message_id: uuid::Uuid,
 
-    /// Receiver that we can poll to check whether we received a message from the [`Transport`]
-    /// layer
-    receiver: Option<transport::Receiver>,
+    /// The [`Receiver`] from which to receive transport messages
+    receiver: NonNull<transport::Receiver>,
+
+    /// List of messages that were received during registration
+    pending_messages: Vec<TransportMessage>,
+}
+
+/// Provides a [`std::future::Future`] of a registration request to a directory
+pub(crate) struct RegistrationFuture {
+    inner: Option<Inner>,
 }
 
 impl RegistrationFuture {
-    fn register<T: Transport>(
+    unsafe fn register<T: Transport>(
         transport: &mut T,
-        receiver: transport::Receiver,
+        receiver: &transport::Receiver,
         self_peer: Peer,
         environment: String,
         directory_endpoint: Peer,
@@ -63,9 +82,14 @@ impl RegistrationFuture {
         let (message_id, message) =
             TransportMessage::create(&self_peer, environment, &register_command);
 
+        let receiver = NonNull::from(receiver);
+
         let registration = RegistrationFuture {
-            message_id,
-            receiver: Some(receiver),
+            inner: Some(Inner {
+                message_id,
+                receiver,
+                pending_messages: vec![],
+            }),
         };
 
         transport.send(
@@ -82,49 +106,107 @@ impl RegistrationFuture {
 }
 
 impl Future for RegistrationFuture {
-    type Output = (
-        Result<RegisterPeerResponse, prost::DecodeError>,
-        transport::Receiver,
-    );
+    type Output = Registration;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (receiver, res) = match self.receiver.take() {
-            Some(mut receiver) => {
-                match receiver.poll_recv(cx) {
+        let (inner, res) = match self.inner.take() {
+            Some(Inner {
+                message_id,
+                mut receiver,
+                mut pending_messages,
+            }) => {
+                // Safety: this is safe  because
+                // 1. We constructed our state from a reference, so we are guaranteed that the
+                //    pointer is non-null
+                // 2. The initial caller guarantees that the `receiver` will live long enough
+                match unsafe { receiver.as_mut() }.poll_recv(cx) {
                     Poll::Ready(Some(transport_message)) => {
                         if let Some(message) =
                             transport_message.decode_as::<MessageExecutionCompleted>()
                         {
-                            // TODO(oktal): Correctly bubble up the error to the future
-                            let message_execution_completed = message.unwrap();
-                            // TODO(oktal): check that the `source_command_id` is `message_id` and error
-                            // otherwise
-                            if let Some(response) =
-                                message_execution_completed.decode_as::<RegisterPeerResponse>()
-                            {
-                                (None, Poll::Ready((response, receiver)))
-                            } else {
-                                // TODO(oktal): accumulate messages while waiting for RegisterPeerResponse
-                                (Some(receiver), Poll::Pending)
+                            match message {
+                                Ok(message_execution_completed) => {
+                                    // TODO(oktal): check that the `source_command_id` is `message_id` and error
+                                    // otherwise We received the `RegisterPeerResponse`, we can resolve the
+                                    // future
+                                    if let Some(response) = message_execution_completed
+                                        .decode_as::<RegisterPeerResponse>()
+                                    {
+                                        (
+                                            None,
+                                            Poll::Ready(Registration::new(
+                                                pending_messages,
+                                                response.map_err(|e| {
+                                                    RegistrationError::InvalidResponse(
+                                                        message_execution_completed,
+                                                        e,
+                                                    )
+                                                }),
+                                            )),
+                                        )
+                                    } else {
+                                        // We received a message other than `RegisterPeerResponse`,
+                                        // save it and keep waiting for the `RegisterPeerResponse`
+                                        pending_messages.push(transport_message);
+                                        (
+                                            Some(Inner {
+                                                message_id,
+                                                receiver,
+                                                pending_messages,
+                                            }),
+                                            Poll::Pending,
+                                        )
+                                    }
+                                }
+                                // We failed to deserialize the `MessageExecutionCompleted`,
+                                // resolve the future with an error
+                                Err(e) => (
+                                    None,
+                                    Poll::Ready(Registration::new(
+                                        pending_messages,
+                                        Err(RegistrationError::Decode(transport_message, e)),
+                                    )),
+                                ),
                             }
                         } else {
-                            (Some(receiver), Poll::Pending)
+                            // We received a message other than `MessageExecutionCompleted`, save
+                            // it and keep waiting for the `RegisterPeerResponse`
+                            pending_messages.push(transport_message);
+                            (
+                                Some(Inner {
+                                    message_id,
+                                    receiver,
+                                    pending_messages,
+                                }),
+                                Poll::Pending,
+                            )
                         }
                     }
-                    _ => (Some(receiver), Poll::Pending),
+                    // We did not receive yet, keep waiting
+                    _ => (
+                        Some(Inner {
+                            message_id,
+                            receiver,
+                            pending_messages,
+                        }),
+                        Poll::Pending,
+                    ),
                 }
             }
             _ => panic!("attempted to poll already resolved future"),
         };
 
-        self.receiver = receiver;
+        self.inner = inner;
         res
     }
 }
 
-pub(crate) fn register<T: Transport>(
+/// Initiate a new registration to a peer directory
+/// # Safety
+/// The caller must guarantee that the lifetime of the `receiver` exceeds the lifetime of the future
+pub(crate) unsafe fn register<T: Transport>(
     transport: &mut T,
-    receiver: transport::Receiver,
+    receiver: &transport::Receiver,
     self_peer: Peer,
     environment: String,
     directory_endpoint: Peer,

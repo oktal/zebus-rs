@@ -8,7 +8,7 @@ use crate::{
     bus_configuration::{
         DEFAULT_MAX_BATCH_SIZE, DEFAULT_REGISTRATION_TIMEOUT, DEFAULT_START_REPLAY_TIMEOUT,
     },
-    directory,
+    directory::{self, Registration},
     transport::{self, SendContext, Transport, TransportMessage},
     Bus, BusConfiguration, Command, Peer, PeerId,
 };
@@ -20,7 +20,8 @@ pub enum Error<E> {
     /// Transport error
     Transport(E),
 
-    Timeout,
+    /// None of the directories tried for registration succeeded
+    Registration,
 
     /// An operation was attempted while the [`Bus`] was in an invalid state
     InvalidOperation,
@@ -58,6 +59,55 @@ async fn receive(
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, CommandPromise>>>,
 ) {
     let message = receiver.recv().await;
+}
+
+fn try_register<T: Transport>(
+    transport: &mut T,
+    receiver: &transport::Receiver,
+    runtime: &tokio::runtime::Runtime,
+    self_peer: Peer,
+    environment: String,
+    configuration: &BusConfiguration,
+) -> Result<Registration, Error<T::Err>> {
+    let directory_peers =
+        configuration
+            .directory_endpoints
+            .iter()
+            .enumerate()
+            .map(|(idx, endpoint)| {
+                let peer_id = PeerId::directory(idx);
+
+                Peer {
+                    id: peer_id,
+                    endpoint: endpoint.to_string(),
+                    is_up: true,
+                    is_responding: true,
+                }
+            });
+
+    let registration_timeout = configuration.registration_timeout;
+
+    for directory_peer in directory_peers {
+        // Safety: since we are blocking on the future, we are guaranteed that the `receiver` will
+        // live long enough
+        let registration = unsafe {
+            directory::register(
+                transport,
+                receiver,
+                self_peer.clone(),
+                environment.clone(),
+                directory_peer,
+            )
+        }
+        .map_err(Error::Transport)?;
+
+        match runtime.block_on(async { registration.with_timeout(registration_timeout).await }) {
+            Ok(registration) => return Ok(registration),
+            Err(_) => {}
+        }
+    }
+
+    Err(Error::Registration)
 }
 
 struct BusImpl<T: Transport> {
@@ -122,26 +172,10 @@ impl<T: Transport> Bus for BusImpl<T> {
                 environment,
             }) => {
                 // Start transport
-                let mut receiver = transport.start().map_err(Error::Transport)?;
+                let receiver = transport.start().map_err(Error::Transport)?;
                 let endpoint = transport.inbound_endpoint().map_err(Error::Transport)?;
 
                 // Register to directory
-                let directory_endpoints =
-                    configuration
-                        .directory_endpoints
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, endpoint)| {
-                            let peer_id = PeerId::directory(idx);
-
-                            Peer {
-                                id: peer_id,
-                                endpoint: endpoint.to_string(),
-                                is_up: true,
-                                is_responding: true,
-                            }
-                        });
-
                 let self_peer = Peer {
                     id: peer_id.clone(),
                     endpoint: endpoint.to_string(),
@@ -149,38 +183,15 @@ impl<T: Transport> Bus for BusImpl<T> {
                     is_responding: true,
                 };
 
-                let registration_timeout = configuration.registration_timeout;
-
-                for directory_endpoint in directory_endpoints {
-                    println!("Attempting to register to {directory_endpoint:?}");
-
-                    let registration = directory::register(
-                        &mut transport,
-                        receiver,
-                        self_peer.clone(),
-                        environment.clone(),
-                        directory_endpoint,
-                    )
-                    .map_err(Error::Transport)?;
-
-                    let response = runtime
-                        .block_on(async { registration.with_timeout(registration_timeout).await });
-
-                    receiver = match response {
-                        Ok((Ok(register_peer_response), receiver)) => {
-                            println!("Successfully registered !");
-                            println!("{register_peer_response:?}");
-                            receiver
-                        }
-                        Ok((Err(e), receiver)) => {
-                            eprintln!("Failed to register {e}");
-                            receiver
-                        }
-                        Err(_) => {
-                            panic!("Registration timeout !");
-                        }
-                    };
-                }
+                let registration = try_register(
+                    &mut transport,
+                    &receiver,
+                    &runtime,
+                    self_peer.clone(),
+                    environment.clone(),
+                    &configuration,
+                )?;
+                println!("Successfully registered {registration:?}");
 
                 let pending_commands = Arc::new(Mutex::new(HashMap::new()));
                 let rx_handle = runtime.spawn(receive(receiver, Arc::clone(&pending_commands)));
