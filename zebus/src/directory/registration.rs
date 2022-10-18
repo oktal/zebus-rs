@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::{
     future::Future,
     pin::Pin,
@@ -7,6 +8,7 @@ use std::{
 };
 
 use chrono::Utc;
+use thiserror::Error;
 use tokio::time::Timeout;
 
 use super::{PeerDescriptor, RegisterPeerCommand, RegisterPeerResponse};
@@ -15,16 +17,26 @@ use crate::{
     Peer,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Error)]
 pub enum RegistrationError {
+    /// Transport error
+    #[error("an error occured during a transport operation {0}")]
+    Transport(Box<dyn std::error::Error>),
+
     /// Failed to deserialize a [`TransportMessage`]
+    #[error("error decoding transport message {0:?} {1}")]
     Decode(TransportMessage, prost::DecodeError),
 
     /// Failed to deserialize a [`MessageExecutionCompleted`]
+    #[error("invalid response from directory {0:?} {1}")]
     InvalidResponse(MessageExecutionCompleted, prost::DecodeError),
 
     /// An unexpected message was received as a response
+    #[error("received unexpected from directory {0:?}")]
     UnexpectedMessage(TransportMessage),
+
+    #[error("timeout after {0:?}")]
+    Timeout(Duration),
 }
 
 #[derive(Debug)]
@@ -68,7 +80,7 @@ impl RegistrationFuture {
         self_peer: Peer,
         environment: String,
         directory_endpoint: Peer,
-    ) -> Result<Self, T::Err> {
+    ) -> Result<Self, RegistrationError> {
         let utc_now = Utc::now();
 
         let descriptor = PeerDescriptor {
@@ -92,11 +104,13 @@ impl RegistrationFuture {
             }),
         };
 
-        transport.send(
-            std::iter::once(directory_endpoint),
-            message.clone(),
-            SendContext::default(),
-        )?;
+        transport
+            .send(
+                std::iter::once(directory_endpoint),
+                message.clone(),
+                SendContext::default(),
+            )
+            .map_err(|e| RegistrationError::Transport(e.into()))?;
         Ok(registration)
     }
 
@@ -114,6 +128,7 @@ impl Future for RegistrationFuture {
                 message_id,
                 mut receiver,
                 mut pending_messages,
+                ..
             }) => {
                 // Safety: this is safe  because
                 // 1. We constructed our state from a reference, so we are guaranteed that the
@@ -209,13 +224,37 @@ pub(crate) unsafe fn register<T: Transport>(
     receiver: &transport::Receiver,
     self_peer: Peer,
     environment: String,
-    directory_endpoint: Peer,
-) -> Result<RegistrationFuture, T::Err> {
-    RegistrationFuture::register(
-        transport,
-        receiver,
-        self_peer,
-        environment,
-        directory_endpoint,
-    )
+    directory_peer: Peer,
+) -> Result<RegistrationFuture, RegistrationError> {
+    RegistrationFuture::register(transport, receiver, self_peer, environment, directory_peer)
+}
+
+pub(crate) fn block_on<T: Transport>(
+    runtime: &tokio::runtime::Runtime,
+    transport: &mut T,
+    receiver: &transport::Receiver,
+    self_peer: Peer,
+    environment: String,
+    directory_peer: Peer,
+    timeout: Duration,
+) -> Result<Registration, RegistrationError> {
+    // Safety: since we are blocking on the future, we are guaranteed that the `receiver` will
+    // live long enough
+    let registration = unsafe {
+        register(
+            transport,
+            receiver,
+            self_peer.clone(),
+            environment.clone(),
+            directory_peer.clone(),
+        )
+    }?;
+
+    match runtime.block_on(async { registration.with_timeout(timeout).await }) {
+        Ok(registration) => match registration.result {
+            Ok(_) => Ok(registration),
+            Err(e) => Err(e),
+        },
+        Err(_) => Err(RegistrationError::Timeout(timeout)),
+    }
 }

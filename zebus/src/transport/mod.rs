@@ -18,7 +18,7 @@ pub type Receiver = tokio::sync::mpsc::Receiver<TransportMessage>;
 /// Transport layer trait
 pub trait Transport {
     /// The associated error type which can be returned from the transport layer
-    type Err: std::fmt::Debug;
+    type Err: std::error::Error + 'static;
 
     /// Configure this transport layer with a [`PeerId`]
     fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err>;

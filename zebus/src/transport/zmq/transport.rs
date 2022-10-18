@@ -1,14 +1,12 @@
-use prost::{bytes::Bytes, Message};
+use prost::Message;
 use std::{
     borrow::Cow,
     collections::HashMap,
     io::{self, Read, Write},
-    sync::{
-        self,
-        mpsc::{self, TryRecvError},
-    },
+    sync::{self, mpsc},
     thread::JoinHandle,
 };
+use thiserror::Error;
 
 use crate::{
     transport::{
@@ -25,29 +23,36 @@ const OUTBOUND_THREAD_NAME: &'static str = "outbound";
 const INBOUND_THREAD_NAME: &'static str = "inbound";
 
 /// Associated Error type with zmq
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
     /// Inbound error
+    #[error("receive error {0}")]
     Inbound(inbound::Error),
+
+    /// Outbound error
+    #[error("send error {0}")]
+    Outbound(outbound::Error),
 
     /// A function call that returns an [`std::ffi::OsStr`] or [`std::ffi::OsString`] yield
     /// invalid UTF-8 sequence
+    #[error("an invalid UTF-8 sequence was returned by an ffi function call")]
     InvalidUtf8,
 
-    /// Outbound error
-    Outbound(outbound::Error),
-
     /// IO Error
+    #[error("IO {0}")]
     Io(io::Error),
 
     /// Protobuf message encoding error
+    #[error("error encoding protobuf message {0}")]
     Encode(prost::EncodeError),
 
     /// Protobuf message decoding error
+    #[error("error decoding protobuf message {0}")]
     Decode(prost::DecodeError),
 
     /// An operation was attempted while the [`ZmqTransport`] was in an invalid state for the
     /// operation
+    #[error("An operation was attempted while the transport was not in a valid state")]
     InvalidOperation,
 }
 

@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex}, fmt,
 };
+
+use thiserror::Error;
 
 use crate::{
     bus::{CommandFuture, CommandResult},
@@ -16,14 +18,43 @@ use crate::{
 struct CommandPromise(tokio::sync::oneshot::Sender<CommandResult>);
 
 #[derive(Debug)]
-pub enum Error<E> {
+pub struct RegistrationError {
+    inner: Vec<(Peer, directory::RegistrationError)>,
+}
+
+impl fmt::Display for RegistrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "failed to register to directory:")?;
+        for failure in &self.inner {
+            writeln!(f, "    tried {}: {}", failure.0, failure.1)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl RegistrationError {
+    fn new() -> Self {
+        Self { inner: vec![] }
+    }
+
+    fn add(&mut self, peer: Peer, error: directory::RegistrationError) {
+        self.inner.push((peer, error))
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum Error {
     /// Transport error
-    Transport(E),
+    #[error("an error occured during a transport operation {0}")]
+    Transport(Box<dyn std::error::Error>),
 
     /// None of the directories tried for registration succeeded
-    Registration,
+    #[error("{0}")]
+    Registration(RegistrationError),
 
     /// An operation was attempted while the [`Bus`] was in an invalid state
+    #[error("An operation was attempted while the bus was not in a valid state")]
     InvalidOperation,
 }
 
@@ -68,7 +99,7 @@ fn try_register<T: Transport>(
     self_peer: Peer,
     environment: String,
     configuration: &BusConfiguration,
-) -> Result<Registration, Error<T::Err>> {
+) -> Result<Registration, Error> {
     let directory_peers =
         configuration
             .directory_endpoints
@@ -85,29 +116,24 @@ fn try_register<T: Transport>(
                 }
             });
 
-    let registration_timeout = configuration.registration_timeout;
-
+    let timeout = configuration.registration_timeout;
+    let mut error = RegistrationError::new();
     for directory_peer in directory_peers {
-        // Safety: since we are blocking on the future, we are guaranteed that the `receiver` will
-        // live long enough
-        let registration = unsafe {
-            directory::register(
-                transport,
-                receiver,
-                self_peer.clone(),
-                environment.clone(),
-                directory_peer,
-            )
-        }
-        .map_err(Error::Transport)?;
-
-        match runtime.block_on(async { registration.with_timeout(registration_timeout).await }) {
-            Ok(registration) => return Ok(registration),
-            Err(_) => {}
+        match directory::registration::block_on(
+            runtime,
+            transport,
+            receiver,
+            self_peer.clone(),
+            environment.clone(),
+            directory_peer.clone(),
+            timeout,
+        ) {
+            Ok(r) => return Ok(r),
+            Err(e) => error.add(directory_peer.clone(), e),
         }
     }
 
-    Err(Error::Registration)
+    Err(Error::Registration(error))
 }
 
 struct BusImpl<T: Transport> {
@@ -131,7 +157,7 @@ impl<T: Transport> BusImpl<T> {
 }
 
 impl<T: Transport> Bus for BusImpl<T> {
-    type Err = Error<T::Err>;
+    type Err = Error;
 
     fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
@@ -142,7 +168,7 @@ impl<T: Transport> Bus for BusImpl<T> {
             }) => {
                 transport
                     .configure(peer_id.clone(), environment.clone())
-                    .map_err(Error::Transport)?;
+                    .map_err(|e| Error::Transport(e.into()))?;
 
                 (
                     Some(State::Configured {
@@ -172,8 +198,10 @@ impl<T: Transport> Bus for BusImpl<T> {
                 environment,
             }) => {
                 // Start transport
-                let receiver = transport.start().map_err(Error::Transport)?;
-                let endpoint = transport.inbound_endpoint().map_err(Error::Transport)?;
+                let receiver = transport.start().map_err(|e| Error::Transport(e.into()))?;
+                let endpoint = transport
+                    .inbound_endpoint()
+                    .map_err(|e| Error::Transport(e.into()))?;
 
                 // Register to directory
                 let self_peer = Peer {
@@ -320,7 +348,7 @@ impl<T: Transport> BusBuilder<T> {
         self.with_configuration(configuration, environment)
     }
 
-    pub fn create(self) -> Result<impl Bus, CreateError<Error<T::Err>>> {
+    pub fn create(self) -> Result<impl Bus, CreateError<Error>> {
         let (transport, peer_id, configuration, environment) = (
             self.transport,
             self.peer_id.unwrap_or(Self::testing_peer_id()),

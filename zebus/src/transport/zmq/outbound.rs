@@ -1,16 +1,18 @@
 use std::io::{self, Write};
-
+use thiserror::Error;
 use zmq::Context;
 
 use crate::{transport::zmq::ZmqSocketOptions, PeerId};
 
 /// Outbound socket error
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum Error {
     /// Zmq error
+    #[error("zmq: {0}")]
     Zmq(zmq::Error),
 
     /// An operation was attempted while the socket was not in a valid state
+    #[error("An operation was attempted while the socket was not in a valid state")]
     InvalidOperation,
 }
 

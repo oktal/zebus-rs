@@ -7,7 +7,7 @@ pub struct CommandResult {
 pub struct CommandFuture(pub(crate) tokio::sync::oneshot::Receiver<CommandResult>);
 
 pub trait Bus {
-    type Err: std::fmt::Debug;
+    type Err: std::error::Error;
 
     fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err>;
 
