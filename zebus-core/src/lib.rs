@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{fmt, marker::PhantomData};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoutingField {
@@ -13,6 +13,26 @@ pub enum BindingKeyFragment {
     Value(String),
     Star,
     Sharp,
+}
+
+impl BindingKeyFragment {
+    pub fn is_star(&self) -> bool {
+        matches!(self, BindingKeyFragment::Star)
+    }
+
+    pub fn is_sharp(&self) -> bool {
+        matches!(self, BindingKeyFragment::Sharp)
+    }
+}
+
+impl fmt::Display for BindingKeyFragment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BindingKeyFragment::Value(s) => write!(f, "{s}"),
+            BindingKeyFragment::Star => write!(f, "*"),
+            BindingKeyFragment::Sharp => write!(f, "#"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

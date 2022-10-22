@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex}, fmt,
+    fmt,
+    sync::{Arc, Mutex},
 };
 
 use thiserror::Error;

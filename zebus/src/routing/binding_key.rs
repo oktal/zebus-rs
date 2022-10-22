@@ -22,12 +22,20 @@ impl BindingKey {
         Self(message.get_binding())
     }
 
+    pub fn empty() -> Self {
+        Self(Default::default())
+    }
+
     pub fn fragment(&self, index: usize) -> Option<&BindingKeyFragment> {
         if let Some(ref fragments) = self.0.fragments {
             fragments.get(index)
         } else {
             None
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.fragments.as_ref().map(|f| f.len()).unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {

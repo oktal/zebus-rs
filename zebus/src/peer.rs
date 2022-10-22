@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::PeerId;
 
-#[derive(Clone, prost::Message)]
+#[derive(Clone, Eq, PartialEq, prost::Message)]
 pub struct Peer {
     #[prost(message, required, tag = "1")]
     pub id: PeerId,
@@ -15,6 +15,18 @@ pub struct Peer {
 
     #[prost(bool, required, tag = "4")]
     pub is_responding: bool,
+}
+
+impl Peer {
+    pub(crate) fn test() -> Self {
+        let id = uuid::Uuid::new_v4();
+        Self {
+            id: PeerId::new(format!("Peer.Test.{id}")),
+            endpoint: "tcp://*:*".to_string(),
+            is_up: true,
+            is_responding: true,
+        }
+    }
 }
 
 impl fmt::Display for Peer {

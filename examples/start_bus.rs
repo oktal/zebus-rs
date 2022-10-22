@@ -13,10 +13,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let zmq = ZmqTransport::new(zmq_configuration, zmq_socket_opts);
 
     let mut bus = BusBuilder::new(zmq)
-        .with_default_configuration(
-            "tcp://localhost:7465",
-            "test".to_string(),
-        )
+        .with_default_configuration("tcp://localhost:7465", "test".to_string())
         .create()
         .unwrap();
 
