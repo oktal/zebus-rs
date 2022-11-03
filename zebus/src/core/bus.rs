@@ -11,7 +11,11 @@ use crate::{
     bus_configuration::{
         DEFAULT_MAX_BATCH_SIZE, DEFAULT_REGISTRATION_TIMEOUT, DEFAULT_START_REPLAY_TIMEOUT,
     },
-    directory::{self, Registration},
+    directory::{
+        self, commands::PingPeerCommand, PeerDecommissioned, PeerNotResponding, PeerResponding,
+        PeerStarted, PeerStopped, Registration,
+    },
+    dispatch::{self, Dispatcher, MessageDispatcher},
     transport::{self, SendContext, Transport, TransportMessage},
     Bus, BusConfiguration, Command, Peer, PeerId,
 };
@@ -54,8 +58,12 @@ pub enum Error {
     #[error("{0}")]
     Registration(RegistrationError),
 
+    /// An error occured on the dispatcher
+    #[error("an error occured on the dispatcher {0}")]
+    Dispatch(dispatch::Error),
+
     /// An operation was attempted while the [`Bus`] was in an invalid state
-    #[error("An operation was attempted while the bus was not in a valid state")]
+    #[error("n operation was attempted while the bus was not in a valid state")]
     InvalidOperation,
 }
 
@@ -64,12 +72,15 @@ enum State<T: Transport> {
         runtime: tokio::runtime::Runtime,
         configuration: BusConfiguration,
         transport: T,
+        dispatcher: MessageDispatcher,
     },
 
     Configured {
         runtime: tokio::runtime::Runtime,
         configuration: BusConfiguration,
         transport: T,
+        dispatcher: MessageDispatcher,
+
         peer_id: PeerId,
         environment: String,
     },
@@ -81,6 +92,8 @@ enum State<T: Transport> {
         self_peer: Peer,
         environment: String,
 
+        directory: directory::Client,
+
         pending_commands: Arc<Mutex<HashMap<uuid::Uuid, CommandPromise>>>,
         rx_handle: tokio::task::JoinHandle<()>,
     },
@@ -89,8 +102,11 @@ enum State<T: Transport> {
 async fn receive(
     mut receiver: transport::Receiver,
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, CommandPromise>>>,
+    mut dispatcher: MessageDispatcher,
 ) {
-    let message = receiver.recv().await;
+    while let Some(message) = receiver.recv().await {
+        dispatcher.dispatch(message);
+    }
 }
 
 fn try_register<T: Transport>(
@@ -146,12 +162,14 @@ impl<T: Transport> BusImpl<T> {
         runtime: tokio::runtime::Runtime,
         configuration: BusConfiguration,
         transport: T,
+        dispatcher: MessageDispatcher,
     ) -> Self {
         Self {
             inner: Some(State::Init {
                 runtime,
                 configuration,
                 transport,
+                dispatcher,
             }),
         }
     }
@@ -166,6 +184,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                 runtime,
                 configuration,
                 mut transport,
+                dispatcher,
             }) => {
                 transport
                     .configure(peer_id.clone(), environment.clone())
@@ -176,6 +195,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                         runtime,
                         configuration,
                         transport,
+                        dispatcher,
                         peer_id,
                         environment,
                     }),
@@ -195,6 +215,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                 runtime,
                 configuration,
                 mut transport,
+                mut dispatcher,
                 peer_id,
                 environment,
             }) => {
@@ -222,8 +243,25 @@ impl<T: Transport> Bus for BusImpl<T> {
                 )?;
                 println!("Successfully registered {registration:?}");
 
+                // Create peer directory client
+                let directory = directory::Client::new();
+                dispatcher
+                    .add(dispatch::registry::for_handler(directory.handler(), |h| {
+                        h.handles::<PeerStarted>()
+                            .handles::<PeerStopped>()
+                            .handles::<PeerDecommissioned>()
+                            .handles::<PeerNotResponding>()
+                            .handles::<PeerResponding>()
+                            .handles::<PingPeerCommand>();
+                    }))
+                    .map_err(Error::Dispatch)?;
+
+                // Start the dispatcher
+                dispatcher.start().map_err(Error::Dispatch)?;
+
                 let pending_commands = Arc::new(Mutex::new(HashMap::new()));
-                let rx_handle = runtime.spawn(receive(receiver, Arc::clone(&pending_commands)));
+                let rx_handle =
+                    runtime.spawn(receive(receiver, Arc::clone(&pending_commands), dispatcher));
 
                 // Transition to started state
                 (
@@ -233,6 +271,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                         transport,
                         self_peer,
                         environment,
+                        directory,
                         pending_commands,
                         rx_handle,
                     }),
@@ -295,6 +334,7 @@ pub struct BusBuilder<T: Transport> {
     configuration: Option<BusConfiguration>,
     environment: Option<String>,
     runtime: Option<tokio::runtime::Runtime>,
+    dispatcher: MessageDispatcher,
 }
 
 impl<T: Transport> BusBuilder<T> {
@@ -305,6 +345,7 @@ impl<T: Transport> BusBuilder<T> {
             configuration: None,
             environment: None,
             runtime: None,
+            dispatcher: MessageDispatcher::new(),
         }
     }
 
@@ -349,6 +390,19 @@ impl<T: Transport> BusBuilder<T> {
         self.with_configuration(configuration, environment)
     }
 
+    pub fn with_handler<H>(
+        mut self,
+        handler: Box<H>,
+        registry_fn: impl FnOnce(&mut dispatch::registry::Registry<H>),
+    ) -> Self
+    where
+        H: crate::DispatchHandler + Send + 'static,
+    {
+        let registry = dispatch::registry::for_handler(handler, registry_fn);
+        self.dispatcher.add(registry).unwrap();
+        self
+    }
+
     pub fn create(self) -> Result<impl Bus, CreateError<Error>> {
         let (transport, peer_id, configuration, environment) = (
             self.transport,
@@ -361,7 +415,12 @@ impl<T: Transport> BusBuilder<T> {
         // Create tokio runtime
         let runtime = self.runtime.unwrap_or(Self::default_runtime());
 
-        let mut bus = BusImpl::new(runtime, configuration, transport);
+        let dispatcher = self.dispatcher;
+
+        // Create the bus
+        let mut bus = BusImpl::new(runtime, configuration, transport, dispatcher);
+
+        // Configure the bus
         bus.configure(peer_id, environment)
             .map_err(CreateError::Configure)?;
         Ok(bus)

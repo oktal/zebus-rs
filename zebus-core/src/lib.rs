@@ -137,3 +137,15 @@ macro_rules! binding_key {
         }
     };
 }
+
+pub trait Handler<T> {
+    fn handle(&mut self, message: T);
+}
+
+/// Name of the default dispatch queue
+pub const DEFAULT_DISPATCH_QUEUE: &'static str = "DefaultQueue";
+
+/// Represents a [`Handler`] that can be called in the context of a dispatch queue
+pub trait DispatchHandler {
+    const DISPATCH_QUEUE: &'static str;
+}

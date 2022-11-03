@@ -1,8 +1,12 @@
+#![feature(downcast_unchecked)]
+#![feature(map_try_insert)]
+
 mod bcl;
 mod bus;
 mod bus_configuration;
 mod core;
 mod directory;
+mod dispatch;
 mod message_id;
 mod message_type_descriptor;
 mod message_type_id;
@@ -17,6 +21,7 @@ pub use bus::Bus;
 pub use bus_configuration::BusConfiguration;
 
 pub use crate::core::{BusBuilder, CreateError};
+pub use dispatch::{DispatchHandler, Handler, DEFAULT_DISPATCH_QUEUE};
 
 pub use message_id::MessageId;
 pub use peer::Peer;

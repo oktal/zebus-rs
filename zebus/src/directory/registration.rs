@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::{
     future::Future,
     pin::Pin,
@@ -11,7 +10,10 @@ use chrono::Utc;
 use thiserror::Error;
 use tokio::time::Timeout;
 
-use super::{PeerDescriptor, RegisterPeerCommand, RegisterPeerResponse};
+use super::{
+    commands::{RegisterPeerCommand, RegisterPeerResponse},
+    PeerDescriptor,
+};
 use crate::{
     transport::{self, MessageExecutionCompleted, SendContext, Transport, TransportMessage},
     Peer,

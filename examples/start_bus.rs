@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::io::{self, Read};
 use std::time::Duration;
 use zebus::transport::zmq::{ZmqSocketOptions, ZmqTransport, ZmqTransportConfiguration};
 use zebus::{Bus, BusBuilder};
@@ -20,6 +21,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Err(e) = bus.start() {
         eprintln!("{e}");
     }
+
+    println!("Press a key to exit");
+    io::stdin()
+        .bytes()
+        .next()
+        .expect("Failed to read input")
+        .unwrap();
+
+    bus.stop().expect("Failed to stop bus");
 
     Ok(())
 }

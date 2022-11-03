@@ -1,5 +1,6 @@
 use crate::{proto, Peer};
 
+/// Description for a [`Peer`]
 #[derive(Clone, prost::Message)]
 pub struct PeerDescriptor {
     #[prost(message, required, tag = 1)]

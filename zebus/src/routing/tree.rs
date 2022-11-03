@@ -24,8 +24,8 @@
 //!    belgium (0) []
 //!        * (1) [Peer(Peer.3, tcp://*:*)]
 //! ```
-use std::fmt;
 use crate::{BindingKey, Peer};
+use std::fmt;
 use zebus_core::BindingKeyFragment;
 
 /// Type used to walk the tree and collect peers
@@ -114,11 +114,7 @@ impl Node {
     /// Walk down the tree to find the final node for a fragment of a binding key
     /// Returns a mutable reference of the list of peers from the node that was found or `None`
     /// otherwise
-    fn find<'a>(
-        &'a mut self,
-        index: usize,
-        key: &BindingKey,
-    ) -> Option<&'a mut Vec<Peer>> {
+    fn find<'a>(&'a mut self, index: usize, key: &BindingKey) -> Option<&'a mut Vec<Peer>> {
         if self.is_leaf(&key) {
             return Some(&mut self.peers);
         }
