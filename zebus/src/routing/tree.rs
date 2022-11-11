@@ -70,6 +70,30 @@ fn remove_peer(peers: &mut Vec<Peer>, peer: &Peer) {
     peers.retain(|p| p.id != peer.id);
 }
 
+/// Tree node visitor. Behavior to apply when walking down the tree to find a [`Node`]
+/// for a fragment of a [`BindingKey`]
+trait NodeVisitor {
+    fn visit(key: &BindingKey, index: usize) -> Option<Box<Node>>;
+}
+
+/// Create a new node for a fragment of a [`BindingKey`]
+struct CreateNode;
+
+/// Visit that does not do anything
+struct NoopVisitor;
+
+impl NodeVisitor for CreateNode {
+    fn visit(key: &BindingKey, index: usize) -> Option<Box<Node>> {
+        Some(Box::new(Node::new(index, key.fragment(index).cloned())))
+    }
+}
+
+impl NodeVisitor for NoopVisitor {
+    fn visit(_key: &BindingKey, _index: usize) -> Option<Box<Node>> {
+        None
+    }
+}
+
 /// A node of the tree
 #[derive(Debug, Default)]
 struct Node {
@@ -114,16 +138,16 @@ impl Node {
     /// Walk down the tree to find the final node for a fragment of a binding key
     /// Returns a mutable reference of the list of peers from the node that was found or `None`
     /// otherwise
-    fn find<'a>(&'a mut self, index: usize, key: &BindingKey) -> Option<&'a mut Vec<Peer>> {
+    fn find<'a, V: NodeVisitor>(
+        &'a mut self,
+        index: usize,
+        key: &BindingKey,
+    ) -> Option<&'a mut Vec<Peer>> {
         if self.is_leaf(&key) {
             return Some(&mut self.peers);
         }
 
-        if let Some(node) = Self::get_node(self, key, index) {
-            return node.find(index + 1, key);
-        }
-
-        None
+        Self::get_node::<V>(self, key, index).and_then(|n| n.find::<V>(index + 1, key))
     }
 
     /// Attempt to collect the peers assocaited with this node is the node
@@ -173,48 +197,50 @@ impl Node {
         key.fragment(self.fragment_index) == self.fragment.as_ref()
     }
 
-    fn get_node<'a>(&'a mut self, key: &BindingKey, index: usize) -> Option<&'a mut Node> {
-        key.fragment(index).map(|fragment| match fragment {
-            BindingKeyFragment::Star => Self::get_or_create_node(key, index, &mut self.star_node),
-            BindingKeyFragment::Sharp => Self::get_or_create_node(key, index, &mut self.sharp_node),
-            BindingKeyFragment::Value(_) => {
-                Self::get_or_create_child(key, index, &mut self.children)
-            }
+    fn get_node<'a, V: NodeVisitor>(
+        &'a mut self,
+        key: &BindingKey,
+        index: usize,
+    ) -> Option<&'a mut Node> {
+        key.fragment(index).and_then(|fragment| match fragment {
+            BindingKeyFragment::Star => Self::visit_node::<V>(key, index, &mut self.star_node),
+            BindingKeyFragment::Sharp => Self::visit_node::<V>(key, index, &mut self.sharp_node),
+            BindingKeyFragment::Value(_) => Self::visit_child::<V>(key, index, &mut self.children),
         })
     }
 
-    fn get_or_create_node<'a>(
+    fn visit_node<'a, V: NodeVisitor>(
         key: &BindingKey,
         index: usize,
         node: &'a mut Option<Box<Node>>,
-    ) -> &'a mut Node {
+    ) -> Option<&'a mut Node> {
         match node {
-            Some(n) => n.as_mut(),
+            Some(n) => Some(n.as_mut()),
             None => {
-                *node = Some(Box::new(Node::new(index, key.fragment(index).cloned())));
-                node.as_mut().unwrap()
+                *node = V::visit(key, index);
+                node.as_mut().map(|n| n.as_mut())
             }
         }
     }
 
-    fn get_or_create_child<'a>(
+    fn visit_child<'a, V: NodeVisitor>(
         key: &BindingKey,
         index: usize,
         children: &'a mut Vec<Box<Node>>,
-    ) -> &'a mut Node {
+    ) -> Option<&'a mut Node> {
         let fragment = key.fragment(index);
         match children
             .iter()
             .position(|n| n.fragment.as_ref() == fragment)
         {
-            Some(i) => &mut children[i],
-            None => {
-                let n = Box::new(Node::new(index, fragment.cloned()));
-                children.push(n);
+            Some(i) => Some(&mut children[i]),
+            None => V::visit(key, index).map(|node| {
+                children.push(node);
                 children
                     .last_mut()
                     .expect("children should have at least one element")
-            }
+                    .as_mut()
+            }),
         }
     }
 
@@ -293,14 +319,15 @@ impl PeerSubscriptionTree {
 
     /// Add a peer [`Peer`] with a binding [`BindingKey`] to the tree
     pub(crate) fn add(&mut self, peer: Peer, key: &BindingKey) {
-        if let Some(peers) = self.find(key) {
-            add_or_update_peer(peers, peer);
-        }
+        let peers = self
+            .find::<CreateNode>(key)
+            .expect("`find` should have created node");
+        add_or_update_peer(peers, peer);
     }
 
     /// Remove a peer [`Peer`] with a binding [`BindingKey`] from the tree
     pub(crate) fn remove(&mut self, peer: &Peer, key: &BindingKey) {
-        if let Some(peers) = self.find(key) {
+        if let Some(peers) = self.find::<NoopVisitor>(key) {
             remove_peer(peers, peer);
         }
     }
@@ -320,11 +347,11 @@ impl PeerSubscriptionTree {
         collector.into_peers()
     }
 
-    fn find<'a>(&'a mut self, key: &BindingKey) -> Option<&'a mut Vec<Peer>> {
+    fn find<'a, V: NodeVisitor>(&'a mut self, key: &BindingKey) -> Option<&'a mut Vec<Peer>> {
         if key.is_empty() {
             Some(&mut self.root_peers)
         } else {
-            self.root.find(0, key)
+            self.root.find::<V>(0, key)
         }
     }
 }
