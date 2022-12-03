@@ -32,6 +32,6 @@ use message_type_descriptor::MessageTypeDescriptor;
 use message_type_id::MessageTypeId;
 
 pub use zebus_core::{BindingKeyFragment, Command, Event, Message, MessageBinding};
-pub use zebus_macros::{Command, Event};
+pub use zebus_macros::{Command, Event, Handler};
 
 pub use routing::BindingKey;

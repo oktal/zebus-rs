@@ -8,6 +8,7 @@ pub struct ZebusStructAttrs {
     pub transient: Option<bool>,
     pub routable: Option<bool>,
     pub span: Option<Span>,
+    pub dispatch_queue: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -25,6 +26,7 @@ impl TryFrom<Vec<Meta>> for ZebusStructAttrs {
             infrastructure: None,
             transient: None,
             routable: None,
+            dispatch_queue: None,
         };
 
         for meta in value {
@@ -69,6 +71,17 @@ impl TryFrom<Vec<Meta>> for ZebusStructAttrs {
                             return Err(syn::Error::new_spanned(
                                 path,
                                 format!("invalid value for `routable` expected: bool got: {lit:?}"),
+                            ));
+                        });
+                    } else if path.is_ident("dispatch_queue") {
+                        attrs.dispatch_queue = Some(if let Lit::Str(s) = lit {
+                            s.value()
+                        } else {
+                            return Err(syn::Error::new_spanned(
+                                path,
+                                format!(
+                                    "invalid value for `dispatch_queue` expected: string got: {lit:?}"
+                                ),
                             ));
                         });
                     }

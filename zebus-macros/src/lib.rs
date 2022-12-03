@@ -73,8 +73,32 @@
 //! [`Command`] macro will also implement the [`zebus_core::Command`] trait while [`Event`] will
 //! implement [`zebus_core::Event`] trait
 //!
+//! # [`Handler`] derive macro
+//!
+//! This macro will implement the [`DispatchHandler`] trait:
+//!
+//! ```
+//! use zebus_macros::Handler;
+//!
+//! #[derive(Handler)]
+//! #[zebus(dispatch_queue = "CustomQueue")]
+//! struct MyHandler {}
+//! ```
+//!
+//! Which will expand to the following:
+//!
+//! ```
+//! use zebus_core::DispatchHandler;
+//! struct MyHandler {}
+//!
+//! impl DispatchHandler for MyHandler {
+//!     const DISPATCH_QUEUE: &'static str = "CustomQueue";
+//! }
+//! ```
+//!
 
 use proc_macro::TokenStream;
+
 mod derive;
 
 #[proc_macro_derive(Command, attributes(zebus))]
@@ -85,4 +109,9 @@ pub fn command(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Event, attributes(zebus))]
 pub fn event(input: TokenStream) -> TokenStream {
     derive::event(input).unwrap()
+}
+
+#[proc_macro_derive(Handler, attributes(zebus))]
+pub fn handler(input: TokenStream) -> TokenStream {
+    derive::handler(input).unwrap()
 }

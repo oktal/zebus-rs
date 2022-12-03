@@ -257,3 +257,23 @@ pub(crate) fn command(input: TokenStream) -> syn::Result<TokenStream> {
 pub(crate) fn event(input: TokenStream) -> syn::Result<TokenStream> {
     message(input, quote! { ::zebus_core::Event })
 }
+
+pub(crate) fn handler(input: TokenStream) -> syn::Result<TokenStream> {
+    let input: DeriveInput = syn::parse(input)?;
+    let ident = &input.ident;
+
+    let attrs: ZebusStructAttrs = find_attrs(&input.attrs[..], "zebus")?;
+
+    let dispatch_queue = match attrs.dispatch_queue {
+        Some(name) => quote! { #name },
+        None => quote! { ::zebus_core::DEFAULT_DISPATCH_QUEUE },
+    };
+
+    let expanded = quote! {
+        impl ::zebus_core::DispatchHandler for #ident {
+            const DISPATCH_QUEUE: &'static str = #dispatch_queue;
+        }
+    };
+
+    Ok(expanded.into())
+}

@@ -162,3 +162,31 @@ impl Dispatcher for MessageDispatcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(crate::Handler)]
+    #[zebus(dispatch_queue = "CustomQueue")]
+    struct HandlerWithCustomDispatchQueue {}
+
+    #[derive(crate::Handler)]
+    struct HandlerWithDefaultDispatchQueue {}
+
+    #[test]
+    fn custom_dispatch_queue() {
+        assert_eq!(
+            <HandlerWithCustomDispatchQueue as DispatchHandler>::DISPATCH_QUEUE,
+            "CustomQueue"
+        );
+    }
+
+    #[test]
+    fn default_dispatch_queue() {
+        assert_eq!(
+            <HandlerWithDefaultDispatchQueue as DispatchHandler>::DISPATCH_QUEUE,
+            zebus_core::DEFAULT_DISPATCH_QUEUE
+        );
+    }
+}
