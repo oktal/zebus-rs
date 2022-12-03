@@ -30,73 +30,64 @@ impl TryFrom<Vec<Meta>> for ZebusStructAttrs {
         };
 
         for meta in value {
-            match meta {
-                Meta::NameValue(MetaNameValue {
-                    ref path, ref lit, ..
-                }) => {
-                    if path.is_ident("namespace") {
-                        attrs.namespace = Some(if let Lit::Str(s) = lit {
-                            s.value()
-                        } else {
-                            return Err(syn::Error::new_spanned(
-                                path,
-                                format!(
-                                    "invalid value for `namespace` expected: string got: {lit:?}"
-                                ),
-                            ));
-                        });
-                    } else if path.is_ident("infrastructure") {
-                        attrs.infrastructure = Some(if let Lit::Bool(b) = lit {
-                            b.value()
-                        } else {
-                            return Err(
-                                syn::Error::new_spanned(path, format!("invalid value for `infrastructure` expected: bool got: {lit:?}"))
-                            );
-                        });
-                    } else if path.is_ident("transient") {
-                        attrs.transient = Some(if let Lit::Bool(b) = lit {
-                            b.value()
-                        } else {
-                            return Err(syn::Error::new_spanned(
-                                path,
-                                format!(
-                                    "invalid value for `transient` expected: bool got: {lit:?}"
-                                ),
-                            ));
-                        });
-                    } else if path.is_ident("routable") {
-                        attrs.routable = Some(if let Lit::Bool(b) = lit {
-                            b.value()
-                        } else {
-                            return Err(syn::Error::new_spanned(
-                                path,
-                                format!("invalid value for `routable` expected: bool got: {lit:?}"),
-                            ));
-                        });
-                    } else if path.is_ident("dispatch_queue") {
-                        attrs.dispatch_queue = Some(if let Lit::Str(s) = lit {
-                            s.value()
-                        } else {
-                            return Err(syn::Error::new_spanned(
-                                path,
-                                format!(
-                                    "invalid value for `dispatch_queue` expected: string got: {lit:?}"
-                                ),
-                            ));
-                        });
+            macro_rules! attr {
+                ($name:ident: str) => {
+                    if let Meta::NameValue(MetaNameValue {
+                        ref path, ref lit, ..
+                    }) = meta
+                    {
+                        if path.is_ident(stringify!($name)) {
+                            attrs.$name = Some(if let Lit::Str(s) = lit {
+                                s.value()
+                            } else {
+                                return Err(syn::Error::new_spanned(
+                                    path,
+                                    format!(
+                                        "invalid value for `{}` expected: string got: {:?}",
+                                        stringify!($name),
+                                        lit
+                                    ),
+                                ));
+                            });
+                        }
                     }
-                }
-                Meta::Path(path) => {
-                    if path.is_ident("infrastructure") {
-                        attrs.infrastructure = Some(true);
-                    } else if path.is_ident("transient") {
-                        attrs.transient = Some(true);
-                    } else if path.is_ident("routable") {
-                        attrs.routable = Some(true);
+                };
+
+                ($name:ident: bool) => {
+                    match meta {
+                        Meta::NameValue(MetaNameValue {
+                            ref path, ref lit, ..
+                        }) => {
+                            if path.is_ident(stringify!($name)) {
+                                attrs.$name = Some(if let Lit::Bool(s) = lit {
+                                    s.value()
+                                } else {
+                                    return Err(syn::Error::new_spanned(
+                                        path,
+                                        format!(
+                                            "invalid value for `{}` expected: bool got: {:?}",
+                                            stringify!($name),
+                                            lit
+                                        ),
+                                    ));
+                                });
+                            }
+                        }
+                        Meta::Path(ref path) => {
+                            if path.is_ident(stringify!($name)) {
+                                attrs.$name = Some(true);
+                            }
+                        }
+                        _ => {}
                     }
-                }
-                _ => {}
+                };
             }
+
+            attr!(namespace: str);
+            attr!(infrastructure: bool);
+            attr!(transient: bool);
+            attr!(routable: bool);
+            attr!(dispatch_queue: str);
         }
 
         Ok(attrs)
