@@ -2,7 +2,7 @@ use super::PeerDescriptor;
 
 /// [`Command`] to send to register a [`Peer`] to the directory
 #[derive(Clone, prost::Message, crate::Command)]
-#[zebus(namespace = "Abc.Zebus.Directory", infrastructure, routable = true)]
+#[zebus(namespace = "Abc.Zebus.Directory", infrastructure)]
 pub(super) struct RegisterPeerCommand {
     #[prost(message, required, tag = "1")]
     /// [`PeerDescriptor`] description of the peer to register

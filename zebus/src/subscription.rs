@@ -66,7 +66,7 @@ mod tests {
     use zebus_core::binding_key;
 
     #[derive(crate::Command)]
-    #[zebus(namespace = "Abc.Test")]
+    #[zebus(namespace = "Abc.Test", routable)]
     struct RoutableCommand {
         #[zebus(routing_position = 1)]
         name: String,
@@ -76,7 +76,7 @@ mod tests {
     }
 
     #[derive(crate::Command)]
-    #[zebus(namespace = "Abc.Test")]
+    #[zebus(namespace = "Abc.Test", routable)]
     struct UnorderedRoutableCommand {
         #[zebus(routing_position = 3)]
         name: String,

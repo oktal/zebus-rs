@@ -25,7 +25,11 @@ impl RoutingField {
     }
 }
 
-fn routing_fields<'a>(fields: &[Field]) -> syn::Result<Vec<RoutingField>> {
+fn routing_fields<'a>(
+    ident: &syn::Ident,
+    attrs: &ZebusStructAttrs,
+    fields: &[Field],
+) -> syn::Result<Vec<RoutingField>> {
     // Filter routing fields
     let mut routing_fields = fields
         .iter()
@@ -39,6 +43,23 @@ fn routing_fields<'a>(fields: &[Field]) -> syn::Result<Vec<RoutingField>> {
             }),
         })
         .collect::<Vec<_>>();
+
+    // Make sure the routable attribute is applied when appropriate
+    if attrs.routable.unwrap_or(false) {
+        if routing_fields.is_empty() {
+            return Err(syn::Error::new_spanned(
+                ident,
+                "a routable struct must have at least one field with a `routing_position` attribute",
+            ));
+        }
+    } else {
+        if let Some(field) = routing_fields.iter().next() {
+            return Err(syn::Error::new_spanned(
+                &field.field,
+                "a non-routable struct must not have any field with a `routing_position` attribute",
+            ));
+        }
+    }
 
     // Sanity check that fields do not have duplicated routing positions
     let mut unique = HashMap::new();
@@ -184,10 +205,13 @@ fn message_impl(
         }
     };
 
+    let infrastructure = attrs.infrastructure.unwrap_or(false);
+    let transient = attrs.transient.unwrap_or(false);
+
     Ok(quote! {
         impl ::zebus_core::Message for #ident {
-            const INFRASTRUCTURE: bool = false;
-            const TRANSIENT: bool = false;
+            const INFRASTRUCTURE: bool = #infrastructure;
+            const TRANSIENT: bool = #transient;
 
             fn name() -> &'static str {
                 #full_name
@@ -236,7 +260,7 @@ fn message(input: TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<
         .into_iter()
         .map(Field::try_from)
         .collect::<Result<Vec<_>, _>>()?;
-    let routing_fields = routing_fields(&fields[..])?;
+    let routing_fields = routing_fields(ident, &root_attrs, &fields[..])?;
 
     let message_impl_expanded = message_impl(ident, root_attrs, &routing_fields[..], derive)?;
     let message_binding_expanded = message_binding(ident, &routing_fields[..]);
