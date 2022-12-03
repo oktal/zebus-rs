@@ -49,14 +49,14 @@ fn routing_fields<'a>(
         if routing_fields.is_empty() {
             return Err(syn::Error::new_spanned(
                 ident,
-                "a routable struct must have at least one field with a `routing_position` attribute",
+                "a routable message must have at least one field with a `routing_position` attribute",
             ));
         }
     } else {
         if let Some(field) = routing_fields.iter().next() {
             return Err(syn::Error::new_spanned(
                 &field.field,
-                "a non-routable struct must not have any field with a `routing_position` attribute",
+                "a non-routable message must not have any field with a `routing_position` attribute",
             ));
         }
     }
@@ -242,7 +242,7 @@ fn message(input: TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<
         }) => Ok(fields.named.into_iter().collect::<Vec<_>>()),
         Data::Struct(..) => Err(syn::Error::new(
             span,
-            "Command can bot derive for a struct with unnamed fields",
+            "Command can not be derived for a struct with unnamed fields",
         )),
         Data::Enum(..) => Err(syn::Error::new(
             span,

@@ -8,7 +8,7 @@
 //! use zebus_macros::Command;
 //!
 //! #[derive(Command)]
-//! #[zebus(namespace = "Abc.Namespace")]
+//! #[zebus(namespace = "Abc.Namespace", routable)]
 //! struct MyCommand {
 //!     pub name: String,
 //!
