@@ -1,4 +1,4 @@
-use crate::MessageTypeDescriptor;
+use crate::{proto::IntoProtobuf, MessageTypeDescriptor};
 use std::any::TypeId;
 
 pub(crate) mod proto {
@@ -47,15 +47,19 @@ impl MessageTypeId {
         self.descriptor.is_persistent
     }
 
-    pub(crate) fn as_protobuf(&self) -> proto::MessageTypeId {
-        proto::MessageTypeId {
-            full_name: self.descriptor.full_name.clone(),
-        }
-    }
-
     pub(crate) fn into_protobuf(self) -> proto::MessageTypeId {
         proto::MessageTypeId {
             full_name: self.descriptor.full_name,
+        }
+    }
+}
+
+impl IntoProtobuf for MessageTypeId {
+    type Output = proto::MessageTypeId;
+
+    fn into_protobuf(self) -> Self::Output {
+        proto::MessageTypeId {
+            full_name: self.descriptor.full_name.clone(),
         }
     }
 }

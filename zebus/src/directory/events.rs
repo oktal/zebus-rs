@@ -1,7 +1,5 @@
-use crate::{proto::bcl, PeerId};
+use crate::{proto, PeerId};
 
-use super::PeerDescriptor;
-//
 // TODO(oktal): Add transient
 /// [`Event`] raised when a new peer has been started
 #[derive(prost::Message, crate::Event)]
@@ -9,7 +7,7 @@ use super::PeerDescriptor;
 pub struct PeerStarted {
     /// [`PeerDescriptor`] descriptor of the peer that started
     #[prost(message, required, tag = 1)]
-    descriptor: PeerDescriptor,
+    descriptor: proto::PeerDescriptor,
 }
 
 // TODO(oktal): Add transient
@@ -27,7 +25,7 @@ pub struct PeerStopped {
 
     /// UTC timestamp when the peer was stopped
     #[prost(message, optional, tag = 3)]
-    timestamp_utc: Option<bcl::DateTime>,
+    timestamp_utc: Option<proto::bcl::DateTime>,
 }
 
 // TODO(oktal): Add transient

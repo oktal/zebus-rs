@@ -24,3 +24,11 @@ pub(crate) trait Dispatcher {
 pub(crate) trait Dispatch {
     fn dispatch(&mut self, dispatch: &MessageDispatch);
 }
+
+impl Dispatch for Vec<Box<dyn Dispatch + Send>> {
+    fn dispatch(&mut self, dispatch: &MessageDispatch) {
+        for d in self {
+            d.dispatch(dispatch);
+        }
+    }
+}

@@ -1,5 +1,5 @@
 pub(crate) mod commands;
-mod descriptor;
+pub(crate) mod descriptor;
 pub mod events;
 
 mod client;

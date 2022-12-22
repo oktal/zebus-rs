@@ -15,13 +15,14 @@ mod peer_id;
 pub mod proto;
 mod routing;
 mod subscription;
+mod sync;
 pub mod transport;
 
 pub use bus::Bus;
 pub use bus_configuration::BusConfiguration;
 
 pub use crate::core::{BusBuilder, CreateError};
-pub use dispatch::{DispatchHandler, Handler, DEFAULT_DISPATCH_QUEUE};
+pub use dispatch::{DispatchHandler, DEFAULT_DISPATCH_QUEUE};
 
 pub use message_id::MessageId;
 pub use peer::Peer;
@@ -31,7 +32,7 @@ pub use subscription::Subscription;
 use message_type_descriptor::MessageTypeDescriptor;
 use message_type_id::MessageTypeId;
 
-pub use zebus_core::{BindingKeyFragment, Command, Event, Message, MessageBinding};
+pub use zebus_core::{BindingKeyFragment, Command, Event, Handler, Message, MessageBinding};
 pub use zebus_macros::{Command, Event, Handler};
 
 pub use routing::BindingKey;

@@ -1,3 +1,7 @@
+use chrono::TimeZone;
+
+use crate::proto::{AsProtobuf, IntoProtobuf};
+
 #[derive(Clone, Copy, Eq, PartialEq, prost::Message)]
 pub struct Guid {
     #[prost(fixed64, tag = 1)]
@@ -49,6 +53,14 @@ pub struct TimeSpan {
     pub scale: i32,
 }
 
+pub enum DateTimeError {
+    /// Attempted to convert a [`DateTime`] that was not in UTC
+    NotUtc,
+
+    /// Invalid timestamp
+    InvalidTimestamp,
+}
+
 #[derive(Copy, Clone, prost::Message)]
 pub struct DateTime {
     #[prost(int64, tag = 1)]
@@ -61,10 +73,38 @@ pub struct DateTime {
     pub kind: i32,
 }
 
-impl From<chrono::DateTime<chrono::Utc>> for DateTime {
-    fn from(dt: chrono::DateTime<chrono::Utc>) -> Self {
-        Self {
-            value: (dt.timestamp_nanos() / 100),
+impl TryInto<chrono::DateTime<chrono::Utc>> for DateTime {
+    type Error = DateTimeError;
+
+    fn try_into(self) -> Result<chrono::DateTime<chrono::Utc>, Self::Error> {
+        if self.kind() == DateTimeKind::Utc {
+            // 100-ns ticks
+            let timestamp_ns = self.value * 100;
+
+            let (mut secs, mut nanos) =
+                (timestamp_ns / 1_000_000_000, timestamp_ns % 1_000_000_000);
+            if nanos < 0 {
+                secs -= 1;
+                nanos += 1_000_000_000;
+            }
+
+            chrono::Utc
+                .timestamp_opt(secs, nanos as u32)
+                .single()
+                .ok_or(DateTimeError::InvalidTimestamp)
+        } else {
+            Err(DateTimeError::NotUtc)
+        }
+    }
+}
+
+impl IntoProtobuf for chrono::DateTime<chrono::Utc> {
+    type Output = DateTime;
+
+    fn into_protobuf(self) -> Self::Output {
+        Self::Output {
+            // 100-ns ticks
+            value: (self.timestamp_nanos() / 100),
             scale: TimeSpanScale::Ticks as i32,
             kind: DateTimeKind::Utc as i32,
         }

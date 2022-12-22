@@ -79,9 +79,7 @@ impl Worker {
 
     fn run(&mut self) {
         while let Ok(entry) = self.dispatch_rx.recv() {
-            for dispatcher in &mut self.dispatchers {
-                dispatcher.dispatch(&entry.dispatch);
-            }
+            self.dispatchers.dispatch(&entry.dispatch);
         }
     }
 }

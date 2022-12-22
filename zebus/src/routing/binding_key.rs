@@ -1,4 +1,4 @@
-use crate::{BindingKeyFragment, Message};
+use crate::{proto::IntoProtobuf, BindingKeyFragment, Message};
 
 pub(crate) mod proto {
     #[derive(Clone, prost::Message)]
@@ -41,40 +41,6 @@ impl BindingKey {
     pub fn is_empty(&self) -> bool {
         self.0.fragments.is_none()
     }
-
-    pub fn as_proto(&self) -> proto::BindingKey {
-        let parts = if let Some(ref fragments) = self.0.fragments {
-            fragments
-                .iter()
-                .map(|fragment| match fragment {
-                    BindingKeyFragment::Value(s) => s.clone(),
-                    BindingKeyFragment::Star => "*".to_string(),
-                    BindingKeyFragment::Sharp => "#".to_string(),
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-
-        proto::BindingKey { parts }
-    }
-
-    pub fn into_proto(self) -> proto::BindingKey {
-        let parts = if let Some(fragments) = self.0.fragments {
-            fragments
-                .into_iter()
-                .map(|fragment| match fragment {
-                    BindingKeyFragment::Value(s) => s,
-                    BindingKeyFragment::Star => "*".to_string(),
-                    BindingKeyFragment::Sharp => "#".to_string(),
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-
-        proto::BindingKey { parts }
-    }
 }
 
 impl From<Vec<&str>> for BindingKey {
@@ -87,6 +53,27 @@ impl From<Vec<&str>> for BindingKey {
 impl From<Vec<String>> for BindingKey {
     fn from(parts: Vec<String>) -> Self {
         Self(parts.into())
+    }
+}
+
+impl IntoProtobuf for BindingKey {
+    type Output = proto::BindingKey;
+
+    fn into_protobuf(self) -> Self::Output {
+        let parts = if let Some(ref fragments) = self.0.fragments {
+            fragments
+                .into_iter()
+                .map(|fragment| match fragment {
+                    BindingKeyFragment::Value(s) => s.clone(),
+                    BindingKeyFragment::Star => "*".to_string(),
+                    BindingKeyFragment::Sharp => "#".to_string(),
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
+        proto::BindingKey { parts }
     }
 }
 

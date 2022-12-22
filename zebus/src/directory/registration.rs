@@ -15,6 +15,7 @@ use super::{
     PeerDescriptor,
 };
 use crate::{
+    proto::IntoProtobuf,
     transport::{self, MessageExecutionCompleted, SendContext, Transport, TransportMessage},
     Peer,
 };
@@ -92,7 +93,9 @@ impl RegistrationFuture {
             timestamp_utc: Some(utc_now.into()),
             has_debugger_attached: Some(false),
         };
-        let register_command = RegisterPeerCommand { peer: descriptor };
+        let register_command = RegisterPeerCommand {
+            peer: descriptor.into_protobuf(),
+        };
         let (message_id, message) =
             TransportMessage::create(&self_peer, environment, &register_command);
 

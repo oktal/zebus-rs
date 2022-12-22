@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use super::{queue::DispatchQueue, registry::Registry, Dispatcher, MessageDispatch};
+use super::{queue::DispatchQueue, registry::Registry, Dispatch, Dispatcher, MessageDispatch};
 use crate::{transport::TransportMessage, DispatchHandler};
 
 /// Errors that can be returned by the [`MessageDispatcher`]
@@ -26,19 +26,157 @@ pub enum Error {
     InvalidOperation,
 }
 
-/// Inner state of the dispatcher
-enum Inner {
-    Init {
-        dispatch_queues: HashMap<&'static str, DispatchQueue>,
-        message_dispatch_queue: HashMap<&'static str, &'static str>,
-    },
-
-    Started {
-        dispatch_queues: HashMap<&'static str, DispatchQueue>,
-        message_dispatch_queue: HashMap<&'static str, &'static str>,
-    },
+/// Represents the type of dispatch to use for a given [`TransportMessage`]
+/// Messages that have been marked with a special `infrastructure` attribute will
+/// be dispatched synchronously
+///
+/// Other types of messages will be dispatched asynchronously through a named
+/// [`DispatchQueue`]
+enum DispatchType {
+    Sync(Vec<Box<dyn Dispatch + Send>>),
+    Async(DispatchQueue),
 }
 
+impl DispatchType {
+    fn add<H>(&mut self, registry: Box<Registry<H>>) -> Result<(), Error>
+    where
+        H: DispatchHandler + Send + 'static,
+    {
+        match self {
+            DispatchType::Sync(dispatch) => Ok(dispatch.push(registry)),
+            DispatchType::Async(queue) => queue.add(registry).map_err(Error::Queue),
+        }
+    }
+
+    fn start(&mut self) -> Result<(), Error> {
+        if let Self::Async(queue) = self {
+            queue.start().map_err(Error::Queue)?;
+        }
+
+        Ok(())
+    }
+
+    fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
+        match self {
+            Self::Sync(sync) => {
+                sync.dispatch(&message_dispatch);
+                Ok(())
+            }
+            Self::Async(queue) => queue.send(message_dispatch).map_err(Error::Queue),
+        }
+    }
+}
+
+/// A collection of indexed dispatchers by [`MessageTypeId`]
+struct DispatchMap {
+    entries: HashMap<&'static str, DispatchType>,
+    message_entries: HashMap<&'static str, &'static str>,
+}
+
+impl DispatchMap {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            message_entries: HashMap::new(),
+        }
+    }
+
+    fn add<H>(&mut self, registry: Box<Registry<H>>) -> Result<(), Error>
+    where
+        H: DispatchHandler + Send + 'static,
+    {
+        // A registry might contain mixed handlers of synchronous
+        // (messages with `infrastructure` attribute) and asynchronous
+        // messages.
+        // In such a scenario, that means that some messages, for a same
+        // instance of a `DispatcherHandler` should be dispatched synchronously
+        // while other messages should be dispatched asynchronously through a
+        // `DispatchQueue`.
+        // Since we need to transfer ownership of the underlying instance of the
+        // `DispatchHandler` handler to the `DispatchQueue`, we *ALSO* need to keep
+        // an instance for synchronous dispatching.
+        // We thus "split" the registry in half and regroup the handlers based on their dispatch
+        // type (asynchronous or synchronous).
+        // This will in turn make the instance of handlers share-able between threads
+        let (async_registry, sync_registry) =
+            registry.split_half(|descriptor| descriptor.is_infrastructure);
+
+        if let Some(async_registry) = async_registry {
+            self.add_with(Box::new(async_registry), H::DISPATCH_QUEUE, |name| {
+                DispatchType::Async(DispatchQueue::new(name.to_string()))
+            })?;
+        }
+
+        if let Some(sync_registry) = sync_registry {
+            self.add_with(Box::new(sync_registry), "__zebus_internal", |_| {
+                DispatchType::Sync(vec![])
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), Error> {
+        for (_, entry) in &mut self.entries {
+            entry.start()?;
+        }
+
+        Ok(())
+    }
+
+    fn add_with<H>(
+        &mut self,
+        registry: Box<Registry<H>>,
+        dispatch_queue: &'static str,
+        factory: impl FnOnce(&'static str) -> DispatchType,
+    ) -> Result<(), Error>
+    where
+        H: DispatchHandler + Send + 'static,
+    {
+        // Register all handled messages to make sure the user did not attempt to register a message handler to a different dispatch queue
+        for handled_message in registry.handled_messages() {
+            match self.message_entries.entry(handled_message) {
+                std::collections::hash_map::Entry::Occupied(e) => Err(Error::DoubleRegister {
+                    message_type: handled_message,
+                    dispatch_queue,
+                    previous: e.key(),
+                }),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(dispatch_queue);
+                    Ok(())
+                }
+            }?;
+        }
+
+        // Create the dispatch entry if it does not exist and add the registry
+        self.entries
+            .entry(dispatch_queue)
+            .or_insert(factory(dispatch_queue))
+            .add(registry)
+    }
+
+    fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
+        let entry = self
+            .message_entries
+            .get_mut(message_dispatch.message.message_type_id.full_name.as_str())
+            .and_then(|dispatch_entry| self.entries.get_mut(dispatch_entry));
+
+        entry
+            .ok_or(Error::InvalidOperation)
+            .and_then(|e| e.dispatch(message_dispatch))
+    }
+}
+
+/// Inner state of the dispatcher
+enum Inner {
+    /// Initialized state
+    Init(DispatchMap),
+
+    /// Started state
+    Started(DispatchMap),
+}
+
+/// Dispatcher based on [`MessageTypeId`]
 pub(crate) struct MessageDispatcher {
     inner: Option<Inner>,
 }
@@ -47,10 +185,7 @@ impl MessageDispatcher {
     /// Create a new empty dispatcher
     pub(crate) fn new() -> Self {
         Self {
-            inner: Some(Inner::Init {
-                dispatch_queues: HashMap::new(),
-                message_dispatch_queue: HashMap::new(),
-            }),
+            inner: Some(Inner::Init(DispatchMap::new())),
         }
     }
 
@@ -60,41 +195,7 @@ impl MessageDispatcher {
         H: DispatchHandler + Send + 'static,
     {
         match self.inner.as_mut() {
-            Some(Inner::Init {
-                ref mut dispatch_queues,
-                ref mut message_dispatch_queue,
-            }) => {
-                // Retrieve the dispatch queue for this handler
-                let dispatch_queue = H::DISPATCH_QUEUE;
-
-                // Register all handled messages to the dispatch queue and make sure the user did
-                // not attempt to register a message handler to a different dispatch queue
-                for handled_message in registry.handled_messages() {
-                    match message_dispatch_queue.entry(handled_message) {
-                        std::collections::hash_map::Entry::Occupied(e) => {
-                            Err(Error::DoubleRegister {
-                                message_type: handled_message,
-                                dispatch_queue,
-                                previous: e.key(),
-                            })
-                        }
-                        std::collections::hash_map::Entry::Vacant(e) => {
-                            e.insert(dispatch_queue);
-                            Ok(())
-                        }
-                    }?;
-                }
-
-                // Create the dispatch queue if it does not exist and add the registry to the
-                // dispatch queue
-                dispatch_queues
-                    .entry(H::DISPATCH_QUEUE)
-                    .or_insert(DispatchQueue::new(dispatch_queue.to_string()))
-                    .add(registry)
-                    .map_err(Error::Queue)?;
-
-                Ok(())
-            }
+            Some(Inner::Init(ref mut dispatch)) => dispatch.add(registry),
             _ => Err(Error::InvalidOperation),
         }
     }
@@ -103,23 +204,12 @@ impl MessageDispatcher {
     /// queues
     pub(crate) fn start(&mut self) -> Result<(), Error> {
         let (inner, res) = match self.inner.take() {
-            Some(Inner::Init {
-                mut dispatch_queues,
-                message_dispatch_queue,
-            }) => {
-                // Start all the dispatch queues
-                for (_, queue) in &mut dispatch_queues {
-                    queue.start().map_err(Error::Queue)?;
-                }
+            Some(Inner::Init(mut dispatch)) => {
+                // Start all the dispatchers
+                dispatch.start()?;
 
                 // Transition to Started state
-                (
-                    Some(Inner::Started {
-                        dispatch_queues,
-                        message_dispatch_queue,
-                    }),
-                    Ok(()),
-                )
+                (Some(Inner::Started(dispatch)), Ok(()))
             }
             x => (x, Err(Error::InvalidOperation)),
         };
@@ -127,39 +217,20 @@ impl MessageDispatcher {
         res
     }
 
-    /// Attempt to retrieve the [`DispatchQueue`] associated with the [`TransportMessage`] message
-    /// Returns an error if the operation was invalid.
-    /// Returns `Some` with a mutable reference of the queue if the queue was found or `None` otherwise.
-    fn get_queue_mut(
-        &mut self,
-        message: &TransportMessage,
-    ) -> Result<Option<&mut DispatchQueue>, Error> {
-        let (dispatch_queues, message_dispatch_queues) = match self.inner.as_mut() {
-            Some(Inner::Init {
-                dispatch_queues,
-                message_dispatch_queue,
-            })
-            | Some(Inner::Started {
-                dispatch_queues,
-                message_dispatch_queue,
-            }) => Ok((dispatch_queues, message_dispatch_queue)),
+    fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
+        let dispatch_map = match self.inner.as_mut() {
+            Some(Inner::Init(map)) | Some(Inner::Started(map)) => Ok(map),
             _ => Err(Error::InvalidOperation),
         }?;
 
-        Ok(message_dispatch_queues
-            .get_mut(message.message_type_id.full_name.as_str())
-            .and_then(|dispatch_queue| dispatch_queues.get_mut(dispatch_queue)))
+        dispatch_map.dispatch(message_dispatch)
     }
 }
 
 impl Dispatcher for MessageDispatcher {
     fn dispatch(&mut self, message: TransportMessage) {
-        if let Ok(Some(dispatch_queue)) = self.get_queue_mut(&message) {
-            // TODO(oktal): correctly handle underlying result
-            dispatch_queue
-                .send(MessageDispatch::for_message(message))
-                .unwrap();
-        }
+        // TODO(oktal): correctly handle underlying result
+        self.dispatch(MessageDispatch::for_message(message));
     }
 }
 

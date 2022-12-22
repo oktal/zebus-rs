@@ -1,5 +1,4 @@
-use std::any::TypeId;
-
+use crate::proto::IntoProtobuf;
 use crate::{BindingKey, MessageTypeDescriptor, MessageTypeId};
 use crate::{Message, MessageBinding};
 
@@ -36,14 +35,7 @@ impl Subscription {
     }
 
     pub fn with_binding<M: Message + 'static>(binding_key: BindingKey) -> Self {
-        let message_descriptor = MessageTypeDescriptor {
-            full_name: M::name().to_string(),
-            r#type: TypeId::of::<M>(),
-            is_persistent: !M::TRANSIENT,
-            is_infrastructure: M::INFRASTRUCTURE,
-        };
-
-        let message_type_id = MessageTypeId::from_descriptor(message_descriptor);
+        let message_type_id = MessageTypeId::from_descriptor(MessageTypeDescriptor::of::<M>());
 
         Self {
             message_type_id,
@@ -57,6 +49,17 @@ impl Subscription {
 
     pub fn full_name(&self) -> &str {
         self.message_type_id.full_name()
+    }
+}
+
+impl IntoProtobuf for Subscription {
+    type Output = proto::Subscription;
+
+    fn into_protobuf(self) -> Self::Output {
+        proto::Subscription {
+            message_type_id: self.message_type_id.into_protobuf(),
+            binding_key: self.binding_key.into_protobuf(),
+        }
     }
 }
 
