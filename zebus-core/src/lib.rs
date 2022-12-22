@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData};
+use std::{error, fmt, marker::PhantomData};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoutingField {
@@ -138,8 +138,52 @@ macro_rules! binding_key {
     };
 }
 
+/// Error type that can be returned by a [`ReplyHandler`] handler
+pub trait Error: error::Error {
+    /// Numeric representation of the underlying error
+    fn code(&self) -> i32;
+}
+
+/// Error type for infallible handers
+#[derive(Debug)]
+pub struct NoError;
+
+impl fmt::Display for NoError {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
+impl error::Error for NoError {}
+
+impl Error for NoError {
+    fn code(&self) -> i32 {
+        0
+    }
+}
+
+/// Zebus handler of a [`T`] typed message.
+///
+/// Zebus handlers must implemented this trait to be able to handle particular
+/// messages
 pub trait Handler<T> {
+    /// Handle [`message`]
     fn handle(&mut self, message: T);
+}
+
+/// Zebus handler of a [`T`] typed message that returns a response
+///
+/// Zebus handlers that want to return a response back to the originator peer must implement
+/// this trait
+pub trait ReplyHandler<T: Command> {
+    /// Response message to send back to the originator if success
+    type Output: Message + prost::Message;
+
+    /// Error to return to the originator
+    type Err: Error;
+
+    /// Handle [`message`]
+    fn handle(&mut self, message: T) -> Result<Self::Output, Self::Err>;
 }
 
 /// Name of the default dispatch queue

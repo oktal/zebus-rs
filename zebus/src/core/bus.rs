@@ -105,7 +105,9 @@ async fn receive(
     mut dispatcher: MessageDispatcher,
 ) {
     while let Some(message) = receiver.recv().await {
-        dispatcher.dispatch(message);
+        let result = dispatcher.dispatch(message).await;
+
+        println!("{result:?}");
     }
 }
 

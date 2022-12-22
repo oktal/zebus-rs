@@ -32,7 +32,10 @@ pub use subscription::Subscription;
 use message_type_descriptor::MessageTypeDescriptor;
 use message_type_id::MessageTypeId;
 
-pub use zebus_core::{BindingKeyFragment, Command, Event, Handler, Message, MessageBinding};
+pub use zebus_core::{
+    BindingKeyFragment, Command, Error, Event, Handler, Message, MessageBinding, NoError,
+    ReplyHandler,
+};
 pub use zebus_macros::{Command, Event, Handler};
 
 pub use routing::BindingKey;

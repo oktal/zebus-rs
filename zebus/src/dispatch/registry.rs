@@ -3,7 +3,9 @@ use std::{
     collections::{hash_map::Entry, HashMap},
 };
 
-use super::{Dispatch, DispatchHandler, Handler, MessageDispatch};
+use zebus_core::{Command, ReplyHandler};
+
+use super::{Dispatch, DispatchHandler, DispatchResult, Handler, MessageDispatch};
 use crate::{sync::LockCell, Message, MessageTypeDescriptor};
 
 type InvokerFn = dyn Fn(&MessageDispatch, &mut (dyn Any + 'static)) + Send;
@@ -46,19 +48,31 @@ where
             }
         };
 
-        let name = <M as Message>::name();
-        match self.invokers.entry(name) {
-            Entry::Occupied(_) => None,
-            Entry::Vacant(e) => Some(e.insert(MessageInvoker {
-                descriptor: MessageTypeDescriptor::of::<M>(),
-                invoker: Box::new(invoker),
-            })),
-        }
-        .expect(&format!(
-            "attempted to double-insert handler for {}",
-            type_name::<M>()
-        ));
+        self.add::<M>(|| Box::new(invoker));
+        self
+    }
 
+    pub fn replies<M>(&mut self) -> &mut Self
+    where
+        H: ReplyHandler<M> + 'static,
+        M: Command + prost::Message + Default + 'static,
+    {
+        let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
+            if let Some(Ok(message)) = dispatch.message.decode_as::<M>() {
+                // Safety:
+                //   1. `handler` is of type `Box<H>
+                //   2. `H` has an explicit bound on `Handler<T>`
+                let res = unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
+                let result = match res {
+                    Ok(response) => DispatchResult::from_response(response),
+                    Err(e) => DispatchResult::from_error(e),
+                };
+
+                dispatch.set_handled(result);
+            }
+        };
+
+        self.add::<M>(|| Box::new(invoker));
         self
     }
 
@@ -117,6 +131,21 @@ where
 
     pub(crate) fn handled_messages(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.invokers.keys().map(|k| *k)
+    }
+
+    fn add<M: Message + 'static>(&mut self, invoker_fn: impl FnOnce() -> Box<InvokerFn>) {
+        let name = <M as Message>::name();
+        match self.invokers.entry(name) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(e) => Some(e.insert(MessageInvoker {
+                descriptor: MessageTypeDescriptor::of::<M>(),
+                invoker: Box::new(invoker_fn()),
+            })),
+        }
+        .expect(&format!(
+            "attempted to double-insert handler for {}",
+            type_name::<M>()
+        ));
     }
 }
 

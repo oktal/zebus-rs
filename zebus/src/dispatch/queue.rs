@@ -22,16 +22,6 @@ pub enum Error {
     InvalidOperation,
 }
 
-struct Entry {
-    dispatch: MessageDispatch,
-}
-
-impl Entry {
-    fn new(dispatch: MessageDispatch) -> Self {
-        Entry { dispatch }
-    }
-}
-
 enum Inner {
     Init {
         name: String,
@@ -40,13 +30,13 @@ enum Inner {
 
     Started {
         name: String,
-        dispatch_tx: mpsc::Sender<Entry>,
+        dispatch_tx: mpsc::Sender<MessageDispatch>,
         handle: JoinHandle<()>,
     },
 }
 
 struct Worker {
-    dispatch_rx: mpsc::Receiver<Entry>,
+    dispatch_rx: mpsc::Receiver<MessageDispatch>,
     dispatchers: Vec<Box<dyn Dispatch + Send>>,
 }
 
@@ -54,7 +44,7 @@ impl Worker {
     fn start(
         name: &str,
         dispatchers: Vec<Box<dyn Dispatch + Send>>,
-    ) -> Result<(std::sync::mpsc::Sender<Entry>, JoinHandle<()>), Error> {
+    ) -> Result<(std::sync::mpsc::Sender<MessageDispatch>, JoinHandle<()>), Error> {
         // Create channel for message dispatching
         let (tx, rx) = mpsc::channel();
 
@@ -78,8 +68,9 @@ impl Worker {
     }
 
     fn run(&mut self) {
-        while let Ok(entry) = self.dispatch_rx.recv() {
-            self.dispatchers.dispatch(&entry.dispatch);
+        while let Ok(dispatch) = self.dispatch_rx.recv() {
+            self.dispatchers.dispatch(&dispatch);
+            dispatch.set_completed();
         }
     }
 }
@@ -147,13 +138,7 @@ impl DispatchQueue {
         match self.inner {
             Some(Inner::Started {
                 ref dispatch_tx, ..
-            }) => {
-                dispatch_tx
-                    .send(Entry::new(dispatch))
-                    .map_err(|_e| Error::SendError)?;
-
-                Ok(())
-            }
+            }) => dispatch_tx.send(dispatch).map_err(|_e| Error::SendError),
             _ => Err(Error::InvalidOperation),
         }
     }

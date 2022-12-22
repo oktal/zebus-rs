@@ -1,6 +1,8 @@
+use thiserror::Error;
+
 use crate::{
     routing::tree::PeerSubscriptionTree, transport::TransportMessage, Handler, MessageTypeId,
-    PeerId,
+    NoError, PeerId,
 };
 use std::{
     collections::HashMap,

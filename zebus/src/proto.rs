@@ -1,4 +1,5 @@
 pub use crate::directory::descriptor::proto::PeerDescriptor;
+pub use crate::message_id::proto::MessageId;
 pub use crate::message_type_id::proto::MessageTypeId;
 pub use crate::routing::binding_key::proto::BindingKey;
 pub use crate::subscription::proto::Subscription;

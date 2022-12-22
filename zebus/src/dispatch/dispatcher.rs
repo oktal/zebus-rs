@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use super::{queue::DispatchQueue, registry::Registry, Dispatch, Dispatcher, MessageDispatch};
+use super::{
+    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchResult,
+    Dispatcher, MessageDispatch,
+};
 use crate::{transport::TransportMessage, DispatchHandler};
 
 /// Errors that can be returned by the [`MessageDispatcher`]
@@ -60,6 +63,7 @@ impl DispatchType {
         match self {
             Self::Sync(sync) => {
                 sync.dispatch(&message_dispatch);
+                message_dispatch.set_completed();
                 Ok(())
             }
             Self::Async(queue) => queue.send(message_dispatch).map_err(Error::Queue),
@@ -228,9 +232,11 @@ impl MessageDispatcher {
 }
 
 impl Dispatcher for MessageDispatcher {
-    fn dispatch(&mut self, message: TransportMessage) {
+    fn dispatch(&mut self, message: TransportMessage) -> DispatchFuture {
+        let (dispatch, future) = MessageDispatch::new(message);
         // TODO(oktal): correctly handle underlying result
-        self.dispatch(MessageDispatch::for_message(message));
+        self.dispatch(dispatch).unwrap();
+        future
     }
 }
 

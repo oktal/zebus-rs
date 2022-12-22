@@ -1,13 +1,14 @@
+use crate::proto::{self, IntoProtobuf};
 use crate::{Message, Peer};
 
-use crate::{message_type_id::proto, transport::OriginatorInfo, MessageId, PeerId};
+use crate::{transport::OriginatorInfo, MessageId, PeerId};
 
 /// Envelope for a message send through the bus
 #[derive(Clone, prost::Message)]
 pub struct TransportMessage {
     /// Id of the message
     #[prost(message, required, tag = "1")]
-    pub id: MessageId,
+    pub id: proto::MessageId,
 
     /// Type of the message
     #[prost(message, required, tag = "2")]
@@ -67,7 +68,7 @@ impl TransportMessage {
         (
             uuid,
             Self {
-                id,
+                id: id.into_protobuf(),
                 message_type_id,
                 content,
                 originator,
