@@ -3,12 +3,12 @@ use std::{
     pin::Pin,
     ptr::NonNull,
     task::{Context, Poll},
-    time::Duration,
+    time::Duration, sync::Arc,
 };
 
 use chrono::Utc;
 use thiserror::Error;
-use tokio::time::Timeout;
+use tokio::{time::Timeout, runtime::Runtime};
 
 use super::{
     commands::{RegisterPeerCommand, RegisterPeerResponse},
@@ -235,7 +235,7 @@ pub(crate) unsafe fn register<T: Transport>(
 }
 
 pub(crate) fn block_on<T: Transport>(
-    runtime: &tokio::runtime::Runtime,
+    runtime: Arc<Runtime>,
     transport: &mut T,
     receiver: &transport::Receiver,
     self_peer: Peer,

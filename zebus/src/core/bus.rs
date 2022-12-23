@@ -5,6 +5,7 @@ use std::{
 };
 
 use thiserror::Error;
+use tokio::{runtime::Runtime, sync::{mpsc, oneshot}};
 
 use crate::{
     bus::{CommandFuture, CommandResult},
@@ -13,14 +14,14 @@ use crate::{
     },
     directory::{
         self, commands::PingPeerCommand, PeerDecommissioned, PeerNotResponding, PeerResponding,
-        PeerStarted, PeerStopped, Registration,
+        PeerStarted, PeerStopped, Registration, event::PeerEvent,
     },
     dispatch::{self, Dispatcher, MessageDispatcher},
     transport::{self, SendContext, Transport, TransportMessage},
-    Bus, BusConfiguration, Command, Peer, PeerId,
+    Bus, BusConfiguration, Command, Handler, Peer, PeerId,
 };
 
-struct CommandPromise(tokio::sync::oneshot::Sender<CommandResult>);
+struct CommandPromise(oneshot::Sender<CommandResult>);
 
 #[derive(Debug)]
 pub struct RegistrationError {
@@ -69,14 +70,14 @@ pub enum Error {
 
 enum State<T: Transport> {
     Init {
-        runtime: tokio::runtime::Runtime,
+        runtime: Runtime,
         configuration: BusConfiguration,
         transport: T,
         dispatcher: MessageDispatcher,
     },
 
     Configured {
-        runtime: tokio::runtime::Runtime,
+        runtime: Arc<Runtime>,
         configuration: BusConfiguration,
         transport: T,
         dispatcher: MessageDispatcher,
@@ -86,7 +87,7 @@ enum State<T: Transport> {
     },
 
     Started {
-        runtime: tokio::runtime::Runtime,
+        runtime: Arc<Runtime>,
         configuration: BusConfiguration,
         transport: T,
         self_peer: Peer,
@@ -100,21 +101,28 @@ enum State<T: Transport> {
 }
 
 async fn receive(
-    mut receiver: transport::Receiver,
+    receiver: transport::Receiver,
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, CommandPromise>>>,
     mut dispatcher: MessageDispatcher,
 ) {
+    let mut receiver = receiver;
+
     while let Some(message) = receiver.recv().await {
         let result = dispatcher.dispatch(message).await;
+    }
+}
 
-        println!("{result:?}");
+async fn peer_directory_events(events_rx: mpsc::Receiver<PeerEvent>) {
+    let mut events_rx = events_rx;
+
+    while let Some(event) = events_rx.recv().await {
     }
 }
 
 fn try_register<T: Transport>(
     transport: &mut T,
     receiver: &transport::Receiver,
-    runtime: &tokio::runtime::Runtime,
+    runtime: Arc<Runtime>,
     self_peer: Peer,
     environment: String,
     configuration: &BusConfiguration,
@@ -139,7 +147,7 @@ fn try_register<T: Transport>(
     let mut error = RegistrationError::new();
     for directory_peer in directory_peers {
         match directory::registration::block_on(
-            runtime,
+            Arc::clone(&runtime),
             transport,
             receiver,
             self_peer.clone(),
@@ -161,7 +169,7 @@ struct BusImpl<T: Transport> {
 
 impl<T: Transport> BusImpl<T> {
     fn new(
-        runtime: tokio::runtime::Runtime,
+        runtime: Runtime,
         configuration: BusConfiguration,
         transport: T,
         dispatcher: MessageDispatcher,
@@ -188,8 +196,11 @@ impl<T: Transport> Bus for BusImpl<T> {
                 mut transport,
                 dispatcher,
             }) => {
+                // Wrap tokio's runtime inside an Arc to share it with other components
+                let runtime = Arc::new(runtime);
+
                 transport
-                    .configure(peer_id.clone(), environment.clone())
+                    .configure(peer_id.clone(), environment.clone(), Arc::clone(&runtime))
                     .map_err(|e| Error::Transport(e.into()))?;
 
                 (
@@ -221,6 +232,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                 peer_id,
                 environment,
             }) => {
+
                 // Start transport
                 let receiver = transport.start().map_err(|e| Error::Transport(e.into()))?;
                 let endpoint = transport
@@ -238,15 +250,19 @@ impl<T: Transport> Bus for BusImpl<T> {
                 let registration = try_register(
                     &mut transport,
                     &receiver,
-                    &runtime,
+                    Arc::clone(&runtime),
                     self_peer.clone(),
                     environment.clone(),
                     &configuration,
                 )?;
-                println!("Successfully registered {registration:?}");
 
                 // Create peer directory client
-                let directory = directory::Client::new();
+                let (mut directory, directory_events_rx) = directory::Client::start();
+
+                if let Ok(response) = registration.result {
+                    directory.handle(response);
+                }
+
                 dispatcher
                     .add(dispatch::registry::for_handler(directory.handler(), |h| {
                         h.handles::<PeerStarted>()
@@ -260,6 +276,9 @@ impl<T: Transport> Bus for BusImpl<T> {
 
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
+
+                let _directory_handle =
+                    runtime.spawn(peer_directory_events(directory_events_rx));
 
                 let pending_commands = Arc::new(Mutex::new(HashMap::new()));
                 let rx_handle =
@@ -308,7 +327,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                 ref environment,
                 ..
             }) => {
-                let (tx, rx) = tokio::sync::oneshot::channel();
+                let (tx, rx) = oneshot::channel();
                 let (id, message) =
                     TransportMessage::create(&self_peer, environment.clone(), command);
 
@@ -317,7 +336,7 @@ impl<T: Transport> Bus for BusImpl<T> {
 
                 transport.send(std::iter::once(peer), message, SendContext::default());
                 Ok(CommandFuture(rx))
-            }
+            } 
             _ => Err(Error::InvalidOperation),
         }
     }
@@ -335,7 +354,7 @@ pub struct BusBuilder<T: Transport> {
     peer_id: Option<PeerId>,
     configuration: Option<BusConfiguration>,
     environment: Option<String>,
-    runtime: Option<tokio::runtime::Runtime>,
+    runtime: Option<Runtime>,
     dispatcher: MessageDispatcher,
 }
 
@@ -351,7 +370,7 @@ impl<T: Transport> BusBuilder<T> {
         }
     }
 
-    pub fn with_runtime(mut self, runtime: tokio::runtime::Runtime) -> Self {
+    pub fn with_runtime(mut self, runtime: Runtime) -> Self {
         self.runtime = Some(runtime);
         self
     }
@@ -428,7 +447,7 @@ impl<T: Transport> BusBuilder<T> {
         Ok(bus)
     }
 
-    fn default_runtime() -> tokio::runtime::Runtime {
+    fn default_runtime() -> Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()

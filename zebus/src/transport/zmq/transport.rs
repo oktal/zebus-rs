@@ -1,10 +1,10 @@
 use prost::Message;
+use tokio::{runtime::Runtime, sync::{oneshot, mpsc, broadcast}};
 use std::{
     borrow::Cow,
     collections::HashMap,
     io::{self, Read, Write},
-    sync::{self, mpsc},
-    thread::JoinHandle,
+    thread::JoinHandle, sync::Arc,
 };
 use thiserror::Error;
 
@@ -56,6 +56,7 @@ pub enum Error {
     InvalidOperation,
 }
 
+#[derive(Debug)]
 enum OuboundSocketAction {
     Send {
         message: TransportMessage,
@@ -78,6 +79,7 @@ enum Inner {
         options: ZmqSocketOptions,
         peer_id: PeerId,
         environment: String,
+        runtime: Arc<Runtime>,
     },
     Started {
         configuration: ZmqTransportConfiguration,
@@ -91,10 +93,9 @@ enum Inner {
         inbound_thread: JoinHandle<()>,
 
         outbound_thread: JoinHandle<()>,
-        actions_tx: sync::mpsc::Sender<OuboundSocketAction>,
+        actions_tx: mpsc::Sender<OuboundSocketAction>,
 
-        // TODO(oktal): Replace with a oneshot channel ?
-        shutdown_tx: mpsc::Sender<()>,
+        shutdown_tx: broadcast::Sender<()>,
     },
 }
 
@@ -118,52 +119,61 @@ impl ZmqTransport {
 }
 
 struct InboundWorker {
-    shutdown_rx: mpsc::Receiver<()>,
     inbound_socket: ZmqInboundSocket,
-    rcv_tx: tokio::sync::mpsc::Sender<TransportMessage>,
+    rcv_tx: mpsc::Sender<TransportMessage>,
+    shutdown_rx: broadcast::Receiver<()>,
 }
 
 impl InboundWorker {
     fn start(
         inbound_socket: ZmqInboundSocket,
-    ) -> Result<(mpsc::Sender<()>, Receiver, JoinHandle<()>), Error> {
-        // Create channel to shutdown inbound worker thread
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        shutdown_tx: broadcast::Sender<()>,
+        runtime: Arc<tokio::runtime::Runtime>,
+    ) -> Result<(Receiver, JoinHandle<()>), Error> {
+        // Subscribe to shutdown channel
+        let shutdown_rx = shutdown_tx.subscribe();
 
         // Create the channel to receive transport messages
         // TODO(oktal): remove hardcoded bound limit
-        let (rcv_tx, rcv_rx) = tokio::sync::mpsc::channel(1024);
+        let (rcv_tx, rcv_rx) = mpsc::channel(128);
 
         // Create inbound worker
-        let mut inbound_worker = InboundWorker {
-            shutdown_rx,
+        let inbound_worker = InboundWorker {
             inbound_socket,
             rcv_tx,
+            shutdown_rx,
         };
 
         // Spawn inbound thread
         let inbound_thread = std::thread::Builder::new()
             .name(INBOUND_THREAD_NAME.into())
             .spawn(move || {
-                inbound_worker.run();
+                inbound_worker.block_on(runtime);
             })
             .map_err(Error::Io)?;
 
-        Ok((shutdown_tx, rcv_rx, inbound_thread))
+        Ok((rcv_rx, inbound_thread))
     }
 
-    fn run(&mut self) {
+    fn block_on(self, runtime: Arc<Runtime>) {
+        let mut this = self;
+        runtime.block_on(async move {
+            this.run().await;
+        });
+    }
+
+    async fn run(&mut self) {
         loop {
             if let Ok(_) = self.shutdown_rx.try_recv() {
                 break;
             }
-            let mut rcv_buf = [0u8; 4096];
 
+            let mut rcv_buf = [0u8; 4096];
             // TODO(oktal): Handle error properly
             match self.inbound_socket.read(&mut rcv_buf[..]) {
                 Ok(size) => {
                     match TransportMessage::decode(&rcv_buf[..size]) {
-                        Ok(message) => self.rcv_tx.blocking_send(message).unwrap(),
+                        Ok(message) => self.rcv_tx.send(message).await.unwrap(),
                         Err(e) => eprintln!("Failed to decode: {e}. bytes {rcv_buf:?}"),
                     };
                 }
@@ -176,42 +186,61 @@ impl InboundWorker {
 }
 
 struct OutboundWorker {
-    actions_rx: mpsc::Receiver<OuboundSocketAction>,
     context: zmq::Context,
     outbound_sockets: HashMap<PeerId, ZmqOutboundSocket>,
+    actions_rx: mpsc::Receiver<OuboundSocketAction>,
+    shutdown_rx: broadcast::Receiver<()>,
 }
 
 impl OutboundWorker {
     fn start(
         context: zmq::Context,
+        shutdown_tx: broadcast::Sender<()>,
+        runtime: Arc<Runtime>,
     ) -> Result<(mpsc::Sender<OuboundSocketAction>, JoinHandle<()>), Error> {
+        // Subscribe to shutdown channel
+        let shutdown_rx = shutdown_tx.subscribe();
+
         // Create outbound channel for outbound socket operations
-        let (actions_tx, actions_rx) = mpsc::channel();
+        // TODO(oktal): remove hardcoded bound limit
+        let (actions_tx, actions_rx) = mpsc::channel(128);
 
         // Create outbound worker
-        let mut worker = OutboundWorker {
+        let worker = OutboundWorker {
             context,
-            actions_rx,
             outbound_sockets: HashMap::new(),
+            actions_rx,
+            shutdown_rx,
         };
 
         // Spawn outbound thread
         let outbound_thread = std::thread::Builder::new()
             .name(OUTBOUND_THREAD_NAME.into())
             .spawn(move || {
-                // TODO(oktal): Bubble up the error to the JoinHandle
-                worker.run();
+                worker.block_on(runtime);
             })
             .map_err(Error::Io)?;
 
         Ok((actions_tx, outbound_thread))
     }
 
-    fn run(&mut self) -> Result<(), Error> {
+    fn block_on(self, runtime: Arc<Runtime>) {
+        let mut this = self;
+        runtime.block_on(async move {
+            this.run().await;
+        });
+    }
+
+    async fn run(&mut self) -> Result<(), Error> {
         let mut encode_buf = vec![0u8; 1024];
 
-        while let Ok(action) = self.actions_rx.recv() {
-            self.handle_action(action, &mut encode_buf)?;
+        loop {
+            tokio::select! {
+                _ = self.shutdown_rx.recv() => { break; },
+                Some(action) = self.actions_rx.recv() => {
+                    self.handle_action(action, &mut encode_buf)?;
+                }
+            }
         }
 
         Ok(())
@@ -290,7 +319,7 @@ impl OutboundWorker {
 impl Transport for ZmqTransport {
     type Err = Error;
 
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err> {
+    fn configure(&mut self, peer_id: PeerId, environment: String, runtime: Arc<Runtime>) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Unconfigured {
                 configuration,
@@ -302,6 +331,7 @@ impl Transport for ZmqTransport {
                     options,
                     peer_id,
                     environment,
+                    runtime,
                 }),
                 Ok(()),
             ),
@@ -318,6 +348,7 @@ impl Transport for ZmqTransport {
                 options,
                 peer_id,
                 environment,
+                runtime,
             }) => {
                 // Create zmq context
                 let context = zmq::Context::new();
@@ -336,11 +367,14 @@ impl Transport for ZmqTransport {
                 let host_str = hostname.to_str().ok_or(Error::InvalidUtf8)?;
                 inbound_endpoint = inbound_endpoint.replace("0.0.0.0", &host_str);
 
+                // Create shutdown broadcast signal
+                let (shutdown_tx, _shutdown_rx) = broadcast::channel(16);
+
                 // Start outbound worker
-                let (actions_tx, outbound_thread) = OutboundWorker::start(context.clone())?;
+                let (actions_tx, outbound_thread) = OutboundWorker::start(context.clone(), shutdown_tx.clone(), Arc::clone(&runtime))?;
 
                 // Start inbound worker
-                let (shutdown_tx, rcv_rx, inbound_thread) = InboundWorker::start(inbound_socket)?;
+                let (rcv_rx, inbound_thread) = InboundWorker::start(inbound_socket, shutdown_tx.clone(), Arc::clone(&runtime))?;
 
                 (
                     // Transition to Started state
@@ -398,9 +432,8 @@ impl Transport for ZmqTransport {
             Some(Inner::Started { ref actions_tx, .. }) => {
                 let peers = peers.collect();
 
-                // TODO(oktal): Can `send` fail ?
                 actions_tx
-                    .send(OuboundSocketAction::Send {
+                    .try_send(OuboundSocketAction::Send {
                         message,
                         peers,
                         context,

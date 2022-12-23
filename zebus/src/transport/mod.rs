@@ -4,13 +4,14 @@ mod originator_info;
 mod send_context;
 mod transport_message;
 pub mod zmq;
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use crate::{Peer, PeerId};
 
 pub use message_execution_completed::MessageExecutionCompleted;
 pub use originator_info::OriginatorInfo;
 pub use send_context::SendContext;
+use tokio::runtime::Runtime;
 pub use transport_message::TransportMessage;
 
 pub type Receiver = tokio::sync::mpsc::Receiver<TransportMessage>;
@@ -21,7 +22,7 @@ pub trait Transport {
     type Err: std::error::Error + 'static;
 
     /// Configure this transport layer with a [`PeerId`]
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err>;
+    fn configure(&mut self, peer_id: PeerId, environment: String, runtime: Arc<Runtime>) -> Result<(), Self::Err>;
 
     /// Start the transport layer
     fn start(&mut self) -> Result<Receiver, Self::Err>;

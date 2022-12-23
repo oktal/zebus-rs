@@ -1,5 +1,6 @@
 use crate::{Peer, PeerId};
 
+#[derive(Debug)]
 pub struct SendContext {
     pub persistent_peer_ids: Vec<PeerId>,
 

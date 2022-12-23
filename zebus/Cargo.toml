@@ -12,9 +12,11 @@ zmq = { version = "0.9.2", features = ["vendored"] }
 gethostname = "0.2.3"
 zebus-macros = { version = "0.1.0", path = "../zebus-macros" }
 zebus-core = { version = "0.1.0", path = "../zebus-core" }
-tokio = { version = "1.21.2", features = ["rt", "sync", "rt-multi-thread", "time"] }
+tokio = { version = "1.21.2", features = ["macros", "rt", "sync", "rt-multi-thread", "time"] }
 chrono = "0.4.22"
 thiserror = "1.0.37"
+itertools = "0.10.5"
+signals2 = "0.3.2"
 
 [dependencies.uuid]
 version = "1.2.0"

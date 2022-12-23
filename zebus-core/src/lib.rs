@@ -8,7 +8,7 @@ pub struct RoutingField {
 
 /// A fragment of a ['BindingKey`] that will represent either a string literal, a star `*` or a
 /// sharp `#`
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum BindingKeyFragment {
     Value(String),
     Star,
@@ -35,7 +35,7 @@ impl fmt::Display for BindingKeyFragment {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct BindingKey {
     pub fragments: Option<Vec<BindingKeyFragment>>,
 }
@@ -144,21 +144,26 @@ pub trait Error: error::Error {
     fn code(&self) -> i32;
 }
 
-/// Error type for infallible handers
-#[derive(Debug)]
-pub struct NoError;
-
-impl fmt::Display for NoError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+impl Error for std::convert::Infallible {
+    fn code(&self) -> i32 {
+        0
     }
 }
 
-impl error::Error for NoError {}
+pub enum HandlerError<E: Error> {
+    Standard(Box<dyn std::error::Error + Send>),
+    User(E),
+}
 
-impl Error for NoError {
-    fn code(&self) -> i32 {
-        0
+impl<E: Error> From<Box<dyn std::error::Error + Send>> for HandlerError<E> {
+    fn from(error: Box<dyn std::error::Error + Send>) -> Self {
+        Self::Standard(error)
+    }
+}
+
+impl<E: Error> From<E> for HandlerError<E> {
+    fn from(error: E) -> Self {
+        Self::User(error)
     }
 }
 
@@ -183,7 +188,7 @@ pub trait ReplyHandler<T: Command> {
     type Err: Error;
 
     /// Handle [`message`]
-    fn handle(&mut self, message: T) -> Result<Self::Output, Self::Err>;
+    fn handle(&mut self, message: T) -> Result<Self::Output, HandlerError<Self::Err>>;
 }
 
 /// Name of the default dispatch queue
