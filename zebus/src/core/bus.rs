@@ -5,7 +5,10 @@ use std::{
 };
 
 use thiserror::Error;
-use tokio::{runtime::Runtime, sync::{mpsc, oneshot}};
+use tokio::{
+    runtime::Runtime,
+    sync::{mpsc, oneshot},
+};
 
 use crate::{
     bus::{CommandFuture, CommandResult},
@@ -13,8 +16,8 @@ use crate::{
         DEFAULT_MAX_BATCH_SIZE, DEFAULT_REGISTRATION_TIMEOUT, DEFAULT_START_REPLAY_TIMEOUT,
     },
     directory::{
-        self, commands::PingPeerCommand, PeerDecommissioned, PeerNotResponding, PeerResponding,
-        PeerStarted, PeerStopped, Registration, event::PeerEvent,
+        self, commands::PingPeerCommand, event::PeerEvent, PeerDecommissioned, PeerNotResponding,
+        PeerResponding, PeerStarted, PeerStopped, Registration,
     },
     dispatch::{self, Dispatcher, MessageDispatcher},
     transport::{self, SendContext, Transport, TransportMessage},
@@ -115,8 +118,7 @@ async fn receive(
 async fn peer_directory_events(events_rx: mpsc::Receiver<PeerEvent>) {
     let mut events_rx = events_rx;
 
-    while let Some(event) = events_rx.recv().await {
-    }
+    while let Some(event) = events_rx.recv().await {}
 }
 
 fn try_register<T: Transport>(
@@ -232,7 +234,6 @@ impl<T: Transport> Bus for BusImpl<T> {
                 peer_id,
                 environment,
             }) => {
-
                 // Start transport
                 let receiver = transport.start().map_err(|e| Error::Transport(e.into()))?;
                 let endpoint = transport
@@ -277,8 +278,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
 
-                let _directory_handle =
-                    runtime.spawn(peer_directory_events(directory_events_rx));
+                let _directory_handle = runtime.spawn(peer_directory_events(directory_events_rx));
 
                 let pending_commands = Arc::new(Mutex::new(HashMap::new()));
                 let rx_handle =
@@ -336,7 +336,7 @@ impl<T: Transport> Bus for BusImpl<T> {
 
                 transport.send(std::iter::once(peer), message, SendContext::default());
                 Ok(CommandFuture(rx))
-            } 
+            }
             _ => Err(Error::InvalidOperation),
         }
     }

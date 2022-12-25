@@ -1,6 +1,7 @@
 mod configuration;
 mod inbound;
 mod outbound;
+mod poller;
 mod socket_options;
 mod transport;
 

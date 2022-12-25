@@ -1,15 +1,24 @@
 use thiserror::Error;
+use tokio::io::{AsyncRead, ReadBuf};
 
-use super::ZmqSocketOptions;
+use super::{poller::ZmqPoller, ZmqSocketOptions};
 use crate::PeerId;
-use std::io::{self, Read};
+use std::{
+    io::{self, Read},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 /// Inbound socket error
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Error)]
+#[derive(Debug, Error)]
 pub enum Error {
     /// Zmq error
     #[error("zmq: {0}")]
     Zmq(zmq::Error),
+
+    /// I/O error
+    #[error("I/O error {0}")]
+    Io(io::Error),
 
     /// An operation was attempted while the socket was not in a valid state
     #[error("An operation was attempted while the socket was not in a valid state")]
@@ -32,6 +41,14 @@ enum Inner {
         endpoint: String,
         options: ZmqSocketOptions,
         socket: zmq::Socket,
+    },
+
+    Polled {
+        context: zmq::Context,
+        peer_id: PeerId,
+        endpoint: String,
+        options: ZmqSocketOptions,
+        poller: ZmqPoller,
     },
 }
 
@@ -98,6 +115,37 @@ impl ZmqInboundSocket {
         res
     }
 
+    pub(super) fn enable_polling(&mut self) -> Result<()> {
+        let (inner, res) = match self.inner.take() {
+            Some(Inner::Bound {
+                context,
+                peer_id,
+                endpoint,
+                options,
+                socket,
+            }) => {
+                // Create zmq poller
+                let poller = ZmqPoller::new(socket).map_err(Error::Io)?;
+
+                // Transition to Polled state
+                (
+                    Some(Inner::Polled {
+                        context,
+                        peer_id,
+                        endpoint,
+                        options,
+                        poller,
+                    }),
+                    Ok(()),
+                )
+            }
+            Some(x @ Inner::Polled { .. }) => (Some(x), Ok(())),
+            x => (x, Err(Error::InvalidOperation)),
+        };
+        self.inner = inner;
+        res
+    }
+
     /// Undind and close the underlying `zmq` socket
     pub(super) fn close(&mut self) -> Result<()> {
         let (inner, res) = match self.inner.take() {
@@ -110,6 +158,27 @@ impl ZmqInboundSocket {
             }) => {
                 // Drop the old socket
                 std::mem::drop(socket);
+
+                // Transition to Init state
+                (
+                    Some(Inner::Init {
+                        context,
+                        peer_id,
+                        endpoint,
+                        options,
+                    }),
+                    Ok(()),
+                )
+            }
+            Some(Inner::Polled {
+                context,
+                peer_id,
+                endpoint,
+                options,
+                poller,
+            }) => {
+                // Drop the poller
+                std::mem::drop(poller);
 
                 // Transition to Init state
                 (
@@ -150,6 +219,24 @@ impl Read for ZmqInboundSocket {
             Some(Inner::Bound { ref socket, .. }) => Ok(socket
                 .recv_into(buf, 0)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?),
+            Some(Inner::Polled { ref poller, .. }) => Ok(poller
+                .recv(buf, 0)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?),
+            // TODO(oktal): Figure-out what we want to do with our error types to make them
+            // implement `Error` trait
+            _ => panic!("not handled yet"),
+        }
+    }
+}
+
+impl AsyncRead for ZmqInboundSocket {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.inner {
+            Some(Inner::Polled { ref poller, .. }) => poller.poll_read(cx, buf),
             // TODO(oktal): Figure-out what we want to do with our error types to make them
             // implement `Error` trait
             _ => panic!("not handled yet"),

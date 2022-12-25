@@ -22,7 +22,12 @@ pub trait Transport {
     type Err: std::error::Error + 'static;
 
     /// Configure this transport layer with a [`PeerId`]
-    fn configure(&mut self, peer_id: PeerId, environment: String, runtime: Arc<Runtime>) -> Result<(), Self::Err>;
+    fn configure(
+        &mut self,
+        peer_id: PeerId,
+        environment: String,
+        runtime: Arc<Runtime>,
+    ) -> Result<(), Self::Err>;
 
     /// Start the transport layer
     fn start(&mut self) -> Result<Receiver, Self::Err>;

@@ -6,7 +6,7 @@ pub(crate) mod registry;
 use crate::transport::TransportMessage;
 use crate::MessageTypeDescriptor;
 pub(crate) use dispatcher::{Error, MessageDispatcher};
-pub use zebus_core::{DispatchHandler, Handler, DEFAULT_DISPATCH_QUEUE};
+pub use zebus_core::{DispatchHandler, Handler, HandlerError, DEFAULT_DISPATCH_QUEUE};
 
 use self::future::DispatchFuture;
 
@@ -42,17 +42,12 @@ impl MessageDispatch {
 #[derive(Debug)]
 pub(crate) enum DispatchResult {
     Response(MessageTypeDescriptor, Vec<u8>),
-    Error(i32, String),
+    UserError(i32, String),
+    StandardError(Box<dyn std::error::Error + Send>),
 }
 
 impl DispatchResult {
-    pub(self) fn is_error(&self) -> bool {
-        matches!(self, Self::Error(..))
-    }
-}
-
-impl DispatchResult {
-    fn from_response<R>(response: R) -> Self
+    pub(self) fn from_response<R>(response: R) -> Self
     where
         R: crate::Message + prost::Message + 'static,
     {
@@ -61,8 +56,18 @@ impl DispatchResult {
         Self::Response(message_type_descriptor, payload)
     }
 
-    fn from_error(error: impl crate::Error) -> Self {
-        Self::Error(error.code(), error.to_string())
+    pub(self) fn from_error<E>(error: HandlerError<E>) -> Self
+    where
+        E: crate::Error,
+    {
+        match error {
+            crate::HandlerError::User(e) => Self::UserError(e.code(), e.to_string()),
+            crate::HandlerError::Standard(e) => Self::StandardError(e),
+        }
+    }
+
+    pub(self) fn is_error(&self) -> bool {
+        matches!(self, Self::UserError(..) | Self::StandardError(..))
     }
 }
 

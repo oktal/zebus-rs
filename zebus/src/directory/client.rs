@@ -1,35 +1,185 @@
-use thiserror::Error;
+use itertools::Itertools;
 
 use crate::{
-    routing::tree::PeerSubscriptionTree, transport::TransportMessage, Handler, MessageTypeId,
-    NoError, PeerId,
+    proto::{self, PeerDescriptor},
+    routing::tree::PeerSubscriptionTree,
+    transport::TransportMessage,
+    BindingKey, Handler, Peer, PeerId,
 };
 use std::{
-    collections::HashMap,
+    collections::{hash_map, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
 use super::{
-    commands::PingPeerCommand, PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted,
-    PeerStopped,
+    commands::{PingPeerCommand, RegisterPeerResponse},
+    event::PeerEvent,
+    PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
 };
 
-/// Entry representing a peer from the directory
-struct PeerEntry {}
+#[derive(Debug)]
+struct SubscriptionIndex(HashMap<String, PeerSubscriptionTree>);
 
-struct Inner {
-    /// Tree of subscriptions per [`MessageTypeId`]
-    subscriptions: HashMap<MessageTypeId, PeerSubscriptionTree>,
+impl SubscriptionIndex {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    fn add<'a>(
+        &mut self,
+        message_type: String,
+        peer: &Peer,
+        bindings: impl Iterator<Item = &'a BindingKey>,
+    ) {
+        let tree = self
+            .0
+            .entry(message_type)
+            .or_insert(PeerSubscriptionTree::new());
+        for key in bindings {
+            tree.add(peer.clone(), key);
+        }
+    }
+
+    fn remove<'a>(
+        &mut self,
+        message_type: &String,
+        peer: &Peer,
+        bindings: impl Iterator<Item = &'a BindingKey>,
+    ) {
+        if let Some(tree) = self.0.get_mut(message_type) {
+            for key in bindings {
+                tree.remove(peer, key);
+            }
+        }
+    }
 }
 
-impl Inner {
-    fn new() -> Self {
+#[derive(Debug)]
+struct SubscriptionEntry {
+    binding_keys: HashSet<BindingKey>,
+    timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Entry representing a peer from the directory
+#[derive(Debug, Default)]
+struct PeerEntry {
+    peer: Peer,
+    is_persistent: bool,
+    timestamp_utc: chrono::DateTime<chrono::Utc>,
+    has_debugger_attached: bool,
+    subscriptions: HashMap<String, SubscriptionEntry>,
+}
+
+impl PeerEntry {
+    fn new(descriptor: PeerDescriptor) -> Self {
+        let timestamp_utc = descriptor
+            .timestamp_utc
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or(chrono::Utc::now());
+
         Self {
+            peer: descriptor.peer,
+            is_persistent: descriptor.is_persistent,
+            timestamp_utc,
+            has_debugger_attached: descriptor.has_debugger_attached.unwrap_or(false),
             subscriptions: HashMap::new(),
         }
     }
 
-    fn handle(&mut self, peer_started: PeerStarted) {}
+    fn update(&mut self, descriptor: &PeerDescriptor) {
+        let timestamp_utc = descriptor
+            .timestamp_utc
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or(chrono::Utc::now());
+
+        self.peer.endpoint = descriptor.peer.endpoint.clone();
+        self.peer.is_up = descriptor.peer.is_up;
+        self.peer.is_responding = descriptor.peer.is_responding;
+        self.timestamp_utc = timestamp_utc;
+        self.has_debugger_attached = descriptor.has_debugger_attached.unwrap_or(false);
+    }
+
+    fn set_subscriptions(
+        &mut self,
+        subscriptions: Vec<proto::Subscription>,
+        index: &mut SubscriptionIndex,
+        timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        let subscription_bindings = subscriptions
+            .into_iter()
+            .map(|s| (s.message_type_id, s.binding_key))
+            .into_group_map();
+
+        for (message_type, bindings) in subscription_bindings {
+            let message_name = message_type.full_name;
+            let binding_keys = bindings.into_iter().map(Into::into).collect::<HashSet<_>>();
+
+            match self.subscriptions.entry(message_name.clone()) {
+                hash_map::Entry::Occupied(mut e) => {
+                    let entry = e.get_mut();
+
+                    let to_remove = entry.binding_keys.difference(&binding_keys);
+                    let to_add = binding_keys.difference(&entry.binding_keys);
+
+                    index.add(message_name.clone(), &self.peer, to_add);
+                    index.remove(&message_name, &self.peer, to_remove);
+
+                    entry.timestamp_utc = timestamp_utc;
+                    entry.binding_keys.retain(|b| binding_keys.contains(&b));
+                }
+                hash_map::Entry::Vacant(e) => {
+                    index.add(message_name.clone(), &self.peer, binding_keys.iter());
+                    e.insert(SubscriptionEntry {
+                        binding_keys,
+                        timestamp_utc,
+                    });
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Inner {
+    subscriptions: SubscriptionIndex,
+    peers: HashMap<PeerId, PeerEntry>,
+    events_tx: tokio::sync::mpsc::Sender<PeerEvent>,
+}
+
+impl Inner {
+    fn new() -> (Self, tokio::sync::mpsc::Receiver<PeerEvent>) {
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(128);
+
+        (
+            Self {
+                subscriptions: SubscriptionIndex::new(),
+                peers: HashMap::new(),
+                events_tx,
+            },
+            events_rx,
+        )
+    }
+
+    fn add_or_update(&mut self, descriptor: PeerDescriptor) {
+        let peer_id = descriptor.peer.id.clone();
+        let subscriptions = descriptor.subscriptions.clone();
+        let timestamp_utc = descriptor.timestamp_utc.clone();
+
+        let peer_entry = self
+            .peers
+            .entry(peer_id)
+            .and_modify(|e| e.update(&descriptor))
+            .or_insert_with(|| PeerEntry::new(descriptor));
+
+        let timestamp_utc = timestamp_utc.and_then(|t| t.try_into().ok());
+        peer_entry.set_subscriptions(subscriptions, &mut self.subscriptions, timestamp_utc);
+    }
+}
+
+impl Handler<PeerStarted> for Inner {
+    fn handle(&mut self, message: PeerStarted) {
+        self.add_or_update(message.descriptor);
+    }
 }
 
 #[derive(Handler)]
@@ -42,10 +192,15 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Inner::new())),
-        }
+    pub(crate) fn start() -> (Self, tokio::sync::mpsc::Receiver<PeerEvent>) {
+        let (inner, events_rx) = Inner::new();
+
+        (
+            Self {
+                inner: Arc::new(Mutex::new(inner)),
+            },
+            events_rx,
+        )
     }
 
     pub(crate) fn replay(&mut self, mut messages: Vec<TransportMessage>) -> Vec<TransportMessage> {
@@ -74,9 +229,20 @@ impl Client {
     }
 }
 
+impl crate::Handler<RegisterPeerResponse> for Client {
+    fn handle(&mut self, message: RegisterPeerResponse) {
+        let mut inner = self.inner.lock().unwrap();
+        for descriptor in message.peers {
+            inner.add_or_update(descriptor);
+        }
+    }
+}
+
 impl crate::Handler<PeerStarted> for DirectoryHandler {
     fn handle(&mut self, message: PeerStarted) {
-        println!("{message:?}")
+        let mut inner = self.inner.lock().unwrap();
+        inner.handle(message);
+        println!("{inner:?}");
     }
 }
 

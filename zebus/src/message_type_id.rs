@@ -4,7 +4,7 @@ use std::any::TypeId;
 pub(crate) mod proto {
     use crate::Message;
 
-    #[derive(Clone, prost::Message)]
+    #[derive(Clone, prost::Message, Eq, PartialEq, Hash)]
     pub struct MessageTypeId {
         #[prost(string, tag = "1")]
         pub full_name: String,

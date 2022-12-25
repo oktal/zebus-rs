@@ -2,13 +2,14 @@ use std::{
     future::Future,
     pin::Pin,
     ptr::NonNull,
+    sync::Arc,
     task::{Context, Poll},
-    time::Duration, sync::Arc,
+    time::Duration,
 };
 
 use chrono::Utc;
 use thiserror::Error;
-use tokio::{time::Timeout, runtime::Runtime};
+use tokio::{runtime::Runtime, time::Timeout};
 
 use super::{
     commands::{RegisterPeerCommand, RegisterPeerResponse},

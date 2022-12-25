@@ -1,12 +1,17 @@
 use prost::Message;
-use tokio::{runtime::Runtime, sync::{oneshot, mpsc, broadcast}};
 use std::{
     borrow::Cow,
     collections::HashMap,
-    io::{self, Read, Write},
-    thread::JoinHandle, sync::Arc,
+    io::{self, Write},
+    sync::Arc,
+    thread::JoinHandle,
 };
 use thiserror::Error;
+use tokio::{
+    io::AsyncReadExt,
+    runtime::Runtime,
+    sync::{broadcast, mpsc},
+};
 
 use crate::{
     transport::{
@@ -163,24 +168,21 @@ impl InboundWorker {
     }
 
     async fn run(&mut self) {
-        loop {
-            if let Ok(_) = self.shutdown_rx.try_recv() {
-                break;
-            }
+        self.inbound_socket.enable_polling().unwrap();
 
-            let mut rcv_buf = [0u8; 4096];
-            // TODO(oktal): Handle error properly
-            match self.inbound_socket.read(&mut rcv_buf[..]) {
-                Ok(size) => {
+        let mut rcv_buf = [0u8; 4096];
+
+        loop {
+            tokio::select! {
+                _ = self.shutdown_rx.recv() => { break },
+                // TODO(oktal): Handle error properly
+                Ok(size) = self.inbound_socket.read(&mut rcv_buf[..]) => {
                     match TransportMessage::decode(&rcv_buf[..size]) {
                         Ok(message) => self.rcv_tx.send(message).await.unwrap(),
                         Err(e) => eprintln!("Failed to decode: {e}. bytes {rcv_buf:?}"),
                     };
                 }
-                Err(_) => {
-                    //println!("{}", e.kind());
-                }
-            };
+            }
         }
     }
 }
@@ -319,7 +321,12 @@ impl OutboundWorker {
 impl Transport for ZmqTransport {
     type Err = Error;
 
-    fn configure(&mut self, peer_id: PeerId, environment: String, runtime: Arc<Runtime>) -> Result<(), Self::Err> {
+    fn configure(
+        &mut self,
+        peer_id: PeerId,
+        environment: String,
+        runtime: Arc<Runtime>,
+    ) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Unconfigured {
                 configuration,
@@ -371,10 +378,18 @@ impl Transport for ZmqTransport {
                 let (shutdown_tx, _shutdown_rx) = broadcast::channel(16);
 
                 // Start outbound worker
-                let (actions_tx, outbound_thread) = OutboundWorker::start(context.clone(), shutdown_tx.clone(), Arc::clone(&runtime))?;
+                let (actions_tx, outbound_thread) = OutboundWorker::start(
+                    context.clone(),
+                    shutdown_tx.clone(),
+                    Arc::clone(&runtime),
+                )?;
 
                 // Start inbound worker
-                let (rcv_rx, inbound_thread) = InboundWorker::start(inbound_socket, shutdown_tx.clone(), Arc::clone(&runtime))?;
+                let (rcv_rx, inbound_thread) = InboundWorker::start(
+                    inbound_socket,
+                    shutdown_tx.clone(),
+                    Arc::clone(&runtime),
+                )?;
 
                 (
                     // Transition to Started state

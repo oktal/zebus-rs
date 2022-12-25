@@ -8,7 +8,7 @@ pub(crate) mod proto {
     }
 }
 
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub struct BindingKey(zebus_core::BindingKey);
 
 impl From<zebus_core::BindingKey> for BindingKey {
@@ -39,7 +39,7 @@ impl BindingKey {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.fragments.is_none()
+        self.len() == 0
     }
 }
 
@@ -53,6 +53,12 @@ impl From<Vec<&str>> for BindingKey {
 impl From<Vec<String>> for BindingKey {
     fn from(parts: Vec<String>) -> Self {
         Self(parts.into())
+    }
+}
+
+impl From<proto::BindingKey> for BindingKey {
+    fn from(key: proto::BindingKey) -> Self {
+        Self::from(key.parts)
     }
 }
 

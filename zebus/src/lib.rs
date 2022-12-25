@@ -33,7 +33,7 @@ use message_type_descriptor::MessageTypeDescriptor;
 use message_type_id::MessageTypeId;
 
 pub use zebus_core::{
-    BindingKeyFragment, Command, Error, Event, Handler, Message, MessageBinding, NoError,
+    BindingKeyFragment, Command, Error, Event, Handler, HandlerError, Message, MessageBinding,
     ReplyHandler,
 };
 pub use zebus_macros::{Command, Event, Handler};

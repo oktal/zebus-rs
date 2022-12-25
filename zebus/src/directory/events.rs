@@ -7,7 +7,7 @@ use crate::{proto, PeerId};
 pub struct PeerStarted {
     /// [`PeerDescriptor`] descriptor of the peer that started
     #[prost(message, required, tag = 1)]
-    descriptor: proto::PeerDescriptor,
+    pub descriptor: proto::PeerDescriptor,
 }
 
 // TODO(oktal): Add transient
@@ -17,15 +17,15 @@ pub struct PeerStarted {
 pub struct PeerStopped {
     /// [`PeerId`] id of the stopped peer
     #[prost(message, required, tag = 1)]
-    id: PeerId,
+    pub id: PeerId,
 
     /// Endpoint of the stopped peer
     #[prost(string, optional, tag = 2)]
-    endpoint: Option<String>,
+    pub endpoint: Option<String>,
 
     /// UTC timestamp when the peer was stopped
     #[prost(message, optional, tag = 3)]
-    timestamp_utc: Option<proto::bcl::DateTime>,
+    pub timestamp_utc: Option<proto::bcl::DateTime>,
 }
 
 // TODO(oktal): Add transient
@@ -35,7 +35,7 @@ pub struct PeerStopped {
 pub struct PeerDecommissioned {
     /// [`PeerId`] id of the decommissioned peer
     #[prost(message, required, tag = 1)]
-    id: PeerId,
+    pub id: PeerId,
 }
 
 // TODO(oktal): Add transient
@@ -45,7 +45,7 @@ pub struct PeerDecommissioned {
 pub struct PeerNotResponding {
     /// [`PeerId`] id of the peer that is not responding
     #[prost(message, required, tag = 1)]
-    id: PeerId,
+    pub id: PeerId,
 }
 
 // TODO(oktal): Add transient
@@ -55,5 +55,5 @@ pub struct PeerNotResponding {
 pub struct PeerResponding {
     /// [`PeerId`] id of the peer that is responding
     #[prost(message, required, tag = 1)]
-    id: PeerId,
+    pub id: PeerId,
 }
