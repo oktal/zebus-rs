@@ -3,7 +3,6 @@ use chrono::Utc;
 use crate::{proto::IntoProtobuf, Peer, Subscription};
 
 pub(crate) mod proto {
-    /// Description of a [`Peer`]
     #[derive(Clone, prost::Message)]
     pub struct PeerDescriptor {
         #[prost(message, required, tag = 1)]
@@ -23,16 +22,23 @@ pub(crate) mod proto {
     }
 }
 
+/// Description of a [`Peer`]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerDescriptor {
+    /// The [`Peer`] this descriptor belongs to
     pub peer: Peer,
 
+    /// List of [`Subscription`] subscriptions for this [`Peer`]
     pub subscriptions: Vec<Subscription>,
 
+    /// Flag indicating whether the current [`Peer`] is persistent or not
     pub is_persistent: bool,
 
+    /// Optional timestamp of the current [`Peer`]
     pub timestamp_utc: Option<chrono::DateTime<Utc>>,
 
+    /// Optional flag indicating whether the current [`Peer`] has been started
+    /// with a debugger attached
     pub has_debugger_attached: Option<bool>,
 }
 

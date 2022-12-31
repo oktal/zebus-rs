@@ -1,47 +1,50 @@
+//! Provides a type with [`std::cell::Cell`] like semantic to access data with either exclusive
+//! or shared access wrapped through a [`Mutex`]
+//!
+//! This type can be used to access data through exclusive or shared access, withouth paying
+//! the cost of locking the underlying value everytime if data will be accessed with exclusive
+//! access
+//!
+//! This mechanism is well-suited for types that can optionally be sent to threads
+//!
+//! # Example
+//!
+//! ```ignore
+//!
+//! struct CallbackInfo {
+//!     synchronous: bool,
+//!     token: usize
+//! }
+//!
+//! fn worker(info: LockCell<CallbackInfo>) {
+//! }
+//!
+//! fn start() {
+//!     let callbacks = vec![
+//!         CallbackInfo { synchronous: true, token: 0 },
+//!         CallbackInfo { synchronous: false, token: 1 },
+//!         CallbackInfo { synchronous: false, token: 2 }
+//!     ];
+//!
+//!     for callback in callbacks {
+//!         let synchronous = callback.synchronous;
+//!         let cb = LockCell::new(callback);
+//!
+//!         if !synchronous {
+//!             let [cb0, cb1] = cb.into_shared::<2>();
+//!             std::thread::spawn(|| {
+//!                 worker(cb0);
+//!             });
+//!
+//!             // Do something with cb1 which is safe to use accross threads
+//!         } else {
+//!             // cb can be used with exclusive access without a lock
+//!         }
+//!     }
+//! }
+//! ```
 use std::sync::{Arc, Mutex};
 
-/// Provides a type with [`std::cell::Cell`] like semantic to access data either with exclusive
-/// access or shared access wrapped through a [`Mutex`]
-///
-/// This type can be used to access data through exclusive or shared access, withouth paying
-/// the cost of locking the underlying value everytime if data will be accessed with exclusive
-/// access
-///
-/// This mechanism is well-suited for types that can optionally be sent to threads
-///
-/// # Example
-///
-/// ```
-/// struct CallbackInfo {
-///     synchronous: bool,
-///
-///     token: usize
-/// }
-///
-/// fn worker(info: LockCell<CallbackInfo>) {
-/// }
-///
-/// let callbacks = vec![
-///     CallbackInfo { synchronous: true, token: 0 },
-///     CallbackInfo { synchronous: false, token: 1 },
-///     CallbackInfo { synchornous: false, token: 2 }
-/// ];
-///
-/// for callback in callbacks {
-///     let synchronous = callback.synchronous;
-///     let cb = LockCell::new(callback);
-///
-///     if !synchronous {
-///         let [cb0, cb1] = cb.into_shared::<2>();
-///         std::thread::spawn(|| {
-///             worker(cb0);
-///         });
-///
-///         // Do something with cb1 which is safe to use accross threads
-///     } else {
-///         // cb can be used with exclusive access without a lock
-///     }
-/// ```
 pub(crate) enum LockCell<T> {
     /// Exclusive access to the underlying value
     Exclusive(T),

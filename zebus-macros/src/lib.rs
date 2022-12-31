@@ -75,7 +75,7 @@
 //!
 //! # [`Handler`] derive macro
 //!
-//! This macro will implement the [`DispatchHandler`] trait:
+//! This macro will implement the [`zebus_core::DispatchHandler`] trait:
 //!
 //! ```
 //! use zebus_macros::Handler;

@@ -8,7 +8,7 @@ pub const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_millis(300);
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Keep alive options that can be set to a zmq [`Socket`]
+/// Keep alive options that can be set to a zmq [`zmq::Socket`]
 #[derive(Copy, Clone, Debug)]
 pub struct KeepAliveOptions {
     /// Set the `ZMQ_TCP_KEEPALIVE` option to the provided value
@@ -20,9 +20,8 @@ pub struct KeepAliveOptions {
     pub interval: Option<Duration>,
 }
 
-/// Options that can be set to a zmq [`Socket`]
-/// Please refer to [`zmq_setsockopt`]: http://api.zeromq.org/3-0:zmq-setsockopt for a complete
-/// documentation of all available options
+/// Options that can be set to a zmq [`zmq::Socket`]
+/// Please refer to [zmq_setsockopt](http://api.zeromq.org/3-0:zmq-setsockopt) for a complete documentation of all available options
 #[derive(Copy, Clone, Debug)]
 pub struct ZmqSocketOptions {
     /// Set the `ZMQ_SNDHWM` option to the provided value

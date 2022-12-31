@@ -4,7 +4,7 @@ pub const DEFAULT_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_START_REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_BATCH_SIZE: usize = 100;
 
-/// Configuration parameters for a [`Bus`]
+/// Configuration parameters for a [`Bus`](crate::Bus)
 #[derive(Debug, Clone)]
 pub struct BusConfiguration {
     /// The list of directories that can be used by the Bus to register.
@@ -19,8 +19,7 @@ pub struct BusConfiguration {
     /// Failing to get a response from the Persistence in the allotted time causes the Peer to stop.
     pub start_replay_timeout: Duration,
 
-    /// A peer marked as persistent will benefit from the [`persistence`] mechanism
-    /// persistence: https://github.com/Abc-Arbitrage/Zebus/wiki/Persistence
+    /// A peer marked as persistent will benefit from the [persistence](https://github.com/Abc-Arbitrage/Zebus/wiki/Persistence) mechanism
     pub is_persistent: bool,
 
     /// Mainly a debugging setting, setting it to false will prevent the Bus from connecting

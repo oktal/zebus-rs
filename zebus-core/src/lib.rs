@@ -1,4 +1,4 @@
-use std::{error, fmt, marker::PhantomData};
+use std::{error, fmt, marker::PhantomData, str::FromStr};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoutingField {
@@ -6,12 +6,16 @@ pub struct RoutingField {
     pub routing_position: usize,
 }
 
-/// A fragment of a ['BindingKey`] that will represent either a string literal, a star `*` or a
-/// sharp `#`
+/// A fragment of a [`BindingKey`]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum BindingKeyFragment {
+    /// Raw string literal
     Value(String),
+
+    /// Star `*`
     Star,
+
+    /// Sharp `#`
     Sharp,
 }
 
@@ -32,6 +36,18 @@ impl fmt::Display for BindingKeyFragment {
             BindingKeyFragment::Star => write!(f, "*"),
             BindingKeyFragment::Sharp => write!(f, "#"),
         }
+    }
+}
+
+impl FromStr for BindingKeyFragment {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "*" => BindingKeyFragment::Star,
+            "#" => BindingKeyFragment::Sharp,
+            _ => BindingKeyFragment::Value(s.to_string()),
+        })
     }
 }
 
@@ -104,11 +120,22 @@ pub trait MessageBinding {
     fn bind(binding: Self::Binding) -> BindingKey;
 }
 
-/// A message that can be sent to a peer, asking for an action to be performed
+/// Trait for a message that can be sent to a peer, asking for an action to be performed
 pub trait Command: Message {}
 
-/// A message that can be published to multiple peers, notifying that an action has been performed
+/// Trait for a message that can be published to multiple peers, notifying that an action has been performed
 pub trait Event: Message {}
+
+/// Enum representing the type of a [`Message`]
+/// A [`Message`] can either be a [`Command`] command or [`Event`] event
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MessageKind {
+    /// Message of type [`Command`]
+    Command,
+
+    /// Message of type [`Event`]
+    Event,
+}
 
 #[macro_export]
 macro_rules! fragment {
@@ -138,7 +165,7 @@ macro_rules! binding_key {
     };
 }
 
-/// Error type that can be returned by a [`ReplyHandler`] handler
+/// User error type that can be returned by a [`ReplyHandler`] handler
 pub trait Error: error::Error {
     /// Numeric representation of the underlying error
     fn code(&self) -> i32;
@@ -150,8 +177,21 @@ impl Error for std::convert::Infallible {
     }
 }
 
+/// Error type that can be returned by a [`Handler`] or [`ReplyHandler`] handler.
+/// A handler can fail it two ways.
+/// 1. Handling a message can succeed but yield a logical error
+/// 2. Handling a message can fail by invoking a faillible operation that failed, e.g an operation
+///    that yields a [`Result`](std::result::Result) and failed with an `Err`.
+///    This would be the equivalent of an exception in other languages.
 pub enum HandlerError<E: Error> {
+    /// A standard [`Error`](std::error::Error).
+    ///
+    /// Corresponds to a faillible operation that failed
     Standard(Box<dyn std::error::Error + Send>),
+
+    /// A user [`Error`].
+    ///
+    /// Corresponds to a logical error raised when handling a message
     User(E),
 }
 
@@ -167,16 +207,15 @@ impl<E: Error> From<E> for HandlerError<E> {
     }
 }
 
-/// Zebus handler of a [`T`] typed message.
-///
+/// Zebus handler of a `T` typed message.
 /// Zebus handlers must implemented this trait to be able to handle particular
 /// messages
 pub trait Handler<T> {
-    /// Handle [`message`]
+    /// Handle `message`
     fn handle(&mut self, message: T);
 }
 
-/// Zebus handler of a [`T`] typed message that returns a response
+/// Zebus handler of a `T` typed message that returns a response
 ///
 /// Zebus handlers that want to return a response back to the originator peer must implement
 /// this trait
@@ -187,7 +226,7 @@ pub trait ReplyHandler<T: Command> {
     /// Error to return to the originator
     type Err: Error;
 
-    /// Handle [`message`]
+    /// Handle `message`
     fn handle(&mut self, message: T) -> Result<Self::Output, HandlerError<Self::Err>>;
 }
 
