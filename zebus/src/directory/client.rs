@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use tokio::sync::mpsc;
 
 use crate::{
     proto::{self, PeerDescriptor},
@@ -139,11 +140,24 @@ impl PeerEntry {
     }
 }
 
+struct PeerUpdate<'a> {
+    id: &'a PeerId,
+    events_tx: &'a mpsc::Sender<PeerEvent>,
+}
+
+impl PeerUpdate<'_> {
+    fn raise(&self, event_fn: impl FnOnce(PeerId) -> PeerEvent) {
+        if let Err(_) = self.events_tx.blocking_send(event_fn(self.id.clone())) {}
+    }
+
+    fn forget(self) {}
+}
+
 #[derive(Debug)]
 struct Inner {
     subscriptions: SubscriptionIndex,
     peers: HashMap<PeerId, PeerEntry>,
-    events_tx: tokio::sync::mpsc::Sender<PeerEvent>,
+    events_tx: mpsc::Sender<PeerEvent>,
 }
 
 impl Inner {
@@ -160,7 +174,7 @@ impl Inner {
         )
     }
 
-    fn add_or_update(&mut self, descriptor: PeerDescriptor) {
+    fn add_or_update(&mut self, descriptor: PeerDescriptor) -> PeerUpdate {
         let peer_id = descriptor.peer.id.clone();
         let subscriptions = descriptor.subscriptions.clone();
         let timestamp_utc = descriptor.timestamp_utc.clone();
@@ -174,16 +188,17 @@ impl Inner {
         let timestamp_utc = timestamp_utc.and_then(|t| t.try_into().ok());
         peer_entry.set_subscriptions(subscriptions, &mut self.subscriptions, timestamp_utc);
 
-        if let Err(_) = self
-            .events_tx
-            .blocking_send(PeerEvent::Started(peer_id.clone()))
-        {}
+        PeerUpdate {
+            id: &peer_entry.peer.id,
+            events_tx: &self.events_tx,
+        }
     }
 }
 
 impl Handler<PeerStarted> for Inner {
     fn handle(&mut self, message: PeerStarted) {
-        self.add_or_update(message.descriptor);
+        self.add_or_update(message.descriptor)
+            .raise(PeerEvent::Started);
     }
 }
 
@@ -238,7 +253,7 @@ impl crate::Handler<RegisterPeerResponse> for Client {
     fn handle(&mut self, message: RegisterPeerResponse) {
         let mut inner = self.inner.lock().unwrap();
         for descriptor in message.peers {
-            inner.add_or_update(descriptor);
+            inner.add_or_update(descriptor).forget();
         }
     }
 }
