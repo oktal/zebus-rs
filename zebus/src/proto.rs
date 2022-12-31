@@ -8,6 +8,12 @@ pub mod bcl {
     pub use crate::bcl::*;
 }
 
+pub(crate) trait FromProtobuf {
+    type Input;
+
+    fn from_protobuf(input: Self::Input) -> Self;
+}
+
 pub(crate) trait IntoProtobuf {
     type Output;
     fn into_protobuf(self) -> Self::Output;
@@ -26,6 +32,22 @@ where
 
     fn as_protobuf(&self) -> Self::Output {
         self.clone().into_protobuf()
+    }
+}
+
+impl<T: FromProtobuf> FromProtobuf for Option<T> {
+    type Input = Option<T::Input>;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        input.map(T::from_protobuf)
+    }
+}
+
+impl<T: FromProtobuf> FromProtobuf for Vec<T> {
+    type Input = Vec<T::Input>;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        input.into_iter().map(T::from_protobuf).collect()
     }
 }
 

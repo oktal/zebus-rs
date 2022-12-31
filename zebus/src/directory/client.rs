@@ -167,12 +167,17 @@ impl Inner {
 
         let peer_entry = self
             .peers
-            .entry(peer_id)
+            .entry(peer_id.clone())
             .and_modify(|e| e.update(&descriptor))
             .or_insert_with(|| PeerEntry::new(descriptor));
 
         let timestamp_utc = timestamp_utc.and_then(|t| t.try_into().ok());
         peer_entry.set_subscriptions(subscriptions, &mut self.subscriptions, timestamp_utc);
+
+        if let Err(_) = self
+            .events_tx
+            .blocking_send(PeerEvent::Started(peer_id.clone()))
+        {}
     }
 }
 

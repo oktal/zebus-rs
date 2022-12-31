@@ -3,9 +3,9 @@ use std::{
     collections::{hash_map::Entry, HashMap},
 };
 
-use zebus_core::{Command, ReplyHandler};
+use zebus_core::{Command, HandlerError, MessageKind, ReplyHandler};
 
-use super::{Dispatch, DispatchHandler, DispatchResult, Handler, MessageDispatch};
+use super::{Dispatch, DispatchHandler, DispatchOutput, Handler, MessageDispatch};
 use crate::{sync::LockCell, Message, MessageTypeDescriptor};
 
 type InvokerFn = dyn Fn(&MessageDispatch, &mut (dyn Any + 'static)) + Send;
@@ -45,6 +45,7 @@ where
                 //   1. `handler` is of type `Box<H>
                 //   2. `H` has an explicit bound on `Handler<T>`
                 unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
+                dispatch.set_kind(MessageKind::Command);
             }
         };
 
@@ -63,12 +64,15 @@ where
                 //   1. `handler` is of type `Box<H>
                 //   2. `H` has an explicit bound on `Handler<T>`
                 let res = unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
-                let result = match res {
-                    Ok(response) => DispatchResult::from_response(response),
-                    Err(e) => DispatchResult::from_error(e),
-                };
+                dispatch.set_kind(MessageKind::Command);
 
-                dispatch.set_handled(result);
+                match res {
+                    Ok(response) => dispatch.set_output(DispatchOutput::with_response(response)),
+                    Err(err) => match err {
+                        HandlerError::User(e) => dispatch.set_output(DispatchOutput::with_error(e)),
+                        HandlerError::Standard(e) => dispatch.add_error(e),
+                    },
+                }
             }
         };
 

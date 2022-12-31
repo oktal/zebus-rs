@@ -34,7 +34,7 @@ use message_type_id::MessageTypeId;
 
 pub use zebus_core::{
     BindingKeyFragment, Command, Error, Event, Handler, HandlerError, Message, MessageBinding,
-    ReplyHandler,
+    MessageKind, ReplyHandler,
 };
 pub use zebus_macros::{Command, Event, Handler};
 

@@ -8,6 +8,7 @@ use thiserror::Error;
 use tokio::{
     runtime::Runtime,
     sync::{mpsc, oneshot},
+    task::JoinHandle,
 };
 
 use crate::{
@@ -19,7 +20,7 @@ use crate::{
         self, commands::PingPeerCommand, event::PeerEvent, PeerDecommissioned, PeerNotResponding,
         PeerResponding, PeerStarted, PeerStopped, Registration,
     },
-    dispatch::{self, Dispatcher, MessageDispatcher},
+    dispatch::{self, Dispatched, Dispatcher, MessageDispatcher},
     transport::{self, SendContext, Transport, TransportMessage},
     Bus, BusConfiguration, Command, Handler, Peer, PeerId,
 };
@@ -92,33 +93,108 @@ enum State<T: Transport> {
     Started {
         runtime: Arc<Runtime>,
         configuration: BusConfiguration,
-        transport: T,
         self_peer: Peer,
         environment: String,
 
         directory: directory::Client,
 
         pending_commands: Arc<Mutex<HashMap<uuid::Uuid, CommandPromise>>>,
-        rx_handle: tokio::task::JoinHandle<()>,
+        snd_tx: mpsc::Sender<SendEntry>,
+        rx_handle: JoinHandle<()>,
+        tx_handle: JoinHandle<()>,
     },
 }
 
-async fn receive(
-    receiver: transport::Receiver,
-    pending_commands: Arc<Mutex<HashMap<uuid::Uuid, CommandPromise>>>,
-    mut dispatcher: MessageDispatcher,
-) {
-    let mut receiver = receiver;
+struct SendEntry {
+    message: TransportMessage,
+    peers: Vec<Peer>,
+}
 
-    while let Some(message) = receiver.recv().await {
-        let result = dispatcher.dispatch(message).await;
+struct SenderContext<T: Transport> {
+    transport: T,
+    rx: mpsc::Receiver<SendEntry>,
+}
+
+impl<T: Transport> SenderContext<T> {
+    fn new(transport: T) -> (mpsc::Sender<SendEntry>, Self) {
+        // TODO(oktal): hardcoded limit
+        let (tx, rx) = mpsc::channel(128);
+        (tx, Self { transport, rx })
+    }
+
+    fn send(&mut self, entry: SendEntry) {
+        self.transport.send(
+            entry.peers.into_iter(),
+            entry.message,
+            SendContext::default(),
+        );
     }
 }
 
-async fn peer_directory_events(events_rx: mpsc::Receiver<PeerEvent>) {
+struct ReceiverContext {
+    rx: transport::Receiver,
+    tx: mpsc::Sender<SendEntry>,
+    self_peer: Peer,
+    environment: String,
+    dispatcher: MessageDispatcher,
+}
+
+impl ReceiverContext {
+    fn new(
+        rx: transport::Receiver,
+        tx: mpsc::Sender<SendEntry>,
+        self_peer: Peer,
+        environment: String,
+        dispatcher: MessageDispatcher,
+    ) -> Self {
+        Self {
+            rx,
+            tx,
+            self_peer,
+            environment,
+            dispatcher,
+        }
+    }
+
+    async fn dispatch(&mut self, message: TransportMessage) -> Dispatched {
+        self.dispatcher.dispatch(message).await
+    }
+
+    async fn send(&mut self, message: TransportMessage, peers: Vec<Peer>) {
+        self.tx.send(SendEntry { message, peers }).await;
+    }
+}
+
+/// Reception loop for [`TransportMesssage`] messages
+async fn receiver(mut ctx: ReceiverContext) {
+    while let Some(message) = ctx.rx.recv().await {
+        // Dispatch message
+        let dispatched = ctx.dispatch(message).await;
+
+        // If the message that has been dispatched is a Command, send back the
+        // MessageExecutionCompleted
+        if dispatched.is_command() {
+            let (message, peer) =
+                dispatched.into_transport(&ctx.self_peer, ctx.environment.clone());
+            ctx.send(message, vec![peer]).await;
+        }
+    }
+}
+
+/// Sender loop for [`TransportMessage`] messages
+async fn sender<T: Transport>(mut ctx: SenderContext<T>) {
+    while let Some(entry) = ctx.rx.recv().await {
+        ctx.send(entry);
+    }
+}
+
+/// Reception loop for [`PeerEvent`] peer directory events
+async fn directory_rx(events_rx: mpsc::Receiver<PeerEvent>) {
     let mut events_rx = events_rx;
 
-    while let Some(event) = events_rx.recv().await {}
+    while let Some(event) = events_rx.recv().await {
+        println!("{event:?}");
+    }
 }
 
 fn try_register<T: Transport>(
@@ -235,7 +311,8 @@ impl<T: Transport> Bus for BusImpl<T> {
                 environment,
             }) => {
                 // Start transport
-                let receiver = transport.start().map_err(|e| Error::Transport(e.into()))?;
+                let transport_receiver =
+                    transport.start().map_err(|e| Error::Transport(e.into()))?;
                 let endpoint = transport
                     .inbound_endpoint()
                     .map_err(|e| Error::Transport(e.into()))?;
@@ -250,20 +327,21 @@ impl<T: Transport> Bus for BusImpl<T> {
 
                 let registration = try_register(
                     &mut transport,
-                    &receiver,
+                    &transport_receiver,
                     Arc::clone(&runtime),
                     self_peer.clone(),
                     environment.clone(),
                     &configuration,
                 )?;
 
-                // Create peer directory client
+                // Start peer directory client
                 let (mut directory, directory_events_rx) = directory::Client::start();
 
                 if let Ok(response) = registration.result {
                     directory.handle(response);
                 }
 
+                // Setup peer directory client handler
                 dispatcher
                     .add(dispatch::registry::for_handler(directory.handler(), |h| {
                         h.handles::<PeerStarted>()
@@ -278,23 +356,36 @@ impl<T: Transport> Bus for BusImpl<T> {
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
 
-                let _directory_handle = runtime.spawn(peer_directory_events(directory_events_rx));
+                let _directory_handle = runtime.spawn(directory_rx(directory_events_rx));
 
                 let pending_commands = Arc::new(Mutex::new(HashMap::new()));
-                let rx_handle =
-                    runtime.spawn(receive(receiver, Arc::clone(&pending_commands), dispatcher));
+
+                // Create sender and receiver
+                let (snd_tx, snd_ctx) = SenderContext::new(transport);
+                let rcv_ctx = ReceiverContext::new(
+                    transport_receiver,
+                    snd_tx.clone(),
+                    self_peer.clone(),
+                    environment.clone(),
+                    dispatcher,
+                );
+
+                // Start sender and receiver
+                let tx_handle = runtime.spawn(sender(snd_ctx));
+                let rx_handle = runtime.spawn(receiver(rcv_ctx));
 
                 // Transition to started state
                 (
                     Some(State::Started {
                         runtime,
                         configuration,
-                        transport,
                         self_peer,
                         environment,
                         directory,
                         pending_commands,
+                        snd_tx,
                         rx_handle,
+                        tx_handle,
                     }),
                     Ok(()),
                 )
@@ -321,7 +412,7 @@ impl<T: Transport> Bus for BusImpl<T> {
     ) -> Result<CommandFuture, Self::Err> {
         match self.inner.as_mut() {
             Some(State::Started {
-                ref mut transport,
+                ref snd_tx,
                 ref pending_commands,
                 ref self_peer,
                 ref environment,
@@ -334,7 +425,11 @@ impl<T: Transport> Bus for BusImpl<T> {
                 let mut pending_commands = pending_commands.lock().unwrap();
                 pending_commands.entry(id).or_insert(CommandPromise(tx));
 
-                transport.send(std::iter::once(peer), message, SendContext::default());
+                // TODO(oktal): use async send
+                snd_tx.blocking_send(SendEntry {
+                    message,
+                    peers: vec![peer],
+                });
                 Ok(CommandFuture(rx))
             }
             _ => Err(Error::InvalidOperation),

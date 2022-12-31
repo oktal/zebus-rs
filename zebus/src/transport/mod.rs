@@ -17,7 +17,7 @@ pub use transport_message::TransportMessage;
 pub type Receiver = tokio::sync::mpsc::Receiver<TransportMessage>;
 
 /// Transport layer trait
-pub trait Transport {
+pub trait Transport: Send + 'static {
     /// The associated error type which can be returned from the transport layer
     type Err: std::error::Error + 'static;
 

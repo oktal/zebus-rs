@@ -4,7 +4,7 @@ use crate::{proto, Message};
 #[derive(Clone, prost::Message, crate::Event)]
 #[zebus(namespace = "Abc.Zebus.Core")]
 pub struct MessageExecutionCompleted {
-    /// [`MessageId`] of the original command
+    /// [`proto::MessageId`] of the original command
     #[prost(message, required, tag = 1)]
     pub command_id: proto::MessageId,
 
@@ -12,7 +12,7 @@ pub struct MessageExecutionCompleted {
     #[prost(int32, required, tag = 2)]
     pub error_code: i32,
 
-    /// Optional response [`MessageTypeId`] message type id
+    /// Optional response [`proto::MessageTypeId`] message type id
     #[prost(message, optional, tag = 3)]
     pub payload_type_id: Option<proto::MessageTypeId>,
 

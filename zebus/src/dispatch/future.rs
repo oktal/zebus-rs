@@ -4,24 +4,65 @@ use std::{
     task::{Poll, Waker},
 };
 
-use super::DispatchResult;
+use super::{DispatchError, DispatchOutput, Dispatched};
+use crate::{transport::OriginatorInfo, MessageId, MessageKind};
+
+struct Context {
+    message_id: MessageId,
+    originator: OriginatorInfo,
+    kind: Option<MessageKind>,
+    errors: DispatchError,
+    output: Option<DispatchOutput>,
+}
+
+impl Context {
+    fn new(message_id: MessageId, originator: OriginatorInfo) -> Self {
+        Self {
+            message_id,
+            originator,
+            kind: None,
+            errors: DispatchError::default(),
+            output: None,
+        }
+    }
+}
+
+impl Into<Dispatched> for Context {
+    fn into(self) -> Dispatched {
+        let message_id = self.message_id;
+        let originator = self.originator;
+        let kind = self.kind.expect("missing message kind in dispatch context");
+        let result = if self.errors.is_empty() {
+            Ok(self.output)
+        } else {
+            Err(self.errors)
+        };
+
+        Dispatched {
+            message_id,
+            originator,
+            kind,
+            result,
+        }
+    }
+}
 
 struct Repr {
     /// Flag to indicate whether the dispatch is completed
     completed: bool,
 
-    /// Optional result
-    result: Option<DispatchResult>,
+    /// Current dispatch context
+    context: Option<Context>,
 
     /// Waker to use to wake the `tokio` runtime and poll the underlying future
     waker: Option<Waker>,
 }
 
 impl Repr {
-    fn new() -> Self {
+    fn new(message_id: MessageId, originator: OriginatorInfo) -> Self {
         Self {
             completed: false,
-            result: None,
+            context: Some(Context::new(message_id, originator)),
             waker: None,
         }
     }
@@ -40,18 +81,25 @@ impl Clone for DispatchFuture {
 }
 
 impl DispatchFuture {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(message_id: MessageId, originator: OriginatorInfo) -> Self {
         Self {
-            repr: Arc::new(Mutex::new(Repr::new())),
+            repr: Arc::new(Mutex::new(Repr::new(message_id, originator))),
         }
     }
 
-    pub(super) fn set_handled(&self, result: DispatchResult) {
-        let mut state = self.repr.lock().unwrap();
-        state.result = Some(result);
+    pub(super) fn set_kind(&self, kind: MessageKind) {
+        self.apply_context(|ctx| ctx.kind = Some(kind));
     }
 
-    pub(super) fn set_completed(&self) {
+    pub(super) fn set_output(&self, output: DispatchOutput) {
+        self.apply_context(|ctx| ctx.output = Some(output));
+    }
+
+    pub(super) fn add_error(&self, error: Box<dyn std::error::Error + Send>) {
+        self.apply_context(|ctx| ctx.errors.add(error));
+    }
+
+    pub(super) fn set_completed(self) {
         let mut state = self.repr.lock().unwrap();
         state.completed = true;
         if let Some(waker) = state.waker.take() {
@@ -59,14 +107,16 @@ impl DispatchFuture {
         }
     }
 
-    pub(super) fn has_error(&self) -> bool {
-        let state = self.repr.lock().unwrap();
-        state.result.as_ref().map(|r| r.is_error()).unwrap_or(false)
+    fn apply_context(&self, f: impl FnOnce(&mut Context)) {
+        let mut state = self.repr.lock().unwrap();
+        if let Some(ref mut ctx) = state.context {
+            f(ctx);
+        }
     }
 }
 
 impl Future for DispatchFuture {
-    type Output = Option<DispatchResult>;
+    type Output = Dispatched;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -74,7 +124,7 @@ impl Future for DispatchFuture {
     ) -> std::task::Poll<Self::Output> {
         let mut state = self.repr.lock().unwrap();
         if state.completed {
-            Poll::Ready(state.result.take())
+            Poll::Ready(state.context.take().expect("missing context").into())
         } else {
             state.waker = Some(cx.waker().clone());
             Poll::Pending

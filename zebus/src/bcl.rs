@@ -1,6 +1,6 @@
 use chrono::TimeZone;
 
-use crate::proto::{AsProtobuf, IntoProtobuf};
+use crate::proto::{FromProtobuf, IntoProtobuf};
 
 #[derive(Clone, Copy, Eq, PartialEq, prost::Message)]
 pub struct Guid {
@@ -21,6 +21,14 @@ impl From<uuid::Uuid> for Guid {
     fn from(uuid: uuid::Uuid) -> Self {
         let (lo, hi) = uuid.as_u64_pair();
         Self { hi, lo }
+    }
+}
+
+impl FromProtobuf for uuid::Uuid {
+    type Input = Guid;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        input.to_uuid()
     }
 }
 

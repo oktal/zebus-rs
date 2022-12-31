@@ -1,4 +1,4 @@
-use crate::Message;
+use crate::{message_type_id::proto, proto::IntoProtobuf, Message};
 use std::any::TypeId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,6 +24,16 @@ impl MessageTypeDescriptor {
             r#type: TypeId::of::<M>(),
             is_persistent: !M::TRANSIENT,
             is_infrastructure: M::INFRASTRUCTURE,
+        }
+    }
+}
+
+impl IntoProtobuf for MessageTypeDescriptor {
+    type Output = proto::MessageTypeId;
+
+    fn into_protobuf(self) -> Self::Output {
+        proto::MessageTypeId {
+            full_name: self.full_name,
         }
     }
 }

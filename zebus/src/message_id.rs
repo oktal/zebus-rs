@@ -1,4 +1,4 @@
-use crate::proto::IntoProtobuf;
+use crate::proto::{FromProtobuf, IntoProtobuf};
 
 pub(crate) mod proto {
     use crate::bcl::Guid;
@@ -23,6 +23,14 @@ impl MessageId {
 impl From<uuid::Uuid> for MessageId {
     fn from(uuid: uuid::Uuid) -> Self {
         Self(uuid)
+    }
+}
+
+impl FromProtobuf for MessageId {
+    type Input = proto::MessageId;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        Self(uuid::Uuid::from_protobuf(input.value))
     }
 }
 
