@@ -57,3 +57,33 @@ pub struct PeerResponding {
     #[prost(message, required, tag = 1)]
     pub id: PeerId,
 }
+
+#[derive(prost::Message)]
+/// List of subscriptions for a given message
+pub struct SubscriptionsForType {
+    /// Message the subscriptions belong to
+    #[prost(message, required, tag = 1)]
+    pub message_type: proto::MessageTypeId,
+
+    /// List of bindings for this message
+    #[prost(message, repeated, tag = 2)]
+    pub bindings: Vec<proto::BindingKey>,
+}
+
+/// TODO(oktal): Add transient
+/// [`Event`] raised when subscriptions for a message have been updated
+#[derive(prost::Message, crate::Event)]
+#[zebus(namespace = "Abc.Zebus.Directory")]
+pub struct PeerSubscriptionsForTypeUpdated {
+    /// [`PeerId`] id of the peer for which the subscriptions have been updated
+    #[prost(message, required, tag = 1)]
+    pub peer_id: PeerId,
+
+    /// List of subscriptions that have been updated
+    #[prost(message, repeated, tag = 2)]
+    pub subscriptions: Vec<SubscriptionsForType>,
+
+    /// Timestamp of the update
+    #[prost(message, required, tag = 3)]
+    pub timestamp_utc: proto::bcl::DateTime,
+}

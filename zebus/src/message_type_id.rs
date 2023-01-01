@@ -11,6 +11,12 @@ pub(crate) mod proto {
     }
 
     impl MessageTypeId {
+        pub fn of<M: Message>() -> Self {
+            Self {
+                full_name: M::name().to_string(),
+            }
+        }
+
         pub fn is<M: Message>(&self) -> bool {
             self.full_name == M::name()
         }
@@ -25,21 +31,39 @@ pub struct MessageTypeId {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MessageType(String);
 
+impl MessageType {
+    pub fn of<M: crate::Message>() -> Self {
+        Self(M::name().to_string())
+    }
+}
+
+impl MessageType {}
+
 impl From<String> for MessageType {
     fn from(str: String) -> Self {
         Self(str)
     }
 }
 
-impl Into<MessageType> for MessageTypeId {
-    fn into(self) -> MessageType {
-        MessageType(self.descriptor.full_name)
+impl From<MessageTypeId> for MessageType {
+    fn from(id: MessageTypeId) -> Self {
+        MessageType(id.descriptor.full_name)
+    }
+}
+
+impl From<proto::MessageTypeId> for MessageType {
+    fn from(id: proto::MessageTypeId) -> Self {
+        MessageType(id.full_name)
     }
 }
 
 impl MessageTypeId {
     pub(crate) fn from_descriptor(descriptor: MessageTypeDescriptor) -> Self {
         Self { descriptor }
+    }
+
+    pub fn of<M: crate::Message + 'static>() -> Self {
+        Self::from_descriptor(MessageTypeDescriptor::of::<M>())
     }
 
     /// Returns the fully qualified name of this message type

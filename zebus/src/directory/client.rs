@@ -16,6 +16,7 @@ use std::{
 use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
+    events::{PeerSubscriptionsForTypeUpdated, SubscriptionsForType},
     PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
 };
 
@@ -39,6 +40,13 @@ impl SubscriptionIndex {
             .or_insert(PeerSubscriptionTree::new());
         for key in bindings {
             tree.add(peer.clone(), key);
+        }
+    }
+
+    fn get(&self, message_type: &MessageType, binding: &BindingKey) -> Vec<Peer> {
+        match self.0.get(message_type) {
+            Some(tree) => tree.get_peers(binding),
+            None => vec![],
         }
     }
 
@@ -112,8 +120,8 @@ impl PeerEntry {
 
     fn set_subscriptions(
         &mut self,
-        subscriptions: Vec<proto::Subscription>,
         index: &mut SubscriptionIndex,
+        subscriptions: Vec<proto::Subscription>,
         timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
     ) {
         let subscription_bindings = subscriptions
@@ -124,27 +132,53 @@ impl PeerEntry {
         for (message_type, bindings) in subscription_bindings {
             let message_type = MessageType::from(message_type.full_name);
             let binding_keys = bindings.into_iter().map(Into::into).collect::<HashSet<_>>();
+            self.set_message_subscriptions(index, message_type, binding_keys, timestamp_utc);
+        }
+    }
 
-            match self.subscriptions.entry(message_type.clone()) {
-                hash_map::Entry::Occupied(mut e) => {
-                    let entry = e.get_mut();
+    fn set_subscriptions_for(
+        &mut self,
+        index: &mut SubscriptionIndex,
+        subscriptions: Vec<SubscriptionsForType>,
+        timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        for subscription in subscriptions {
+            let message_type = MessageType::from(subscription.message_type);
+            let binding_keys = subscription
+                .bindings
+                .into_iter()
+                .map(Into::into)
+                .collect::<HashSet<_>>();
+            self.set_message_subscriptions(index, message_type, binding_keys, timestamp_utc);
+        }
+    }
 
-                    let to_remove = entry.binding_keys.difference(&binding_keys);
-                    let to_add = binding_keys.difference(&entry.binding_keys);
+    fn set_message_subscriptions(
+        &mut self,
+        index: &mut SubscriptionIndex,
+        message_type: MessageType,
+        binding_keys: HashSet<BindingKey>,
+        timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        match self.subscriptions.entry(message_type.clone()) {
+            hash_map::Entry::Occupied(mut e) => {
+                let entry = e.get_mut();
 
-                    index.add(message_type.clone(), &self.peer, to_add);
-                    index.remove(&message_type, &self.peer, to_remove);
+                let to_remove = entry.binding_keys.difference(&binding_keys);
+                let to_add = binding_keys.difference(&entry.binding_keys);
 
-                    entry.timestamp_utc = timestamp_utc;
-                    entry.binding_keys.retain(|b| binding_keys.contains(&b));
-                }
-                hash_map::Entry::Vacant(e) => {
-                    index.add(message_type.clone(), &self.peer, binding_keys.iter());
-                    e.insert(SubscriptionEntry {
-                        binding_keys,
-                        timestamp_utc,
-                    });
-                }
+                index.add(message_type.clone(), &self.peer, to_add);
+                index.remove(&message_type, &self.peer, to_remove);
+
+                entry.timestamp_utc = timestamp_utc;
+                entry.binding_keys.retain(|b| binding_keys.contains(&b));
+            }
+            hash_map::Entry::Vacant(e) => {
+                index.add(message_type.clone(), &self.peer, binding_keys.iter());
+                e.insert(SubscriptionEntry {
+                    binding_keys,
+                    timestamp_utc,
+                });
             }
         }
     }
@@ -195,13 +229,49 @@ impl Inner {
             .and_modify(|e| e.update(&descriptor))
             .or_insert_with(|| PeerEntry::new(descriptor));
 
+        let index = &mut self.subscriptions;
         let timestamp_utc = timestamp_utc.and_then(|t| t.try_into().ok());
-        peer_entry.set_subscriptions(subscriptions, &mut self.subscriptions, timestamp_utc);
+        peer_entry.set_subscriptions(index, subscriptions, timestamp_utc);
 
         PeerUpdate {
             id: &peer_entry.peer.id,
             events_tx: self.events_tx.clone(),
         }
+    }
+
+    fn set_subscriptions_for<'a>(
+        &mut self,
+        peer_id: &'a PeerId,
+        subscriptions: Vec<SubscriptionsForType>,
+        timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Option<PeerUpdate<'a>> {
+        let mut modified = false;
+        self.peers.entry(peer_id.clone()).and_modify(|e| {
+            if let Some(timestamp) = timestamp_utc {
+                if let Some(entry) = e.checked_mut(timestamp) {
+                    entry.set_subscriptions_for(
+                        &mut self.subscriptions,
+                        subscriptions,
+                        timestamp_utc,
+                    );
+                    modified = true;
+                }
+            } else {
+                e.set_subscriptions_for(&mut self.subscriptions, subscriptions, timestamp_utc);
+                modified = true;
+            }
+        });
+
+        modified.then_some(PeerUpdate {
+            id: peer_id,
+            events_tx: self.events_tx.clone(),
+        })
+    }
+
+    fn get_peers_handling<M: crate::Message>(&self, message: &M) -> Vec<Peer> {
+        let message_type = MessageType::of::<M>();
+        let binding_key = BindingKey::create(message);
+        self.subscriptions.get(&message_type, &binding_key)
     }
 
     fn update_with<'a>(
@@ -309,6 +379,25 @@ impl Handler<PeerResponding> for Inner {
     }
 }
 
+impl Handler<PeerSubscriptionsForTypeUpdated> for Inner {
+    fn handle(&mut self, message: PeerSubscriptionsForTypeUpdated) {
+        let timestamp_utc = message
+            .timestamp_utc
+            .try_into()
+            .ok()
+            .unwrap_or(chrono::Utc::now());
+        let update = self.set_subscriptions_for(
+            &message.peer_id,
+            message.subscriptions,
+            Some(timestamp_utc),
+        );
+
+        if let Some(update) = update {
+            update.raise(PeerEvent::Updated);
+        }
+    }
+}
+
 #[derive(Handler)]
 pub(crate) struct DirectoryHandler {
     inner: Arc<Mutex<Inner>>,
@@ -346,6 +435,11 @@ impl Client {
         inner.entry(peer_id, None).map(|e| e.peer.clone())
     }
 
+    pub(crate) fn get_peers_handling<M: crate::Message>(&self, message: &M) -> Vec<Peer> {
+        let inner = self.inner.lock().unwrap();
+        inner.get_peers_handling(message)
+    }
+
     fn replay_message(&mut self, message: &TransportMessage) -> bool {
         macro_rules! try_replay {
             ($ty: ty) => {
@@ -360,6 +454,7 @@ impl Client {
         try_replay!(PeerStopped);
         try_replay!(PeerNotResponding);
         try_replay!(PeerResponding);
+        try_replay!(PeerSubscriptionsForTypeUpdated);
         false
     }
 }
@@ -413,10 +508,29 @@ impl crate::Handler<PingPeerCommand> for DirectoryHandler {
     }
 }
 
+impl crate::Handler<PeerSubscriptionsForTypeUpdated> for DirectoryHandler {
+    fn handle(&mut self, message: PeerSubscriptionsForTypeUpdated) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.handle(message);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::Duration;
+
     use super::*;
     use crate::proto::IntoProtobuf;
+
+    #[derive(crate::Command)]
+    #[zebus(namespace = "Abc.Test", routable)]
+    struct RoutableCommand {
+        #[zebus(routing_position = 1)]
+        name: String,
+
+        #[zebus(routing_position = 2)]
+        id: u32,
+    }
 
     struct Fixture {
         client: Client,
@@ -443,6 +557,10 @@ mod tests {
             self.events_rx.blocking_recv()
         }
 
+        fn recv_n(&mut self, n: usize) -> Vec<PeerEvent> {
+            (0..n).filter_map(|_| self.recv()).collect()
+        }
+
         fn peer_id(&self) -> PeerId {
             self.descriptor.peer.id.clone()
         }
@@ -466,11 +584,23 @@ mod tests {
             Self::create_descriptors_with(n, |_| Self::create_descriptor())
         }
 
-        fn create_descriptors_with(n: usize, create_fn: impl Fn(usize) -> PeerDescriptor) -> Vec<PeerDescriptor> {
-            (0..n)
-                .into_iter()
-                .map(create_fn)
-                .collect()
+        fn create_descriptors_with(
+            n: usize,
+            create_fn: impl Fn(usize) -> PeerDescriptor,
+        ) -> Vec<PeerDescriptor> {
+            (0..n).into_iter().map(create_fn).collect()
+        }
+
+        fn create_subscription_for<M: crate::Message>(messages: &[&M]) -> SubscriptionsForType {
+            let message_type = proto::MessageTypeId::of::<RoutableCommand>();
+            let bindings = messages
+                .iter()
+                .map(|m| BindingKey::create(*m).into_protobuf())
+                .collect();
+            SubscriptionsForType {
+                message_type,
+                bindings,
+            }
         }
     }
 
@@ -528,7 +658,99 @@ mod tests {
             })
         );
 
-        assert_eq!(fixture.recv(), Some(PeerEvent::Started(fixture.peer_id())));
-        assert_eq!(fixture.recv(), Some(PeerEvent::Stopped(fixture.peer_id())));
+        let events = fixture.recv_n(2);
+        assert_eq!(
+            events,
+            vec![
+                PeerEvent::Started(fixture.peer_id()),
+                PeerEvent::Stopped(fixture.peer_id())
+            ]
+        );
+    }
+
+    #[test]
+    fn handle_peer_subscriptions_for_type_updated() {
+        let mut fixture = Fixture::new();
+        let command_1 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 9087,
+        };
+        let command_2 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 0x0EFEF,
+        };
+        let subscription = Fixture::create_subscription_for(&[&command_1]);
+
+        fixture.handler.handle(PeerStarted {
+            descriptor: fixture.descriptor.clone(),
+        });
+
+        let now = chrono::Utc::now();
+
+        fixture.handler.handle(PeerSubscriptionsForTypeUpdated {
+            peer_id: fixture.peer_id(),
+            subscriptions: vec![subscription],
+            timestamp_utc: now.into_protobuf(),
+        });
+
+        let peers_1 = fixture.client.get_peers_handling(&command_1);
+        assert_eq!(peers_1, vec![fixture.peer()]);
+        let peers_2 = fixture.client.get_peers_handling(&command_2);
+        assert!(peers_2.is_empty());
+        let events = fixture.recv_n(2);
+        assert_eq!(
+            events,
+            vec![
+                PeerEvent::Started(fixture.peer_id()),
+                PeerEvent::Updated(fixture.peer_id())
+            ]
+        );
+    }
+
+    #[test]
+    fn handle_peer_subscriptions_for_type_updated_discard_outdated() {
+        let mut fixture = Fixture::new();
+        let command_1 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 9087,
+        };
+        let command_2 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 0x0EFEF,
+        };
+        let subscription_1 = Fixture::create_subscription_for(&[&command_1]);
+        let subscription_2 = Fixture::create_subscription_for(&[&command_2]);
+
+        fixture.handler.handle(PeerStarted {
+            descriptor: fixture.descriptor.clone(),
+        });
+
+        let now = chrono::Utc::now();
+
+        fixture.handler.handle(PeerSubscriptionsForTypeUpdated {
+            peer_id: fixture.peer_id(),
+            subscriptions: vec![subscription_1],
+            timestamp_utc: now.into_protobuf(),
+        });
+
+        fixture.handler.handle(PeerSubscriptionsForTypeUpdated {
+            peer_id: fixture.peer_id(),
+            subscriptions: vec![subscription_2],
+            timestamp_utc: (now - Duration::seconds(30)).into_protobuf(),
+        });
+
+        let peers_1 = fixture.client.get_peers_handling(&command_1);
+        assert_eq!(peers_1, vec![fixture.peer()]);
+        let peers_2 = fixture.client.get_peers_handling(&command_2);
+        assert!(peers_2.is_empty());
+        let events = fixture.recv_n(2);
+        assert_eq!(
+            events,
+            vec![
+                PeerEvent::Started(fixture.peer_id()),
+                PeerEvent::Updated(fixture.peer_id())
+            ]
+        );
+        assert!(matches!(fixture.events_rx.try_recv(), Err(_)));
     }
 }
