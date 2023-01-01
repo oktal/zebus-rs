@@ -22,6 +22,21 @@ pub struct MessageTypeId {
     descriptor: MessageTypeDescriptor,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct MessageType(String);
+
+impl From<String> for MessageType {
+    fn from(str: String) -> Self {
+        Self(str)
+    }
+}
+
+impl Into<MessageType> for MessageTypeId {
+    fn into(self) -> MessageType {
+        MessageType(self.descriptor.full_name)
+    }
+}
+
 impl MessageTypeId {
     pub(crate) fn from_descriptor(descriptor: MessageTypeDescriptor) -> Self {
         Self { descriptor }

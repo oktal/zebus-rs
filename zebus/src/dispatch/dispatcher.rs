@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use super::{
-    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchResult,
+    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchOutput,
     Dispatcher, MessageDispatch,
 };
 use crate::{transport::TransportMessage, DispatchHandler};

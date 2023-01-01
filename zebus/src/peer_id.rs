@@ -6,8 +6,10 @@ pub struct PeerId {
 }
 
 impl PeerId {
-    pub fn new(value: String) -> Self {
-        Self { value }
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+        }
     }
 
     pub fn value(&self) -> &str {

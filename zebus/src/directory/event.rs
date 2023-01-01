@@ -1,6 +1,6 @@
 use crate::PeerId;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PeerEvent {
     /// A new peer [`PeerId`] has been started
     Started(PeerId),

@@ -30,7 +30,7 @@ pub use peer_id::PeerId;
 pub use subscription::Subscription;
 
 use message_type_descriptor::MessageTypeDescriptor;
-use message_type_id::MessageTypeId;
+use message_type_id::{MessageType, MessageTypeId};
 
 pub use zebus_core::{
     BindingKeyFragment, Command, Error, Event, Handler, HandlerError, Message, MessageBinding,
