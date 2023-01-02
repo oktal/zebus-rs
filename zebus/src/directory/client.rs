@@ -520,7 +520,7 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
-    use crate::proto::IntoProtobuf;
+    use crate::proto::{IntoProtobuf, MessageTypeId, Subscription};
 
     #[derive(crate::Command)]
     #[zebus(namespace = "Abc.Test", routable)]
@@ -529,7 +529,20 @@ mod tests {
         name: String,
 
         #[zebus(routing_position = 2)]
-        id: u32,
+        id: u64,
+    }
+
+    #[derive(crate::Event)]
+    #[zebus(namespace = "Abc.Test")]
+    struct TestEvent {
+        _outcome: String,
+    }
+
+    #[derive(crate::Event)]
+    #[zebus(namespace = "Abc.Test", routable)]
+    struct RoutableTestEvent {
+        #[zebus(routing_position = 1)]
+        outcome: String,
     }
 
     struct Fixture {
@@ -559,6 +572,10 @@ mod tests {
 
         fn recv_n(&mut self, n: usize) -> Vec<PeerEvent> {
             (0..n).filter_map(|_| self.recv()).collect()
+        }
+
+        fn try_recv_n(&mut self, n: usize) -> Vec<Option<PeerEvent>> {
+            (0..n).map(|_| self.events_rx.try_recv().ok()).collect()
         }
 
         fn peer_id(&self) -> PeerId {
@@ -591,8 +608,17 @@ mod tests {
             (0..n).into_iter().map(create_fn).collect()
         }
 
+        fn create_subscription<M: crate::Message>(message: &M) -> Subscription {
+            let message_type_id = proto::MessageTypeId::of::<M>();
+            let binding_key = BindingKey::create(message).into_protobuf();
+            Subscription {
+                message_type_id,
+                binding_key,
+            }
+        }
+
         fn create_subscription_for<M: crate::Message>(messages: &[&M]) -> SubscriptionsForType {
-            let message_type = proto::MessageTypeId::of::<RoutableCommand>();
+            let message_type = proto::MessageTypeId::of::<M>();
             let bindings = messages
                 .iter()
                 .map(|m| BindingKey::create(*m).into_protobuf())
@@ -618,6 +644,140 @@ mod tests {
             assert_eq!(fixture.client.get(&peer.id), Some(peer.clone()));
         }
         assert_eq!(fixture.client.get(&PeerId::new("Test.Peer.0")), None);
+    }
+
+    #[test]
+    fn handle_registration_does_not_raise_peer_started_event() {
+        let mut fixture = Fixture::new();
+        let descriptors = Fixture::create_descriptors(5);
+        fixture.client.handle(RegisterPeerResponse {
+            peers: descriptors.clone(),
+        });
+
+        assert_eq!(fixture.try_recv_n(5), vec![None, None, None, None, None]);
+    }
+
+    #[test]
+    fn handle_registration_with_command_subscriptions() {
+        let mut fixture = Fixture::new();
+        let command_1 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 9087,
+        };
+        let command_2 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 0x0EFEF,
+        };
+        let command_3 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 0xBADC0FFEE,
+        };
+
+        let peer_desc_1 = PeerDescriptor {
+            peer: Peer::test(),
+            subscriptions: vec![Fixture::create_subscription(&command_1)],
+            is_persistent: true,
+            timestamp_utc: None,
+            has_debugger_attached: Some(false),
+        };
+        let peer_desc_2 = PeerDescriptor {
+            peer: Peer::test(),
+            subscriptions: vec![Fixture::create_subscription(&command_2)],
+            is_persistent: true,
+            timestamp_utc: None,
+            has_debugger_attached: Some(false),
+        };
+
+        fixture.client.handle(RegisterPeerResponse {
+            peers: vec![peer_desc_1.clone(), peer_desc_2.clone()],
+        });
+
+        let peer_1 = fixture.client.get_peers_handling(&command_1);
+        assert_eq!(peer_1, vec![peer_desc_1.peer]);
+        let peer_2 = fixture.client.get_peers_handling(&command_2);
+        assert_eq!(peer_2, vec![peer_desc_2.peer]);
+        let peer_3 = fixture.client.get_peers_handling(&command_3);
+        assert_eq!(peer_3, vec![]);
+    }
+
+    #[test]
+    fn handle_registration_with_event_subscriptions() {
+        let mut fixture = Fixture::new();
+        let event_1 = TestEvent {
+            _outcome: "Passed".to_string(),
+        };
+        let event_2 = TestEvent {
+            _outcome: "Failure".to_string(),
+        };
+        let subscription = Subscription {
+            message_type_id: MessageTypeId::of::<TestEvent>(),
+            binding_key: BindingKey::empty().into_protobuf(),
+        };
+        let descriptors = Fixture::create_descriptors_with(5, |_| PeerDescriptor {
+            peer: Peer::test(),
+            subscriptions: vec![subscription.clone()],
+            is_persistent: true,
+            timestamp_utc: None,
+            has_debugger_attached: Some(false),
+        });
+        let peers: Vec<_> = descriptors.iter().cloned().map(|d| d.peer).collect();
+
+        fixture.client.handle(RegisterPeerResponse {
+            peers: descriptors.clone(),
+        });
+
+        let peers_1 = fixture.client.get_peers_handling(&event_1);
+        assert_eq!(peers_1, peers);
+        let peers_2 = fixture.client.get_peers_handling(&event_2);
+        assert_eq!(peers_2, peers);
+    }
+
+    #[test]
+    fn handle_registration_with_routable_event_subscriptions() {
+        let mut fixture = Fixture::new();
+        let event_1 = RoutableTestEvent {
+            outcome: "Passed".to_string(),
+        };
+        let event_2 = RoutableTestEvent {
+            outcome: "Failure".to_string(),
+        };
+        let descriptors_1 = Fixture::create_descriptors_with(3, |_| {
+            let subscription = Fixture::create_subscription(&event_1);
+            PeerDescriptor {
+                peer: Peer::test(),
+                subscriptions: vec![subscription],
+                is_persistent: true,
+                timestamp_utc: None,
+                has_debugger_attached: Some(false),
+            }
+        });
+
+        let descriptors_2 = Fixture::create_descriptors_with(3, |_| {
+            let subscription = Fixture::create_subscription(&event_2);
+            PeerDescriptor {
+                peer: Peer::test(),
+                subscriptions: vec![subscription],
+                is_persistent: true,
+                timestamp_utc: None,
+                has_debugger_attached: Some(false),
+            }
+        });
+        let descriptor_peers_1 = descriptors_1.iter().map(|d| d.peer.clone()).collect_vec();
+        let descriptor_peers_2 = descriptors_2.iter().map(|d| d.peer.clone()).collect_vec();
+        let descriptors = descriptors_1
+            .iter()
+            .chain(descriptors_2.iter())
+            .cloned()
+            .collect_vec();
+
+        fixture.client.handle(RegisterPeerResponse {
+            peers: descriptors.clone(),
+        });
+
+        let peers_1 = fixture.client.get_peers_handling(&event_1);
+        assert_eq!(peers_1, descriptor_peers_1);
+        let peers_2 = fixture.client.get_peers_handling(&event_2);
+        assert_eq!(peers_2, descriptor_peers_2);
     }
 
     #[test]
@@ -664,6 +824,78 @@ mod tests {
             vec![
                 PeerEvent::Started(fixture.peer_id()),
                 PeerEvent::Stopped(fixture.peer_id())
+            ]
+        );
+    }
+
+    #[test]
+    fn handle_peer_started_after_peer_stopped_with_updated_subscriptions() {
+        let mut fixture = Fixture::new();
+        let command_1 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 9087,
+        };
+        let command_2 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 0x0EFEF,
+        };
+        let command_3 = RoutableCommand {
+            name: "routable_command".into(),
+            id: 0xBADC0FFEE,
+        };
+
+        let peer = Peer::test();
+        let peer_desc_1 = PeerDescriptor {
+            peer: peer.clone(),
+            subscriptions: vec![Fixture::create_subscription(&command_1)],
+            is_persistent: true,
+            timestamp_utc: None,
+            has_debugger_attached: Some(false),
+        };
+        let peer_desc_2 = PeerDescriptor {
+            peer: peer.clone(),
+            subscriptions: vec![Fixture::create_subscription(&command_2)],
+            is_persistent: true,
+            timestamp_utc: None,
+            has_debugger_attached: Some(false),
+        };
+
+        fixture.handler.handle(PeerStarted {
+            descriptor: peer_desc_1.clone(),
+        });
+        fixture.handler.handle(PeerStopped {
+            id: peer.id.clone(),
+            endpoint: Some(peer.endpoint.clone()),
+            timestamp_utc: None,
+        });
+        fixture.handler.handle(PeerStarted {
+            descriptor: peer_desc_2.clone(),
+        });
+
+        let peer_1 = fixture.client.get(&peer.id);
+        assert_eq!(
+            peer_1,
+            Some(Peer {
+                id: peer.id.clone(),
+                endpoint: peer.endpoint.clone(),
+                is_up: true,
+                is_responding: true
+            })
+        );
+        let peers_1 = fixture.client.get_peers_handling(&command_1);
+        assert_eq!(peers_1, vec![]);
+        let peers_2 = fixture.client.get_peers_handling(&command_2);
+        assert_eq!(peers_2, vec![peer.clone()]);
+        let peers_3 = fixture.client.get_peers_handling(&command_3);
+        assert_eq!(peers_3, vec![]);
+
+        assert_eq!(
+            fixture.try_recv_n(4),
+            vec![
+                Some(PeerEvent::Started(peer.id.clone())),
+                Some(PeerEvent::Stopped(peer.id.clone())),
+                Some(PeerEvent::Started(peer.id.clone())),
+                None,
             ]
         );
     }
@@ -743,14 +975,13 @@ mod tests {
         assert_eq!(peers_1, vec![fixture.peer()]);
         let peers_2 = fixture.client.get_peers_handling(&command_2);
         assert!(peers_2.is_empty());
-        let events = fixture.recv_n(2);
         assert_eq!(
-            events,
+            fixture.try_recv_n(3),
             vec![
-                PeerEvent::Started(fixture.peer_id()),
-                PeerEvent::Updated(fixture.peer_id())
+                Some(PeerEvent::Started(fixture.peer_id())),
+                Some(PeerEvent::Updated(fixture.peer_id())),
+                None
             ]
         );
-        assert!(matches!(fixture.events_rx.try_recv(), Err(_)));
     }
 }
