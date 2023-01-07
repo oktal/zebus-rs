@@ -101,6 +101,27 @@ impl ZmqOutboundSocket {
         matches!(self.inner, Some(Inner::Connected { .. }))
     }
 
+    /// Disconnect the zmq socket
+    pub(super) fn disconnect(&mut self) -> Result<()> {
+        let (inner, res) = match self.inner.take() {
+            Some(Inner::Connected {
+                ref mut socket,
+                endpoint,
+                ..
+            }) => {
+                // Disconnect the socket
+                socket.disconnect(&endpoint).map_err(Error::Zmq)?;
+
+                // Drop the socket to close the file descriptor
+                drop(socket);
+                (None, Ok(()))
+            }
+            x => (x, Err(Error::InvalidOperation)),
+        };
+        self.inner = inner;
+        res
+    }
+
     fn create_socket(context: &Context, opts: ZmqSocketOptions) -> zmq::Result<zmq::Socket> {
         let socket = context.socket(zmq::SocketType::PUSH)?;
 
@@ -146,5 +167,12 @@ impl Write for ZmqOutboundSocket {
     fn flush(&mut self) -> std::io::Result<()> {
         // There is no explicit command for flushing a specific message or all messages from the message queue.
         Ok(())
+    }
+}
+
+impl Drop for ZmqOutboundSocket {
+    fn drop(&mut self) {
+        // Ignore the error since we are in a `Drop` handler
+        let _ = self.disconnect();
     }
 }
