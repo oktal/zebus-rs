@@ -16,6 +16,7 @@ use super::{
     PeerDescriptor,
 };
 use crate::{
+    core::MessagePayload,
     proto::IntoProtobuf,
     transport::{self, MessageExecutionCompleted, SendContext, Transport, TransportMessage},
     Peer,

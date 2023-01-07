@@ -1,4 +1,4 @@
-use crate::{proto, Message};
+use crate::{core::MessagePayload, proto};
 
 /// Message sent to notify completion of a command
 #[derive(Clone, prost::Message, crate::Event)]
@@ -25,22 +25,12 @@ pub struct MessageExecutionCompleted {
     pub response_message: Option<String>,
 }
 
-impl MessageExecutionCompleted {
-    pub(crate) fn is<M: Message>(&self) -> bool {
-        if let Some(ref payload_type_id) = self.payload_type_id {
-            payload_type_id.is::<M>()
-        } else {
-            false
-        }
+impl MessagePayload for MessageExecutionCompleted {
+    fn message_type(&self) -> Option<&str> {
+        self.payload_type_id.as_ref().map(|m| m.full_name.as_str())
     }
 
-    pub(crate) fn decode_as<M: Message + prost::Message + Default>(
-        &self,
-    ) -> Option<Result<M, prost::DecodeError>> {
-        if let Some(ref payload) = self.payload {
-            self.is::<M>().then_some(M::decode(&payload[..]))
-        } else {
-            None
-        }
+    fn content(&self) -> Option<&[u8]> {
+        self.payload.as_ref().map(|p| &p[..])
     }
 }

@@ -8,14 +8,19 @@ pub mod bcl {
     pub use crate::bcl::*;
 }
 
+/// A trait to turn a protobuf type into its Rust equivalent
 pub(crate) trait FromProtobuf {
+    /// Type to convert from
     type Input;
 
     fn from_protobuf(input: Self::Input) -> Self;
 }
 
+/// A trait to turn a Rust type into its protobuf equivalent
 pub(crate) trait IntoProtobuf {
+    /// Protobuf message type to convert into
     type Output;
+
     fn into_protobuf(self) -> Self::Output;
 }
 

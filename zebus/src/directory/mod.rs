@@ -4,7 +4,7 @@ pub(crate) mod event;
 pub mod events;
 
 mod client;
-pub(crate) use client::Client;
+pub(crate) use client::{Client, Receiver};
 
 pub use events::{PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped};
 

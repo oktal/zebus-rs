@@ -28,6 +28,12 @@ impl MessageTypeDescriptor {
     }
 }
 
+impl AsRef<str> for MessageTypeDescriptor {
+    fn as_ref(&self) -> &str {
+        self.full_name.as_str()
+    }
+}
+
 impl IntoProtobuf for MessageTypeDescriptor {
     type Output = proto::MessageTypeId;
 

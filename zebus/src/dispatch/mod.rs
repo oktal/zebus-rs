@@ -3,6 +3,7 @@ mod future;
 mod queue;
 pub(crate) mod registry;
 
+use crate::core::RawMessage;
 use crate::proto::FromProtobuf;
 use crate::proto::IntoProtobuf;
 use crate::transport::MessageExecutionCompleted;
@@ -63,7 +64,7 @@ pub(crate) enum DispatchOutput {
     /// A [`Message`] response returned by a [`Handler`]. This contains the
     /// [`MessageTypeDescriptor`] of the message as well as the raw protobuf-encoded payload of the
     /// [`Message`]
-    Response(MessageTypeDescriptor, Vec<u8>),
+    Response(RawMessage<MessageTypeDescriptor>),
 
     /// An [`Error`] returned by a [`Handler`]. This contains the error code and the string
     /// representation of the error
@@ -83,7 +84,7 @@ impl DispatchOutput {
     {
         let message_type_descriptor = MessageTypeDescriptor::of::<R>();
         let payload = response.encode_to_vec();
-        Self::Response(message_type_descriptor, payload)
+        Self::Response(RawMessage::new(message_type_descriptor, payload))
     }
 
     /// Create a [`DispatchOutput`] with an associated [`Error`] `error`
@@ -162,13 +163,16 @@ impl Dispatched {
         let command_id = self.message_id.into_protobuf();
         let message = match self.result {
             Ok(Some(output)) => match output {
-                DispatchOutput::Response(type_desc, payload) => MessageExecutionCompleted {
-                    command_id,
-                    error_code: 0,
-                    payload_type_id: Some(type_desc.into_protobuf()),
-                    payload: Some(payload),
-                    response_message: None,
-                },
+                DispatchOutput::Response(message) => {
+                    let (message_type, payload) = message.into();
+                    MessageExecutionCompleted {
+                        command_id,
+                        error_code: 0,
+                        payload_type_id: Some(message_type.into_protobuf()),
+                        payload: Some(payload),
+                        response_message: None,
+                    }
+                }
 
                 DispatchOutput::Error(error_code, message) => MessageExecutionCompleted {
                     command_id,

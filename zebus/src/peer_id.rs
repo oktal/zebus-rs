@@ -16,6 +16,18 @@ impl PeerId {
         &self.value
     }
 
+    pub fn is_instance_of(&self, service_name: &str) -> bool {
+        self.value.starts_with(service_name)
+    }
+
+    pub fn is_persistence(&self) -> bool {
+        self.is_instance_of("Abc.Zebus.PersistenceService")
+    }
+
+    pub fn is_directory(&self) -> bool {
+        self.is_instance_of("Abc.Zebus.Directory")
+    }
+
     pub(crate) fn directory(instance_id: usize) -> Self {
         let value = format!("Abc.Zebus.Directory.{instance_id}");
         Self { value }

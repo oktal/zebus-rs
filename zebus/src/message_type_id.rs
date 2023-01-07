@@ -35,9 +35,15 @@ impl MessageType {
     pub fn of<M: crate::Message>() -> Self {
         Self(M::name().to_string())
     }
-}
 
-impl MessageType {}
+    pub fn is<M: crate::Message>(&self) -> bool {
+        self.0 == M::name()
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
 
 impl From<String> for MessageType {
     fn from(str: String) -> Self {
@@ -57,6 +63,12 @@ impl From<proto::MessageTypeId> for MessageType {
     }
 }
 
+impl AsRef<str> for MessageType {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 impl MessageTypeId {
     pub(crate) fn from_descriptor(descriptor: MessageTypeDescriptor) -> Self {
         Self { descriptor }
@@ -64,6 +76,10 @@ impl MessageTypeId {
 
     pub fn of<M: crate::Message + 'static>() -> Self {
         Self::from_descriptor(MessageTypeDescriptor::of::<M>())
+    }
+
+    pub fn is<M: crate::Message>(&self) -> bool {
+        self.descriptor.full_name == M::name()
     }
 
     /// Returns the fully qualified name of this message type

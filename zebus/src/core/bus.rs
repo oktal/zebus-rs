@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use itertools::Itertools;
 use thiserror::Error;
 use tokio::{
     runtime::Runtime,
@@ -16,16 +17,17 @@ use crate::{
     bus_configuration::{
         DEFAULT_MAX_BATCH_SIZE, DEFAULT_REGISTRATION_TIMEOUT, DEFAULT_START_REPLAY_TIMEOUT,
     },
+    core::MessagePayload,
     directory::{
-        self, commands::PingPeerCommand, event::PeerEvent, PeerDecommissioned, PeerNotResponding,
-        PeerResponding, PeerStarted, PeerStopped, Registration,
+        self, commands::PingPeerCommand, events::PeerSubscriptionsForTypeUpdated,
+        PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
+        Registration,
     },
     dispatch::{self, Dispatched, Dispatcher, MessageDispatcher},
-    transport::{self, SendContext, Transport, TransportMessage},
-    Bus, BusConfiguration, Command, Handler, Peer, PeerId,
+    proto::FromProtobuf,
+    transport::{self, MessageExecutionCompleted, SendContext, Transport, TransportMessage},
+    Bus, BusConfiguration, Command, Handler, MessageId, Peer, PeerId,
 };
-
-struct CommandPromise(oneshot::Sender<CommandResult>);
 
 #[derive(Debug)]
 pub struct RegistrationError {
@@ -54,6 +56,17 @@ impl RegistrationError {
 }
 
 #[derive(Debug, Error)]
+pub enum SendError {
+    /// An attempt to send a [`Command`] resulted in no candidat peer
+    #[error("unable to find peer for command")]
+    NoPeer,
+
+    /// An attempt to send a [`Command`] resulted in multiple candidate peers
+    #[error("can not send a command to multiple peers: {0:?}")]
+    MultiplePeers(Vec<Peer>),
+}
+
+#[derive(Debug, Error)]
 pub enum Error {
     /// Transport error
     #[error("an error occured during a transport operation {0}")]
@@ -63,12 +76,16 @@ pub enum Error {
     #[error("{0}")]
     Registration(RegistrationError),
 
+    /// An error occured when sending a message to one or multiple peers
+    #[error("{0}")]
+    Send(SendError),
+
     /// An error occured on the dispatcher
     #[error("an error occured on the dispatcher {0}")]
     Dispatch(dispatch::Error),
 
     /// An operation was attempted while the [`Bus`] was in an invalid state
-    #[error("n operation was attempted while the bus was not in a valid state")]
+    #[error("an operation was attempted while the bus was not in a valid state")]
     InvalidOperation,
 }
 
@@ -99,7 +116,7 @@ enum State<T: Transport> {
 
         directory: directory::Client,
 
-        pending_commands: Arc<Mutex<HashMap<uuid::Uuid, CommandPromise>>>,
+        pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
         snd_tx: mpsc::Sender<SendEntry>,
         rx_handle: JoinHandle<()>,
         tx_handle: JoinHandle<()>,
@@ -123,7 +140,28 @@ impl<T: Transport> SenderContext<T> {
         (tx, Self { transport, rx })
     }
 
-    fn send(&mut self, entry: SendEntry) {
+    fn send<M: crate::Message + prost::Message>(
+        message: &M,
+        snd_tx: &mpsc::Sender<SendEntry>,
+        self_peer: &Peer,
+        environment: String,
+        pending_commands: &mut HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>,
+        peers: impl IntoIterator<Item = Peer>,
+    ) -> Result<CommandFuture, Error> {
+        let (tx, rx) = oneshot::channel();
+        let (id, message) = TransportMessage::create(&self_peer, environment.clone(), message);
+
+        pending_commands.entry(id).or_insert(tx);
+
+        // TODO(oktal): use async send
+        let _ = snd_tx.blocking_send(SendEntry {
+            message,
+            peers: peers.into_iter().collect(),
+        });
+        Ok(CommandFuture(rx))
+    }
+
+    fn handle_send(&mut self, entry: SendEntry) {
         self.transport.send(
             entry.peers.into_iter(),
             entry.message,
@@ -137,6 +175,7 @@ struct ReceiverContext {
     tx: mpsc::Sender<SendEntry>,
     self_peer: Peer,
     environment: String,
+    pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
     dispatcher: MessageDispatcher,
 }
 
@@ -147,14 +186,23 @@ impl ReceiverContext {
         self_peer: Peer,
         environment: String,
         dispatcher: MessageDispatcher,
-    ) -> Self {
-        Self {
-            rx,
-            tx,
-            self_peer,
-            environment,
-            dispatcher,
-        }
+    ) -> (
+        Self,
+        Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
+    ) {
+        let pending_commands = Arc::new(Mutex::new(HashMap::new()));
+
+        (
+            Self {
+                rx,
+                tx,
+                self_peer,
+                environment,
+                pending_commands: pending_commands.clone(),
+                dispatcher,
+            },
+            pending_commands,
+        )
     }
 
     async fn dispatch(&mut self, message: TransportMessage) -> Dispatched {
@@ -162,22 +210,43 @@ impl ReceiverContext {
     }
 
     async fn send(&mut self, message: TransportMessage, peers: Vec<Peer>) {
-        self.tx.send(SendEntry { message, peers }).await;
+        let _ = self.tx.send(SendEntry { message, peers }).await;
     }
 }
 
 /// Reception loop for [`TransportMesssage`] messages
 async fn receiver(mut ctx: ReceiverContext) {
     while let Some(message) = ctx.rx.recv().await {
-        // Dispatch message
-        let dispatched = ctx.dispatch(message).await;
+        // Handle MessageExecutionCompleted
+        if let Some(message_execution_completed) = message.decode_as::<MessageExecutionCompleted>()
+        {
+            // TODO(oktal): do not silently ignore error
+            if let Ok(message_execution_completed) = message_execution_completed {
+                // Get the orignal command MessageId
+                let command_id =
+                    MessageId::from_protobuf(message_execution_completed.command_id.clone());
 
-        // If the message that has been dispatched is a Command, send back the
-        // MessageExecutionCompleted
-        if dispatched.is_command() {
-            let (message, peer) =
-                dispatched.into_transport(&ctx.self_peer, ctx.environment.clone());
-            ctx.send(message, vec![peer]).await;
+                // Retrieve the pending command associated with the MessageExecutionCompleted
+                // TODO(oktal): do not silently ignore when failing to find the pending command
+                let mut pending_commands = ctx.pending_commands.lock().unwrap();
+                if let Some(pending_command_tx) = pending_commands.remove(&command_id.value()) {
+                    // Resolve the command with the execution result
+                    let _ = pending_command_tx.send(message_execution_completed.into());
+                }
+            }
+        }
+        // Handle message
+        else {
+            // Dispatch message
+            let dispatched = ctx.dispatch(message).await;
+
+            // If the message that has been dispatched is a Command, send back the
+            // MessageExecutionCompleted
+            if dispatched.is_command() {
+                let (message, peer) =
+                    dispatched.into_transport(&ctx.self_peer, ctx.environment.clone());
+                ctx.send(message, vec![peer]).await;
+            }
         }
     }
 }
@@ -185,16 +254,7 @@ async fn receiver(mut ctx: ReceiverContext) {
 /// Sender loop for [`TransportMessage`] messages
 async fn sender<T: Transport>(mut ctx: SenderContext<T>) {
     while let Some(entry) = ctx.rx.recv().await {
-        ctx.send(entry);
-    }
-}
-
-/// Reception loop for [`PeerEvent`] peer directory events
-async fn directory_rx(events_rx: mpsc::Receiver<PeerEvent>) {
-    let mut events_rx = events_rx;
-
-    while let Some(event) = events_rx.recv().await {
-        println!("{event:?}");
+        ctx.handle_send(entry);
     }
 }
 
@@ -366,11 +426,9 @@ impl<T: Transport> Bus for BusImpl<T> {
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
 
-                let pending_commands = Arc::new(Mutex::new(HashMap::new()));
-
                 // Create sender and receiver
                 let (snd_tx, snd_ctx) = SenderContext::new(transport);
-                let rcv_ctx = ReceiverContext::new(
+                let (rcv_ctx, pending_commands) = ReceiverContext::new(
                     transport_receiver,
                     snd_tx.clone(),
                     self_peer.clone(),
@@ -409,8 +467,44 @@ impl<T: Transport> Bus for BusImpl<T> {
         todo!()
     }
 
-    fn send<C: Command>(&mut self, command: &C) {
-        todo!()
+    fn send<C: Command + prost::Message>(
+        &mut self,
+        command: &C,
+    ) -> Result<CommandFuture, Self::Err> {
+        match self.inner.as_mut() {
+            Some(State::Started {
+                ref snd_tx,
+                ref pending_commands,
+                ref self_peer,
+                ref directory,
+                ref environment,
+                ..
+            }) => {
+                // Lock the map of pending commands
+                let mut pending_commands = pending_commands.lock().unwrap();
+
+                // Retrieve the list of peers handling the command from the directory
+                let peers = directory.get_peers_handling(command);
+
+                // Make sure there is only one peer handling the command
+                let dst_peer = peers
+                    .into_iter()
+                    .at_most_one()
+                    .map_err(|e| Error::Send(SendError::MultiplePeers(e.collect())))?
+                    .ok_or(Error::Send(SendError::NoPeer))?;
+
+                // Send the command
+                SenderContext::<T>::send(
+                    command,
+                    snd_tx,
+                    self_peer,
+                    environment.clone(),
+                    &mut pending_commands,
+                    std::iter::once(dst_peer),
+                )
+            }
+            _ => Err(Error::InvalidOperation),
+        }
     }
 
     fn send_to<C: Command + prost::Message>(
@@ -426,19 +520,18 @@ impl<T: Transport> Bus for BusImpl<T> {
                 ref environment,
                 ..
             }) => {
-                let (tx, rx) = oneshot::channel();
-                let (id, message) =
-                    TransportMessage::create(&self_peer, environment.clone(), command);
-
+                // Lock the map of pending commands
                 let mut pending_commands = pending_commands.lock().unwrap();
-                pending_commands.entry(id).or_insert(CommandPromise(tx));
 
-                // TODO(oktal): use async send
-                snd_tx.blocking_send(SendEntry {
-                    message,
-                    peers: vec![peer],
-                });
-                Ok(CommandFuture(rx))
+                // Send the command
+                SenderContext::<T>::send(
+                    command,
+                    snd_tx,
+                    self_peer,
+                    environment.clone(),
+                    &mut pending_commands,
+                    std::iter::once(peer),
+                )
             }
             _ => Err(Error::InvalidOperation),
         }

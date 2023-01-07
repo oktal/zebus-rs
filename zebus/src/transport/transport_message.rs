@@ -1,3 +1,4 @@
+use crate::core::MessagePayload;
 use crate::proto::{self, IntoProtobuf};
 use crate::{Message, Peer};
 
@@ -78,14 +79,14 @@ impl TransportMessage {
             },
         )
     }
+}
 
-    pub(crate) fn is<M: Message>(&self) -> bool {
-        self.message_type_id.is::<M>()
+impl MessagePayload for TransportMessage {
+    fn message_type(&self) -> Option<&str> {
+        Some(self.message_type_id.full_name.as_str())
     }
 
-    pub(crate) fn decode_as<M: Message + prost::Message + Default>(
-        &self,
-    ) -> Option<Result<M, prost::DecodeError>> {
-        self.is::<M>().then_some(M::decode(&self.content[..]))
+    fn content(&self) -> Option<&[u8]> {
+        Some(&self.content[..])
     }
 }

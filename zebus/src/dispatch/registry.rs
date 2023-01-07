@@ -6,7 +6,7 @@ use std::{
 use zebus_core::{Command, HandlerError, MessageKind, ReplyHandler};
 
 use super::{Dispatch, DispatchHandler, DispatchOutput, Handler, MessageDispatch};
-use crate::{sync::LockCell, Message, MessageTypeDescriptor};
+use crate::{core::MessagePayload, sync::LockCell, Message, MessageTypeDescriptor};
 
 type InvokerFn = dyn Fn(&MessageDispatch, &mut (dyn Any + 'static)) + Send;
 
