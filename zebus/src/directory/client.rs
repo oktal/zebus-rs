@@ -558,7 +558,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let (client, events_rx) = Client::start();
+            let (client, events_rx) = Client::new();
             let handler = client.handler();
             let descriptor = Self::create_descriptor();
 
