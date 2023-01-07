@@ -3,6 +3,7 @@ use itertools::Itertools;
 use tokio::sync::mpsc;
 
 use crate::{
+    core::MessagePayload,
     proto::{self, PeerDescriptor},
     routing::tree::PeerSubscriptionTree,
     transport::TransportMessage,
@@ -19,6 +20,9 @@ use super::{
     events::{PeerSubscriptionsForTypeUpdated, SubscriptionsForType},
     PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
 };
+
+/// Receiver for [`PeerEvent`] events raised by [`Client`]
+pub(crate) type Receiver = mpsc::Receiver<PeerEvent>;
 
 #[derive(Debug)]
 struct SubscriptionIndex(HashMap<MessageType, PeerSubscriptionTree>);
@@ -408,7 +412,7 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    pub(crate) fn start() -> (Self, tokio::sync::mpsc::Receiver<PeerEvent>) {
+    pub(crate) fn new() -> (Self, tokio::sync::mpsc::Receiver<PeerEvent>) {
         let (inner, events_rx) = Inner::new();
 
         (

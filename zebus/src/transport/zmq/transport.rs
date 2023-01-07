@@ -14,6 +14,7 @@ use tokio::{
 };
 
 use crate::{
+    directory::{self, event::PeerEvent},
     transport::{
         zmq::{ZmqSocketOptions, ZmqTransportConfiguration},
         Receiver, SendContext, Transport, TransportMessage,
@@ -84,6 +85,7 @@ enum Inner {
         options: ZmqSocketOptions,
         peer_id: PeerId,
         environment: String,
+        directory_rx: directory::Receiver,
         runtime: Arc<Runtime>,
     },
     Started {
@@ -189,14 +191,18 @@ impl InboundWorker {
 
 struct OutboundWorker {
     context: zmq::Context,
+    peer_id: PeerId,
     outbound_sockets: HashMap<PeerId, ZmqOutboundSocket>,
     actions_rx: mpsc::Receiver<OuboundSocketAction>,
+    directory_rx: directory::Receiver,
     shutdown_rx: broadcast::Receiver<()>,
 }
 
 impl OutboundWorker {
     fn start(
         context: zmq::Context,
+        peer_id: PeerId,
+        directory_rx: directory::Receiver,
         shutdown_tx: broadcast::Sender<()>,
         runtime: Arc<Runtime>,
     ) -> Result<(mpsc::Sender<OuboundSocketAction>, JoinHandle<()>), Error> {
@@ -210,8 +216,10 @@ impl OutboundWorker {
         // Create outbound worker
         let worker = OutboundWorker {
             context,
+            peer_id,
             outbound_sockets: HashMap::new(),
             actions_rx,
+            directory_rx,
             shutdown_rx,
         };
 
@@ -241,7 +249,10 @@ impl OutboundWorker {
                 _ = self.shutdown_rx.recv() => { break; },
                 Some(action) = self.actions_rx.recv() => {
                     self.handle_action(action, &mut encode_buf)?;
-                }
+                },
+                Some(event) = self.directory_rx.recv() => {
+                    self.handle_event(event);
+                },
             }
         }
 
@@ -259,7 +270,23 @@ impl OutboundWorker {
                 peers,
                 context,
             } => self.handle_send(message, peers, context, encode_buf),
-            OuboundSocketAction::Disconnect { peer_id } => unimplemented!(),
+            OuboundSocketAction::Disconnect { peer_id } => self.disconnect(&peer_id),
+        }
+    }
+
+    fn handle_event(&mut self, event: PeerEvent) -> Result<(), Error> {
+        if event.peer_id() == &self.peer_id {
+            return Ok(());
+        }
+
+        match event {
+            PeerEvent::Decomissionned(peer_id) if !peer_id.is_persistence() => {
+                self.disconnect(&peer_id)
+            }
+            // If a previously existing peer starts up with a new endpoint, make sure to disconnect
+            // the previous socket to avoid keeping stale sockets
+            PeerEvent::Started(peer_id) => self.disconnect(&peer_id),
+            _ => Ok(()),
         }
     }
 
@@ -287,24 +314,39 @@ impl OutboundWorker {
         message: &TransportMessage,
         encode_buf: &mut Vec<u8>,
     ) -> Result<(), Error> {
-        let socket = self.get_socket(peer)?;
+        let socket = self.get_connected_socket(&peer)?;
         let bytes = Self::encode(message, encode_buf)?;
 
         socket.write_all(bytes).map_err(Error::Io)
     }
 
-    fn get_socket(&mut self, peer: &Peer) -> Result<&mut ZmqOutboundSocket, Error> {
+    fn get_socket(&mut self, peer_id: &PeerId) -> Result<&mut ZmqOutboundSocket, Error> {
         let socket = self
             .outbound_sockets
-            .entry(peer.id.clone())
+            .entry(peer_id.clone())
             .or_insert_with_key(|peer_id| {
                 ZmqOutboundSocket::new(self.context.clone(), peer_id.clone())
             });
+        Ok(socket)
+    }
+
+    fn get_connected_socket(&mut self, peer: &Peer) -> Result<&mut ZmqOutboundSocket, Error> {
+        let socket = self.get_socket(&peer.id)?;
         // TODO(oktal): Handle reconnection to a different endpoint
         if !socket.is_connected() {
             socket.connect(&peer.endpoint).map_err(Error::Outbound)?;
         }
         Ok(socket)
+    }
+
+    fn disconnect(&mut self, peer_id: &PeerId) -> Result<(), Error> {
+        if let Some(mut socket) = self.outbound_sockets.remove(peer_id) {
+            socket.disconnect().map_err(Error::Outbound)?;
+            // Dropping the socket will close the underlying zmq file descriptor
+            drop(socket);
+        }
+
+        Ok(())
     }
 
     fn encode<'a>(
@@ -325,6 +367,7 @@ impl Transport for ZmqTransport {
         &mut self,
         peer_id: PeerId,
         environment: String,
+        directory_rx: directory::Receiver,
         runtime: Arc<Runtime>,
     ) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
@@ -338,6 +381,7 @@ impl Transport for ZmqTransport {
                     options,
                     peer_id,
                     environment,
+                    directory_rx,
                     runtime,
                 }),
                 Ok(()),
@@ -355,6 +399,7 @@ impl Transport for ZmqTransport {
                 options,
                 peer_id,
                 environment,
+                directory_rx,
                 runtime,
             }) => {
                 // Create zmq context
@@ -380,6 +425,8 @@ impl Transport for ZmqTransport {
                 // Start outbound worker
                 let (actions_tx, outbound_thread) = OutboundWorker::start(
                     context.clone(),
+                    peer_id.clone(),
+                    directory_rx,
                     shutdown_tx.clone(),
                     Arc::clone(&runtime),
                 )?;

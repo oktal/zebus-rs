@@ -86,6 +86,7 @@ enum State<T: Transport> {
         transport: T,
         dispatcher: MessageDispatcher,
 
+        directory: directory::Client,
         peer_id: PeerId,
         environment: String,
     },
@@ -277,8 +278,17 @@ impl<T: Transport> Bus for BusImpl<T> {
                 // Wrap tokio's runtime inside an Arc to share it with other components
                 let runtime = Arc::new(runtime);
 
+                // Create peer directory client
+                let (directory, directory_rx) = directory::Client::new();
+
+                // Configure transport
                 transport
-                    .configure(peer_id.clone(), environment.clone(), Arc::clone(&runtime))
+                    .configure(
+                        peer_id.clone(),
+                        environment.clone(),
+                        directory_rx,
+                        Arc::clone(&runtime),
+                    )
                     .map_err(|e| Error::Transport(e.into()))?;
 
                 (
@@ -287,6 +297,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                         configuration,
                         transport,
                         dispatcher,
+                        directory,
                         peer_id,
                         environment,
                     }),
@@ -308,6 +319,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                 mut transport,
                 mut dispatcher,
                 peer_id,
+                mut directory,
                 environment,
             }) => {
                 // Start transport
@@ -334,9 +346,6 @@ impl<T: Transport> Bus for BusImpl<T> {
                     &configuration,
                 )?;
 
-                // Start peer directory client
-                let (mut directory, directory_events_rx) = directory::Client::start();
-
                 if let Ok(response) = registration.result {
                     directory.handle(response);
                 }
@@ -349,14 +358,13 @@ impl<T: Transport> Bus for BusImpl<T> {
                             .handles::<PeerDecommissioned>()
                             .handles::<PeerNotResponding>()
                             .handles::<PeerResponding>()
-                            .handles::<PingPeerCommand>();
+                            .handles::<PingPeerCommand>()
+                            .handles::<PeerSubscriptionsForTypeUpdated>();
                     }))
                     .map_err(Error::Dispatch)?;
 
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
-
-                let _directory_handle = runtime.spawn(directory_rx(directory_events_rx));
 
                 let pending_commands = Arc::new(Mutex::new(HashMap::new()));
 
