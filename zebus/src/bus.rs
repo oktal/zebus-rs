@@ -10,6 +10,10 @@ use crate::{
     core::RawMessage, transport::MessageExecutionCompleted, Command, MessageType, Peer, PeerId,
 };
 
+/// Error code returned in [`MessageExecutionCompleted`] when a [`crate::ReplyHandler`] returned a
+/// generic [`std::error::Error`]
+pub const HANDLER_ERROR_CODE: i32 = -10;
+
 /// An error which can be returned when sending a command
 #[derive(Debug, Error)]
 pub enum CommandError {

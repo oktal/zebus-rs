@@ -3,6 +3,9 @@ mod future;
 mod queue;
 pub(crate) mod registry;
 
+use std::fmt::Display;
+
+use crate::bus::HANDLER_ERROR_CODE;
 use crate::core::RawMessage;
 use crate::proto::FromProtobuf;
 use crate::proto::IntoProtobuf;
@@ -111,6 +114,20 @@ impl DispatchError {
     }
 }
 
+impl Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (idx, error) in self.0.iter().enumerate() {
+            if idx > 0 {
+                write!(f, ", ")?;
+            }
+
+            write!(f, "{}", error)?;
+        }
+
+        Ok(())
+    }
+}
+
 /// A [`Result`] representation of a dispatch
 pub(crate) type DispatchResult = Result<Option<DispatchOutput>, DispatchError>;
 
@@ -189,7 +206,13 @@ impl Dispatched {
                 payload: None,
                 response_message: None,
             },
-            Err(_e) => todo!(),
+            Err(e) => MessageExecutionCompleted {
+                command_id,
+                error_code: HANDLER_ERROR_CODE,
+                payload_type_id: None,
+                payload: None,
+                response_message: Some(e.to_string())
+            }
         };
 
         let (_, transport_message) = TransportMessage::create(peer, environment, &message);
