@@ -10,7 +10,7 @@ use crate::{
 /// generic [`std::error::Error`]
 pub const HANDLER_ERROR_CODE: i32 = -10;
 
-/// A [`prost::Message`] returned by a [`crate::Handler`]
+/// A protobuf [`prost::Message`] message returned by a [`crate::Handler`]
 pub struct ResponseMessage<T>(pub T);
 
 impl<T> From<T> for ResponseMessage<T> {
@@ -26,7 +26,8 @@ impl<T> From<T> for ResponseMessage<T> {
 ///
 /// A response can be either:
 /// - A succesfull response message that will be encoded as a protobuf message
-/// - An error, including an error code and a string description of the error
+/// - A user [`crate::Error`] error indicating a business error when handling a [`crate::Command`]
+/// - A standard [`std::error::Error`] raised by common Rust faillible functions
 #[derive(Debug)]
 pub enum Response {
     /// A [`Message`] response returned by a [`crate::Handler`]. This contains the
@@ -34,10 +35,11 @@ pub enum Response {
     /// [`Message`]
     Message(RawMessage<MessageTypeDescriptor>),
 
-    /// An [`Error`] returned by a [`Handler`]. This contains the error code and the string
+    /// A business [`crate::Error`] error returned by a [`Handler`]. This contains the error code and the string
     /// representation of the error
     Error(i32, String),
 
+    /// A standard Rust [`std::error::Error`] raised by common Rust faillible functions
     StandardError(Box<dyn std::error::Error + Send>),
 }
 
