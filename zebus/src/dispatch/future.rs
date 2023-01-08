@@ -4,15 +4,15 @@ use std::{
     task::{Poll, Waker},
 };
 
-use super::{DispatchError, DispatchOutput, Dispatched};
-use crate::{transport::OriginatorInfo, MessageId, MessageKind};
+use super::{DispatchError, Dispatched};
+use crate::{core::Response, transport::OriginatorInfo, MessageId, MessageKind};
 
 struct Context {
     message_id: MessageId,
     originator: OriginatorInfo,
     kind: Option<MessageKind>,
     errors: DispatchError,
-    output: Option<DispatchOutput>,
+    response: Option<Response>,
 }
 
 impl Context {
@@ -22,7 +22,7 @@ impl Context {
             originator,
             kind: None,
             errors: DispatchError::default(),
-            output: None,
+            response: None,
         }
     }
 }
@@ -33,7 +33,7 @@ impl Into<Dispatched> for Context {
         let originator = self.originator;
         let kind = self.kind.expect("missing message kind in dispatch context");
         let result = if self.errors.is_empty() {
-            Ok(self.output)
+            Ok(self.response)
         } else {
             Err(self.errors)
         };
@@ -91,8 +91,8 @@ impl DispatchFuture {
         self.apply_context(|ctx| ctx.kind = Some(kind));
     }
 
-    pub(super) fn set_output(&self, output: DispatchOutput) {
-        self.apply_context(|ctx| ctx.output = Some(output));
+    pub(super) fn set_response(&self, response: Option<Response>) {
+        self.apply_context(|ctx| ctx.response = response);
     }
 
     pub(super) fn add_error(&self, error: Box<dyn std::error::Error + Send>) {

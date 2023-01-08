@@ -21,8 +21,9 @@ pub mod transport;
 pub use bus::Bus;
 pub use bus_configuration::BusConfiguration;
 
-pub use crate::core::{BusBuilder, CreateError};
-pub use dispatch::{DispatchHandler, DEFAULT_DISPATCH_QUEUE};
+pub use crate::core::{
+    BusBuilder, CreateError, Error, Handler, HandlerError, IntoResponse, Response, ResponseMessage,
+};
 
 pub use message_id::MessageId;
 pub use peer::Peer;
@@ -33,8 +34,8 @@ use message_type_descriptor::MessageTypeDescriptor;
 use message_type_id::{MessageType, MessageTypeId};
 
 pub use zebus_core::{
-    BindingKeyFragment, Command, Error, Event, Handler, HandlerError, Message, MessageBinding,
-    MessageKind, ReplyHandler,
+    BindingKeyFragment, Command, DispatchHandler, Event, Message, MessageBinding, MessageKind,
+    DEFAULT_DISPATCH_QUEUE,
 };
 pub use zebus_macros::{Command, Event, Handler};
 

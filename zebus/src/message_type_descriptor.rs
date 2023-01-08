@@ -2,7 +2,7 @@ use crate::{message_type_id::proto, proto::IntoProtobuf, Message};
 use std::any::TypeId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct MessageTypeDescriptor {
+pub struct MessageTypeDescriptor {
     /// Fully-qualified name of the message
     pub(crate) full_name: String,
 

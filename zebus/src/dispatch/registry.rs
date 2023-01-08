@@ -3,10 +3,12 @@ use std::{
     collections::{hash_map::Entry, HashMap},
 };
 
-use zebus_core::{Command, HandlerError, MessageKind, ReplyHandler};
-
-use super::{Dispatch, DispatchHandler, DispatchOutput, Handler, MessageDispatch};
-use crate::{core::MessagePayload, sync::LockCell, Message, MessageTypeDescriptor};
+use super::{Dispatch, MessageDispatch};
+use crate::{
+    core::{Handler, IntoResponse, MessagePayload},
+    sync::LockCell,
+    DispatchHandler, Message, MessageKind, MessageTypeDescriptor,
+};
 
 type InvokerFn = dyn Fn(&MessageDispatch, &mut (dyn Any + 'static)) + Send;
 
@@ -43,36 +45,10 @@ where
             if let Some(Ok(message)) = dispatch.message.decode_as::<M>() {
                 // Safety:
                 //   1. `handler` is of type `Box<H>
-                //   2. `H` has an explicit bound on `Handler<T>`
-                unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
-                dispatch.set_kind(MessageKind::Command);
-            }
-        };
-
-        self.add::<M>(|| Box::new(invoker));
-        self
-    }
-
-    pub fn replies<M>(&mut self) -> &mut Self
-    where
-        H: ReplyHandler<M> + 'static,
-        M: Command + prost::Message + Default + 'static,
-    {
-        let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
-            if let Some(Ok(message)) = dispatch.message.decode_as::<M>() {
-                // Safety:
-                //   1. `handler` is of type `Box<H>
-                //   2. `H` has an explicit bound on `Handler<T>`
+                //   2. `H` has an explicit bound on `Handler<M>`
                 let res = unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
                 dispatch.set_kind(MessageKind::Command);
-
-                match res {
-                    Ok(response) => dispatch.set_output(DispatchOutput::with_response(response)),
-                    Err(err) => match err {
-                        HandlerError::User(e) => dispatch.set_output(DispatchOutput::with_error(e)),
-                        HandlerError::Standard(e) => dispatch.add_error(e),
-                    },
-                }
+                dispatch.set_response(res.into_response());
             }
         };
 

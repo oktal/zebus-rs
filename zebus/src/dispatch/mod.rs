@@ -5,19 +5,13 @@ pub(crate) mod registry;
 
 use std::fmt::Display;
 
-use crate::bus::HANDLER_ERROR_CODE;
-use crate::core::RawMessage;
-use crate::proto::FromProtobuf;
-use crate::proto::IntoProtobuf;
-use crate::transport::MessageExecutionCompleted;
-use crate::transport::OriginatorInfo;
-use crate::transport::TransportMessage;
-use crate::MessageId;
-use crate::MessageKind;
-use crate::MessageTypeDescriptor;
+use crate::core::{response::HANDLER_ERROR_CODE, RawMessage, Response};
+use crate::proto::{FromProtobuf, IntoProtobuf};
+use crate::transport::{MessageExecutionCompleted, OriginatorInfo};
 use crate::Peer;
+use crate::{transport::TransportMessage, MessageId};
+use crate::{MessageKind, MessageTypeDescriptor};
 pub(crate) use dispatcher::{Error, MessageDispatcher};
-pub use zebus_core::{DispatchHandler, Handler, HandlerError, DEFAULT_DISPATCH_QUEUE};
 
 use self::future::DispatchFuture;
 
@@ -44,8 +38,8 @@ impl MessageDispatch {
         self.future.set_kind(kind);
     }
 
-    pub(self) fn set_output(&self, output: DispatchOutput) {
-        self.future.set_output(output);
+    pub(self) fn set_response(&self, response: Option<Response>) {
+        self.future.set_response(response);
     }
 
     pub(self) fn add_error(&self, error: ErrorRepr) {
@@ -54,48 +48,6 @@ impl MessageDispatch {
 
     pub(self) fn set_completed(self) {
         self.future.set_completed();
-    }
-}
-
-/// Upon calling a user-specified [`Handler`] for a given [`TransportMessage`], the handler can
-/// produce an output to be sent back to the originator of the message.
-/// A [`Handler`] can either produce a [`Message`] response or an error with an error code and
-/// string representation, that should be sent back to the originator into the final
-/// [`MessageExecutionCompleted`]
-#[derive(Debug)]
-pub(crate) enum DispatchOutput {
-    /// A [`Message`] response returned by a [`Handler`]. This contains the
-    /// [`MessageTypeDescriptor`] of the message as well as the raw protobuf-encoded payload of the
-    /// [`Message`]
-    Response(RawMessage<MessageTypeDescriptor>),
-
-    /// An [`Error`] returned by a [`Handler`]. This contains the error code and the string
-    /// representation of the error
-    Error(i32, String),
-}
-
-impl DispatchOutput {
-    /// Returns `true` if the [`DispatchOutput`] contains an error
-    fn is_error(&self) -> bool {
-        matches!(self, Self::Error { .. })
-    }
-
-    /// Create a [`DispatchOutput`] with an associated [`Message`] `response`
-    fn with_response<R>(response: R) -> Self
-    where
-        R: crate::Message + prost::Message + 'static,
-    {
-        let message_type_descriptor = MessageTypeDescriptor::of::<R>();
-        let payload = response.encode_to_vec();
-        Self::Response(RawMessage::new(message_type_descriptor, payload))
-    }
-
-    /// Create a [`DispatchOutput`] with an associated [`Error`] `error`
-    fn with_error<E>(error: E) -> Self
-    where
-        E: crate::Error,
-    {
-        Self::Error(error.code(), error.to_string())
     }
 }
 
@@ -129,7 +81,7 @@ impl Display for DispatchError {
 }
 
 /// A [`Result`] representation of a dispatch
-pub(crate) type DispatchResult = Result<Option<DispatchOutput>, DispatchError>;
+pub(crate) type DispatchResult = Result<Option<Response>, DispatchError>;
 
 /// Final representation of a [`TransportMessage`] that has been dispatched
 #[derive(Debug)]
@@ -180,7 +132,7 @@ impl Dispatched {
         let command_id = self.message_id.into_protobuf();
         let message = match self.result {
             Ok(Some(output)) => match output {
-                DispatchOutput::Response(message) => {
+                Response::Message(message) => {
                     let (message_type, payload) = message.into();
                     MessageExecutionCompleted {
                         command_id,
@@ -191,7 +143,7 @@ impl Dispatched {
                     }
                 }
 
-                DispatchOutput::Error(error_code, message) => MessageExecutionCompleted {
+                Response::Error(error_code, message) => MessageExecutionCompleted {
                     command_id,
                     error_code,
                     payload_type_id: None,
@@ -211,8 +163,8 @@ impl Dispatched {
                 error_code: HANDLER_ERROR_CODE,
                 payload_type_id: None,
                 payload: None,
-                response_message: Some(e.to_string())
-            }
+                response_message: Some(e.to_string()),
+            },
         };
 
         let (_, transport_message) = TransportMessage::create(peer, environment, &message);

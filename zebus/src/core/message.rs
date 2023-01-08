@@ -25,7 +25,7 @@ pub trait MessagePayload {
 }
 
 /// A raw protobuf-encoded message along with its associated [`MessageType`]
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct RawMessage<MessageType>(MessageType, Vec<u8>);
 
 impl<MessageType> Into<(MessageType, Vec<u8>)> for RawMessage<MessageType> {

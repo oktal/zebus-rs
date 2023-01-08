@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use super::{
-    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchOutput,
-    Dispatcher, MessageDispatch,
+    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, Dispatcher,
+    MessageDispatch,
 };
 use crate::{transport::TransportMessage, DispatchHandler};
 
@@ -243,6 +243,63 @@ impl Dispatcher for MessageDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        core::{MessagePayload, HANDLER_ERROR_CODE},
+        dispatch::{registry, DispatchResult},
+        Handler, HandlerError, MessageKind, Peer, Response, ResponseMessage,
+    };
+
+    struct Fixture {
+        dispatcher: MessageDispatcher,
+        peer: Peer,
+        environment: String,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                dispatcher: MessageDispatcher::new(),
+                peer: Peer::test(),
+                environment: "Test".to_string(),
+            }
+        }
+
+        fn add<H>(&mut self, handler: Box<H>, registry_fn: impl FnOnce(&mut Registry<H>))
+        where
+            H: DispatchHandler + Send + 'static,
+        {
+            self.dispatcher
+                .add(registry::for_handler(handler, registry_fn))
+                .expect("failed to add handler");
+        }
+
+        fn start(&mut self) -> Result<(), Error> {
+            self.dispatcher.start()
+        }
+
+        fn dispatch<M>(&mut self, message: &M) -> Result<DispatchFuture, Error>
+        where
+            M: crate::Message + prost::Message,
+        {
+            let (_, message) =
+                TransportMessage::create(&self.peer, self.environment.clone(), message);
+            let (message_dispatch, future) = MessageDispatch::new(message);
+            self.dispatcher.dispatch(message_dispatch)?;
+            Ok(future)
+        }
+
+        fn decode_as<M: crate::Message + prost::Message + Default>(
+            result: &DispatchResult,
+        ) -> Option<M> {
+            if let Ok(Some(response)) = result {
+                if let Response::Message(message) = response {
+                    return message.decode_as::<M>().and_then(|r| r.ok());
+                }
+            }
+
+            None
+        }
+    }
 
     #[derive(crate::Handler)]
     #[zebus(dispatch_queue = "CustomQueue")]
@@ -250,6 +307,63 @@ mod tests {
 
     #[derive(crate::Handler)]
     struct HandlerWithDefaultDispatchQueue {}
+
+    #[derive(prost::Message, crate::Command)]
+    #[zebus(namespace = "Abc.Test")]
+    struct ParseCommand {
+        #[prost(string, required, tag = 1)]
+        value: String,
+    }
+
+    #[derive(prost::Message, crate::Command)]
+    #[zebus(namespace = "Abc.Test")]
+    #[derive(Eq, PartialEq)]
+    struct ParseResponse {
+        #[prost(sint64, required, tag = 1)]
+        value: i64,
+    }
+
+    #[derive(Debug, Error)]
+    enum ParseError {
+        #[error("negative number can not be parsed")]
+        Negative,
+    }
+
+    impl crate::Error for ParseError {
+        fn code(&self) -> i32 {
+            1
+        }
+    }
+
+    #[derive(crate::Handler)]
+    struct ParseCommandHandler;
+
+    #[derive(crate::Handler)]
+    struct ParseCommandResponseErrorHandler;
+
+    impl Handler<ParseCommand> for ParseCommandHandler {
+        type Response = ();
+
+        fn handle(&mut self, _message: ParseCommand) {}
+    }
+
+    impl Handler<ParseCommand> for ParseCommandResponseErrorHandler {
+        type Response = Result<ResponseMessage<ParseResponse>, HandlerError<ParseError>>;
+
+        fn handle(&mut self, message: ParseCommand) -> Self::Response {
+            let mut chars = message.value.chars();
+            if let Some(first) = chars.next() {
+                if first == '-' {
+                    return Err(HandlerError::User(ParseError::Negative));
+                }
+            }
+
+            Ok(ParseResponse {
+                value: message.value.parse::<i64>()?,
+            }
+            .into())
+        }
+    }
 
     #[test]
     fn custom_dispatch_queue() {
@@ -265,5 +379,92 @@ mod tests {
             <HandlerWithDefaultDispatchQueue as DispatchHandler>::DISPATCH_QUEUE,
             zebus_core::DEFAULT_DISPATCH_QUEUE
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_message_to_handler_with_no_response() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "987612".to_string(),
+        };
+        let dispatched = fixture
+            .dispatch(&command)
+            .expect("failed to dispatch command")
+            .await;
+        assert_eq!(dispatched.kind, MessageKind::Command);
+        assert!(matches!(dispatched.result, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn dispatch_message_to_handler_with_response() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "987612".to_string(),
+        };
+        let dispatched = fixture
+            .dispatch(&command)
+            .expect("failed to dispatch command")
+            .await;
+        let response = Fixture::decode_as::<ParseResponse>(&dispatched.result);
+        assert_eq!(dispatched.kind, MessageKind::Command);
+        assert_eq!(response, Some(ParseResponse { value: 987612 }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_message_to_handler_with_user_error() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "-43".to_string(),
+        };
+        let dispatched = fixture
+            .dispatch(&command)
+            .expect("failed to dispatch command")
+            .await;
+        assert_eq!(
+            dispatched.result.ok().flatten(),
+            Some(Response::Error(1, format!("{}", ParseError::Negative)))
+        );
+        assert_eq!(dispatched.kind, MessageKind::Command);
+    }
+
+    #[tokio::test]
+    async fn dispatch_message_to_handler_with_standard_error() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "NotANumber".to_string(),
+        };
+        let dispatched = fixture
+            .dispatch(&command)
+            .expect("failed to dispatch command")
+            .await;
+        assert!(matches!(
+            dispatched.result.ok().flatten(),
+            Some(Response::Error(HANDLER_ERROR_CODE, _))
+        ));
+        assert_eq!(dispatched.kind, MessageKind::Command);
     }
 }

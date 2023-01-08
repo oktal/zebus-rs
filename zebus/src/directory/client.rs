@@ -328,6 +328,8 @@ impl Inner {
 }
 
 impl Handler<PeerStarted> for Inner {
+    type Response = ();
+
     fn handle(&mut self, message: PeerStarted) {
         self.add_or_update(message.descriptor)
             .raise(PeerEvent::Started);
@@ -335,6 +337,8 @@ impl Handler<PeerStarted> for Inner {
 }
 
 impl Handler<PeerStopped> for Inner {
+    type Response = ();
+
     fn handle(&mut self, message: PeerStopped) {
         let timestamp_utc = chrono::Utc::now();
 
@@ -351,6 +355,8 @@ impl Handler<PeerStopped> for Inner {
 }
 
 impl Handler<PeerDecommissioned> for Inner {
+    type Response = ();
+
     fn handle(&mut self, message: PeerDecommissioned) {
         let update = self.remove(&message.id);
         if let Some(update) = update {
@@ -360,6 +366,8 @@ impl Handler<PeerDecommissioned> for Inner {
 }
 
 impl Handler<PeerNotResponding> for Inner {
+    type Response = ();
+
     fn handle(&mut self, message: PeerNotResponding) {
         let update = self.update_with(&message.id, None, |e| {
             e.peer.is_responding = false;
@@ -372,6 +380,8 @@ impl Handler<PeerNotResponding> for Inner {
 }
 
 impl Handler<PeerResponding> for Inner {
+    type Response = ();
+
     fn handle(&mut self, message: PeerResponding) {
         let update = self.update_with(&message.id, None, |e| {
             e.peer.is_responding = true;
@@ -384,6 +394,8 @@ impl Handler<PeerResponding> for Inner {
 }
 
 impl Handler<PeerSubscriptionsForTypeUpdated> for Inner {
+    type Response = ();
+
     fn handle(&mut self, message: PeerSubscriptionsForTypeUpdated) {
         let timestamp_utc = message
             .timestamp_utc
@@ -464,6 +476,8 @@ impl Client {
 }
 
 impl crate::Handler<RegisterPeerResponse> for Client {
+    type Response = ();
+
     fn handle(&mut self, message: RegisterPeerResponse) {
         let mut inner = self.inner.lock().unwrap();
         for descriptor in message.peers {
@@ -473,6 +487,8 @@ impl crate::Handler<RegisterPeerResponse> for Client {
 }
 
 impl crate::Handler<PeerStarted> for DirectoryHandler {
+    type Response = ();
+
     fn handle(&mut self, message: PeerStarted) {
         let mut inner = self.inner.lock().unwrap();
         inner.handle(message);
@@ -480,6 +496,8 @@ impl crate::Handler<PeerStarted> for DirectoryHandler {
 }
 
 impl crate::Handler<PeerStopped> for DirectoryHandler {
+    type Response = ();
+
     fn handle(&mut self, message: PeerStopped) {
         let mut inner = self.inner.lock().unwrap();
         inner.handle(message);
@@ -487,12 +505,16 @@ impl crate::Handler<PeerStopped> for DirectoryHandler {
 }
 
 impl crate::Handler<PeerDecommissioned> for DirectoryHandler {
+    type Response = ();
+
     fn handle(&mut self, message: PeerDecommissioned) {
         println!("{message:?}")
     }
 }
 
 impl crate::Handler<PeerNotResponding> for DirectoryHandler {
+    type Response = ();
+
     fn handle(&mut self, message: PeerNotResponding) {
         let mut inner = self.inner.lock().unwrap();
         inner.handle(message);
@@ -500,6 +522,8 @@ impl crate::Handler<PeerNotResponding> for DirectoryHandler {
 }
 
 impl crate::Handler<PeerResponding> for DirectoryHandler {
+    type Response = ();
+
     fn handle(&mut self, message: PeerResponding) {
         let mut inner = self.inner.lock().unwrap();
         inner.handle(message);
@@ -507,12 +531,16 @@ impl crate::Handler<PeerResponding> for DirectoryHandler {
 }
 
 impl crate::Handler<PingPeerCommand> for DirectoryHandler {
+    type Response = ();
+
     fn handle(&mut self, _message: PingPeerCommand) {
         println!("PING");
     }
 }
 
 impl crate::Handler<PeerSubscriptionsForTypeUpdated> for DirectoryHandler {
+    type Response = ();
+
     fn handle(&mut self, message: PeerSubscriptionsForTypeUpdated) {
         let mut inner = self.inner.lock().unwrap();
         inner.handle(message);

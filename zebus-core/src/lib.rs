@@ -1,4 +1,4 @@
-use std::{error, fmt, marker::PhantomData, str::FromStr};
+use std::{fmt, marker::PhantomData, str::FromStr};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoutingField {
@@ -163,71 +163,6 @@ macro_rules! binding_key {
             fragments: Some(vec![$(::zebus_core::fragment![$x]),+])
         }
     };
-}
-
-/// User error type that can be returned by a [`ReplyHandler`] handler
-pub trait Error: error::Error {
-    /// Numeric representation of the underlying error
-    fn code(&self) -> i32;
-}
-
-impl Error for std::convert::Infallible {
-    fn code(&self) -> i32 {
-        0
-    }
-}
-
-/// Error type that can be returned by a [`Handler`] or [`ReplyHandler`] handler.
-/// A handler can fail it two ways.
-/// 1. Handling a message can succeed but yield a logical error
-/// 2. Handling a message can fail by invoking a faillible operation that failed, e.g an operation
-///    that yields a [`Result`](std::result::Result) and failed with an `Err`.
-///    This would be the equivalent of an exception in other languages.
-pub enum HandlerError<E: Error> {
-    /// A standard [`Error`](std::error::Error).
-    ///
-    /// Corresponds to a faillible operation that failed
-    Standard(Box<dyn std::error::Error + Send>),
-
-    /// A user [`Error`].
-    ///
-    /// Corresponds to a logical error raised when handling a message
-    User(E),
-}
-
-impl<E: Error> From<Box<dyn std::error::Error + Send>> for HandlerError<E> {
-    fn from(error: Box<dyn std::error::Error + Send>) -> Self {
-        Self::Standard(error)
-    }
-}
-
-impl<E: Error> From<E> for HandlerError<E> {
-    fn from(error: E) -> Self {
-        Self::User(error)
-    }
-}
-
-/// Zebus handler of a `T` typed message.
-/// Zebus handlers must implemented this trait to be able to handle particular
-/// messages
-pub trait Handler<T> {
-    /// Handle `message`
-    fn handle(&mut self, message: T);
-}
-
-/// Zebus handler of a `T` typed message that returns a response
-///
-/// Zebus handlers that want to return a response back to the originator peer must implement
-/// this trait
-pub trait ReplyHandler<T: Command> {
-    /// Response message to send back to the originator if success
-    type Output: Message + prost::Message;
-
-    /// Error to return to the originator
-    type Err: Error;
-
-    /// Handle `message`
-    fn handle(&mut self, message: T) -> Result<Self::Output, HandlerError<Self::Err>>;
 }
 
 /// Name of the default dispatch queue
