@@ -42,10 +42,6 @@ impl MessageDispatch {
         self.future.set_response(response);
     }
 
-    pub(self) fn add_error(&self, error: ErrorRepr) {
-        self.future.add_error(error);
-    }
-
     pub(self) fn set_completed(self) {
         self.future.set_completed();
     }
@@ -59,6 +55,10 @@ pub(crate) struct DispatchError(Vec<ErrorRepr>);
 impl DispatchError {
     fn add(&mut self, error: ErrorRepr) {
         self.0.push(error);
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.0.len()
     }
 
     fn is_empty(&self) -> bool {
@@ -142,13 +142,19 @@ impl Dispatched {
                         response_message: None,
                     }
                 }
-
                 Response::Error(error_code, message) => MessageExecutionCompleted {
                     command_id,
                     error_code,
                     payload_type_id: None,
                     payload: None,
                     response_message: Some(message),
+                },
+                Response::StandardError(e) => MessageExecutionCompleted {
+                    command_id,
+                    error_code: HANDLER_ERROR_CODE,
+                    payload_type_id: None,
+                    payload: None,
+                    response_message: Some(e.to_string()),
                 },
             },
             Ok(None) => MessageExecutionCompleted {

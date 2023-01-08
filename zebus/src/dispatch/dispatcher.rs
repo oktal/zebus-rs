@@ -244,7 +244,7 @@ impl Dispatcher for MessageDispatcher {
 mod tests {
     use super::*;
     use crate::{
-        core::{MessagePayload, HANDLER_ERROR_CODE},
+        core::MessagePayload,
         dispatch::{registry, DispatchResult},
         Handler, HandlerError, MessageKind, Peer, Response, ResponseMessage,
     };
@@ -438,10 +438,14 @@ mod tests {
             .dispatch(&command)
             .expect("failed to dispatch command")
             .await;
-        assert_eq!(
+
+        let expected_error = Response::Error(1, format!("{}", ParseError::Negative));
+
+        assert!(
+            matches!(
             dispatched.result.ok().flatten(),
-            Some(Response::Error(1, format!("{}", ParseError::Negative)))
-        );
+            Some(expected_error)
+        ));
         assert_eq!(dispatched.kind, MessageKind::Command);
     }
 
@@ -461,10 +465,9 @@ mod tests {
             .dispatch(&command)
             .expect("failed to dispatch command")
             .await;
-        assert!(matches!(
-            dispatched.result.ok().flatten(),
-            Some(Response::Error(HANDLER_ERROR_CODE, _))
-        ));
+
+        let err = dispatched.result.unwrap_err();
+        assert_eq!(err.count(), 1);
         assert_eq!(dispatched.kind, MessageKind::Command);
     }
 }

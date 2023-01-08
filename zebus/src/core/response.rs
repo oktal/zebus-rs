@@ -24,7 +24,7 @@ impl<T> From<T> for ResponseMessage<T> {
 /// A response can be either:
 /// - A succesfull response message that will be encoded as a protobuf message
 /// - An error, including an error code and a string description of the error
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum Response {
     /// A [`Message`] response returned by a [`crate::Handler`]. This contains the
     /// [`MessageTypeDescriptor`] of the message as well as the raw protobuf-encoded payload of the
@@ -34,6 +34,8 @@ pub enum Response {
     /// An [`Error`] returned by a [`Handler`]. This contains the error code and the string
     /// representation of the error
     Error(i32, String),
+
+    StandardError(Box<dyn std::error::Error + Send>),
 }
 
 impl Response {
@@ -101,16 +103,16 @@ where
 impl<E: Error> IntoResponse for HandlerError<E> {
     fn into_response(self) -> Option<Response> {
         Some(match self {
-            HandlerError::Standard(e) => Response::Error(HANDLER_ERROR_CODE, format!("{}", e)),
+            HandlerError::Standard(e) => Response::StandardError(e),
             HandlerError::User(e) => Response::Error(e.code(), format!("{}", e)),
         })
     }
 }
 
 /// Turn an error into an `Error` [`Response`]
-impl IntoResponse for Box<dyn std::error::Error> {
+impl IntoResponse for Box<dyn std::error::Error + Send> {
     fn into_response(self) -> Option<Response> {
-        Some(Response::Error(HANDLER_ERROR_CODE, format!("{}", self)))
+        Some(Response::StandardError(self))
     }
 }
 

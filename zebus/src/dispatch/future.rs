@@ -25,6 +25,16 @@ impl Context {
             response: None,
         }
     }
+
+    fn set_response(&mut self, response: Option<Response>) {
+        if let Some(response) = response {
+            if let Response::StandardError(e) = response {
+                self.errors.add(e);
+            } else {
+                self.response = Some(response);
+            }
+        }
+    }
 }
 
 impl Into<Dispatched> for Context {
@@ -92,11 +102,7 @@ impl DispatchFuture {
     }
 
     pub(super) fn set_response(&self, response: Option<Response>) {
-        self.apply_context(|ctx| ctx.response = response);
-    }
-
-    pub(super) fn add_error(&self, error: Box<dyn std::error::Error + Send>) {
-        self.apply_context(|ctx| ctx.errors.add(error));
+        self.apply_context(|ctx| ctx.set_response(response));
     }
 
     pub(super) fn set_completed(self) {
