@@ -26,10 +26,10 @@ impl Context {
         }
     }
 
-    fn set_response(&mut self, response: Option<Response>) {
+    fn set_response(&mut self, handler_type: &'static str, response: Option<Response>) {
         if let Some(response) = response {
             if let Response::StandardError(e) = response {
-                self.errors.add(e);
+                self.errors.add(handler_type, e);
             } else {
                 self.response = Some(response);
             }
@@ -101,8 +101,8 @@ impl DispatchFuture {
         self.apply_context(|ctx| ctx.kind = Some(kind));
     }
 
-    pub(super) fn set_response(&self, response: Option<Response>) {
-        self.apply_context(|ctx| ctx.set_response(response));
+    pub(super) fn set_response(&self, handler_type: &'static str, response: Option<Response>) {
+        self.apply_context(|ctx| ctx.set_response(handler_type, response));
     }
 
     pub(super) fn set_completed(self) {

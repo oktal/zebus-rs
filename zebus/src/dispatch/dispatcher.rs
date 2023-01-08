@@ -467,6 +467,7 @@ mod tests {
             .await;
 
         let err = dispatched.result.unwrap_err();
+
         assert_eq!(err.count(), 1);
         assert_eq!(dispatched.kind, MessageKind::Command);
     }

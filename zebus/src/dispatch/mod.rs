@@ -38,8 +38,8 @@ impl MessageDispatch {
         self.future.set_kind(kind);
     }
 
-    pub(self) fn set_response(&self, response: Option<Response>) {
-        self.future.set_response(response);
+    pub(self) fn set_response(&self, handler_type: &'static str, response: Option<Response>) {
+        self.future.set_response(handler_type, response);
     }
 
     pub(self) fn set_completed(self) {
@@ -47,14 +47,14 @@ impl MessageDispatch {
     }
 }
 
-type ErrorRepr = Box<dyn std::error::Error + Send>;
+type ErrorRepr = (&'static str, Box<dyn std::error::Error + Send>);
 
 #[derive(Debug, Default)]
 pub(crate) struct DispatchError(Vec<ErrorRepr>);
 
 impl DispatchError {
-    fn add(&mut self, error: ErrorRepr) {
-        self.0.push(error);
+    fn add(&mut self, handler_type: &'static str, error: Box<dyn std::error::Error + Send>) {
+        self.0.push((handler_type, error));
     }
 
     pub(crate) fn count(&self) -> usize {
@@ -73,7 +73,7 @@ impl Display for DispatchError {
                 write!(f, ", ")?;
             }
 
-            write!(f, "{}", error)?;
+            write!(f, "{}: {}", error.0, error.1)?;
         }
 
         Ok(())

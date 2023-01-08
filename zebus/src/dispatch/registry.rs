@@ -47,8 +47,10 @@ where
                 //   1. `handler` is of type `Box<H>
                 //   2. `H` has an explicit bound on `Handler<M>`
                 let res = unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
+                let handler_type = std::any::type_name::<H>();
+
                 dispatch.set_kind(MessageKind::Command);
-                dispatch.set_response(res.into_response());
+                dispatch.set_response(handler_type, res.into_response());
             }
         };
 
