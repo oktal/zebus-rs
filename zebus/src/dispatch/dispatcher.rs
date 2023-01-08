@@ -441,8 +441,7 @@ mod tests {
 
         let expected_error = Response::Error(1, format!("{}", ParseError::Negative));
 
-        assert!(
-            matches!(
+        assert!(matches!(
             dispatched.result.ok().flatten(),
             Some(expected_error)
         ));

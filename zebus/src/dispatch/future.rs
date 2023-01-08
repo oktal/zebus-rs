@@ -5,21 +5,22 @@ use std::{
 };
 
 use super::{DispatchError, Dispatched};
-use crate::{core::Response, transport::OriginatorInfo, MessageId, MessageKind};
+use crate::{
+    core::Response,
+    transport::TransportMessage, MessageKind,
+};
 
 struct Context {
-    message_id: MessageId,
-    originator: OriginatorInfo,
+    message: TransportMessage,
     kind: Option<MessageKind>,
     errors: DispatchError,
     response: Option<Response>,
 }
 
 impl Context {
-    fn new(message_id: MessageId, originator: OriginatorInfo) -> Self {
+    fn new(message: TransportMessage) -> Self {
         Self {
-            message_id,
-            originator,
+            message,
             kind: None,
             errors: DispatchError::default(),
             response: None,
@@ -39,8 +40,7 @@ impl Context {
 
 impl Into<Dispatched> for Context {
     fn into(self) -> Dispatched {
-        let message_id = self.message_id;
-        let originator = self.originator;
+        let message = self.message;
         let kind = self.kind.expect("missing message kind in dispatch context");
         let result = if self.errors.is_empty() {
             Ok(self.response)
@@ -49,8 +49,7 @@ impl Into<Dispatched> for Context {
         };
 
         Dispatched {
-            message_id,
-            originator,
+            message,
             kind,
             result,
         }
@@ -69,10 +68,10 @@ struct Repr {
 }
 
 impl Repr {
-    fn new(message_id: MessageId, originator: OriginatorInfo) -> Self {
+    fn new(message: TransportMessage) -> Self {
         Self {
             completed: false,
-            context: Some(Context::new(message_id, originator)),
+            context: Some(Context::new(message)),
             waker: None,
         }
     }
@@ -91,9 +90,9 @@ impl Clone for DispatchFuture {
 }
 
 impl DispatchFuture {
-    pub(super) fn new(message_id: MessageId, originator: OriginatorInfo) -> Self {
+    pub(super) fn new(message: TransportMessage) -> Self {
         Self {
-            repr: Arc::new(Mutex::new(Repr::new(message_id, originator))),
+            repr: Arc::new(Mutex::new(Repr::new(message))),
         }
     }
 

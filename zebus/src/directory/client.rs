@@ -475,6 +475,14 @@ impl Client {
     }
 }
 
+impl Clone for Client {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
 impl crate::Handler<RegisterPeerResponse> for Client {
     type Response = ();
 

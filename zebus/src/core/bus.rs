@@ -176,6 +176,7 @@ struct ReceiverContext {
     self_peer: Peer,
     environment: String,
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
+    directory: directory::Client,
     dispatcher: MessageDispatcher,
 }
 
@@ -185,6 +186,7 @@ impl ReceiverContext {
         tx: mpsc::Sender<SendEntry>,
         self_peer: Peer,
         environment: String,
+        directory: directory::Client,
         dispatcher: MessageDispatcher,
     ) -> (
         Self,
@@ -199,6 +201,7 @@ impl ReceiverContext {
                 self_peer,
                 environment,
                 pending_commands: pending_commands.clone(),
+                directory,
                 dispatcher,
             },
             pending_commands,
@@ -209,7 +212,17 @@ impl ReceiverContext {
         self.dispatcher.dispatch(message).await
     }
 
-    async fn send(&mut self, message: TransportMessage, peers: Vec<Peer>) {
+    async fn send<M: prost::Message + crate::Message>(&mut self, message: &M) {
+        let dst_peers = self.directory.get_peers_handling(message);
+        if !dst_peers.is_empty() {
+            self.send_to(message, dst_peers).await;
+        }
+    }
+
+    async fn send_to<M: prost::Message + crate::Message>(&mut self, message: &M, peers: Vec<Peer>) {
+        let (_id, message) =
+            TransportMessage::create(&self.self_peer, self.environment.clone(), message);
+
         let _ = self.tx.send(SendEntry { message, peers }).await;
     }
 }
@@ -240,12 +253,17 @@ async fn receiver(mut ctx: ReceiverContext) {
             // Dispatch message
             let dispatched = ctx.dispatch(message).await;
 
+            let (originator, execution_completed, processing_failed) = dispatched.into_message();
+
             // If the message that has been dispatched is a Command, send back the
             // MessageExecutionCompleted
-            if dispatched.is_command() {
-                let (message, peer) =
-                    dispatched.into_transport(&ctx.self_peer, ctx.environment.clone());
-                ctx.send(message, vec![peer]).await;
+            if let Some(execution_completed) = execution_completed {
+                ctx.send_to(&execution_completed, vec![originator]).await;
+            }
+
+            // Publish [`MessageProcessingFailed`] if some handlers failed
+            if let Some(processing_failed) = processing_failed {
+                ctx.send(&processing_failed).await;
             }
         }
     }
@@ -433,6 +451,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                     snd_tx.clone(),
                     self_peer.clone(),
                     environment.clone(),
+                    directory.clone(),
                     dispatcher,
                 );
 

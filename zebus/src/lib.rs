@@ -7,6 +7,7 @@ mod bus_configuration;
 mod core;
 mod directory;
 mod dispatch;
+pub mod lotus;
 mod message_id;
 mod message_type_descriptor;
 mod message_type_id;

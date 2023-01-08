@@ -1,7 +1,10 @@
 use core::fmt;
 
 use super::RawMessage;
-use crate::MessageTypeDescriptor;
+use crate::{
+    message_id::proto, proto::IntoProtobuf, transport::MessageExecutionCompleted,
+    MessageTypeDescriptor,
+};
 
 /// Error code returned in [`MessageExecutionCompleted`] when a [`crate::Handler`] returned a
 /// generic [`std::error::Error`]
@@ -42,6 +45,35 @@ impl Response {
     /// Returns `true` if the [`Response`] contains an error
     pub(crate) fn is_error(&self) -> bool {
         matches!(self, Self::Error { .. })
+    }
+
+    pub(crate) fn into_message(self, command_id: proto::MessageId) -> MessageExecutionCompleted {
+        match self {
+            Response::Message(message) => {
+                let (message_type, payload) = message.into();
+                MessageExecutionCompleted {
+                    command_id,
+                    error_code: 0,
+                    payload_type_id: Some(message_type.into_protobuf()),
+                    payload: Some(payload),
+                    response_message: None,
+                }
+            }
+            Response::Error(error_code, message) => MessageExecutionCompleted {
+                command_id,
+                error_code,
+                payload_type_id: None,
+                payload: None,
+                response_message: Some(message),
+            },
+            Response::StandardError(e) => MessageExecutionCompleted {
+                command_id,
+                error_code: HANDLER_ERROR_CODE,
+                payload_type_id: None,
+                payload: None,
+                response_message: Some(e.to_string()),
+            },
+        }
     }
 }
 
