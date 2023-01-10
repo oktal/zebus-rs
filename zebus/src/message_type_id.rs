@@ -53,13 +53,19 @@ impl From<String> for MessageType {
 
 impl From<MessageTypeId> for MessageType {
     fn from(id: MessageTypeId) -> Self {
-        MessageType(id.descriptor.full_name)
+        Self(id.descriptor.full_name)
+    }
+}
+
+impl From<MessageTypeDescriptor> for MessageType {
+    fn from(descriptor: MessageTypeDescriptor) -> Self {
+        Self(descriptor.full_name)
     }
 }
 
 impl From<proto::MessageTypeId> for MessageType {
     fn from(id: proto::MessageTypeId) -> Self {
-        MessageType(id.full_name)
+        Self(id.full_name)
     }
 }
 

@@ -3,29 +3,54 @@ mod future;
 mod queue;
 pub(crate) mod registry;
 
-use std::fmt::Display;
+use std::{any::Any, fmt::Display, sync::Arc};
 
+use crate::bus::{CommandError, CommandResult};
+use crate::core::RawMessage;
 use crate::core::{response::HANDLER_ERROR_CODE, Response};
 use crate::lotus::MessageProcessingFailed;
 use crate::proto::IntoProtobuf;
 use crate::{
-    transport::{MessageExecutionCompleted, TransportMessage}, MessageKind, Peer,
+    transport::{MessageExecutionCompleted, TransportMessage},
+    MessageKind, Peer,
 };
 pub(crate) use dispatcher::{Error, MessageDispatcher};
 
 use self::future::DispatchFuture;
 
-/// A [`TransportMessage`] to be dispatched
+/// A type alias for any [`crate::Message`]
+pub(crate) type AnyMessage = dyn Any + Send + Sync;
+
+/// A dispatch request
+#[derive(Debug, Clone)]
+pub(crate) enum DispatchRequest {
+    /// Dispatch a [`TransportMessage`] from a remote peer
+    Remote(TransportMessage),
+
+    /// Dispatch a local [`crate::Message`]
+    Local(&'static str, Arc<AnyMessage>),
+}
+
+impl DispatchRequest {
+    fn message_type(&self) -> &str {
+        match self {
+            DispatchRequest::Remote(message) => message.message_type_id.full_name.as_str(),
+            DispatchRequest::Local(message_type, _) => message_type,
+        }
+    }
+}
+
+/// A [`DispatchRequest`] to be dispatched
 pub(crate) struct MessageDispatch {
-    message: TransportMessage,
+    request: DispatchRequest,
     future: DispatchFuture,
 }
 
 impl MessageDispatch {
-    pub(self) fn new(message: TransportMessage) -> (Self, DispatchFuture) {
+    pub(self) fn new(request: DispatchRequest) -> (Self, DispatchFuture) {
         let dispatch = Self {
-            message: message.clone(),
-            future: DispatchFuture::new(message),
+            request: request.clone(),
+            future: DispatchFuture::new(request),
         };
         let future = dispatch.future.clone();
         (dispatch, future)
@@ -77,14 +102,26 @@ impl Display for DispatchError {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct DispatchOutput {
+    /// The originator of the message
+    pub(crate) originator: Option<Peer>,
+
+    /// The [`MessageExecutionCompleted`] to send back to the originator peer
+    pub(crate) completed: Option<MessageExecutionCompleted>,
+
+    /// The [`MessageProcessingFailed`] to publish
+    pub(crate) failed: Option<MessageProcessingFailed>,
+}
+
 /// A [`Result`] representation of a dispatch
 pub(crate) type DispatchResult = Result<Option<Response>, DispatchError>;
 
 /// Final representation of a [`TransportMessage`] that has been dispatched
 #[derive(Debug)]
 pub(crate) struct Dispatched {
-    /// The [`TransportMessage`] that has been dispatched
-    message: TransportMessage,
+    /// The initial [`DispatchRequest`]
+    request: DispatchRequest,
 
     /// [`MessageKind`] kind of message that has been dispatched
     kind: MessageKind,
@@ -115,73 +152,105 @@ impl Dispatched {
     pub(crate) fn is(&self, kind: MessageKind) -> bool {
         matches!(self.kind, kind)
     }
+}
 
-    pub(crate) fn into_message(
-        self,
-    ) -> (
-        Peer,
-        Option<MessageExecutionCompleted>,
-        Option<MessageProcessingFailed>,
-    ) {
-        let command_id = self.message.id.clone();
-        let originator = self.message.originator.clone();
+impl TryInto<CommandResult> for Dispatched {
+    type Error = ();
+
+    fn try_into(self) -> Result<CommandResult, Self::Error> {
+        self.is_command().then(|| match self.result {
+            Ok(None) => Ok(None),
+            Ok(Some(response)) => match response {
+                Response::Message(raw) => {
+                    let (message_type, payload) = raw.into();
+                    Ok(Some(RawMessage::new(message_type, payload)))
+                }
+                Response::Error(code, message) => Err(CommandError::Command {
+                    code,
+                    message: Some(message),
+                }),
+                Response::StandardError(e) => Err(CommandError::Command {
+                    code: HANDLER_ERROR_CODE,
+                    message: Some(e.to_string()),
+                }),
+            },
+            Err(e) => Err(CommandError::Command {
+                code: HANDLER_ERROR_CODE,
+                message: Some(e.to_string()),
+            }),
+        }).ok_or(())
+    }
+}
+
+impl Into<DispatchOutput> for Dispatched {
+    fn into(self) -> DispatchOutput {
         let is_command = self.is_command();
 
-        let originator = Peer {
-            id: originator.sender_id,
-            endpoint: originator.sender_endpoint,
-            is_up: true,
-            is_responding: true,
-        };
+        if let DispatchRequest::Remote(message) = self.request {
+            let originator = message.originator.clone();
+            let command_id = message.id.clone();
 
-        let message_procesing_failed = if let Err(dispatch_error) = self.result.as_ref() {
-            let now_utc = chrono::Utc::now();
-            let failing_handlers = dispatch_error.0.iter().map(|e| e.0.to_string()).collect();
+            // Get originator peer from `OriginatorInfo` of `TransportMessage`
+            let peer = Peer {
+                id: originator.sender_id,
+                endpoint: originator.sender_endpoint,
+                is_up: true,
+                is_responding: true,
+            };
 
-            Some(MessageProcessingFailed {
-                transport_message: self.message,
-                // TODO(oktal): serialize message to JSON
-                message_json: String::new(),
-                exception_message: dispatch_error.to_string(),
-                exception_timestamp_utc: now_utc.into_protobuf(),
-                failing_handlers,
-            })
+            // Create `MessagePocessingFailed` message if dispatch triggered error
+            let failed = if let Err(dispatch_error) = self.result.as_ref() {
+                let now_utc = chrono::Utc::now();
+                let failing_handlers = dispatch_error.0.iter().map(|e| e.0.to_string()).collect();
+
+                Some(MessageProcessingFailed {
+                    transport_message: message,
+                    // TODO(oktal): serialize message to JSON
+                    message_json: String::new(),
+                    exception_message: dispatch_error.to_string(),
+                    exception_timestamp_utc: now_utc.into_protobuf(),
+                    failing_handlers,
+                })
+            } else {
+                None
+            };
+
+            // Create `MessageExecutionCompleted` if the dispatched message was a `Command`
+            let completed = if is_command {
+                Some(match self.result {
+                    Ok(Some(response)) => response.into_message(command_id),
+                    Ok(None) => MessageExecutionCompleted {
+                        command_id,
+                        error_code: 0,
+                        payload_type_id: None,
+                        payload: None,
+                        response_message: None,
+                    },
+                    Err(e) => MessageExecutionCompleted {
+                        command_id,
+                        error_code: HANDLER_ERROR_CODE,
+                        payload_type_id: None,
+                        payload: None,
+                        response_message: Some(e.to_string()),
+                    },
+                })
+            } else {
+                None
+            };
+
+            DispatchOutput {
+                originator: Some(peer),
+                failed,
+                completed,
+            }
         } else {
-            None
-        };
-
-        let message_execution_completed = if is_command {
-            Some(match self.result {
-                Ok(Some(response)) => response.into_message(command_id),
-                Ok(None) => MessageExecutionCompleted {
-                    command_id,
-                    error_code: 0,
-                    payload_type_id: None,
-                    payload: None,
-                    response_message: None,
-                },
-                Err(e) => MessageExecutionCompleted {
-                    command_id,
-                    error_code: HANDLER_ERROR_CODE,
-                    payload_type_id: None,
-                    payload: None,
-                    response_message: Some(e.to_string()),
-                },
-            })
-        } else {
-            None
-        };
-
-        (
-            originator,
-            message_execution_completed,
-            message_procesing_failed,
-        )
+            DispatchOutput::default()
+        }
     }
 }
 
 pub(crate) trait Dispatcher {
-    fn dispatch(&mut self, message: TransportMessage) -> DispatchFuture;
+    fn dispatch(&mut self, request: DispatchRequest) -> DispatchFuture;
 }
 
 pub(crate) trait Dispatch {

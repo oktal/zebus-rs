@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use super::{
-    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, Dispatcher,
-    MessageDispatch,
+    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchRequest,
+    Dispatcher, MessageDispatch,
 };
-use crate::{transport::TransportMessage, DispatchHandler};
+use crate::DispatchHandler;
 
 /// Errors that can be returned by the [`MessageDispatcher`]
 #[derive(Debug, Error)]
@@ -162,7 +162,7 @@ impl DispatchMap {
     fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
         let entry = self
             .message_entries
-            .get_mut(message_dispatch.message.message_type_id.full_name.as_str())
+            .get_mut(message_dispatch.request.message_type())
             .and_then(|dispatch_entry| self.entries.get_mut(dispatch_entry));
 
         entry
@@ -232,8 +232,8 @@ impl MessageDispatcher {
 }
 
 impl Dispatcher for MessageDispatcher {
-    fn dispatch(&mut self, message: TransportMessage) -> DispatchFuture {
-        let (dispatch, future) = MessageDispatch::new(message);
+    fn dispatch(&mut self, request: DispatchRequest) -> DispatchFuture {
+        let (dispatch, future) = MessageDispatch::new(request);
         // TODO(oktal): correctly handle underlying result
         self.dispatch(dispatch).unwrap();
         future
@@ -242,10 +242,14 @@ impl Dispatcher for MessageDispatcher {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::{
+        bus::CommandResult,
         core::MessagePayload,
         dispatch::{registry, DispatchResult},
+        transport::TransportMessage,
         Handler, HandlerError, MessageKind, Peer, Response, ResponseMessage,
     };
 
@@ -277,13 +281,35 @@ mod tests {
             self.dispatcher.start()
         }
 
+        async fn send<M>(&mut self, message: M) -> Result<CommandResult, Error>
+        where
+            M: crate::Message + prost::Message + 'static,
+        {
+            let dispatched = self.dispatch_local(message)?.await;
+            Ok(dispatched
+                .into_command_result()
+                .expect("missing CommandResult"))
+        }
+
         fn dispatch<M>(&mut self, message: &M) -> Result<DispatchFuture, Error>
         where
             M: crate::Message + prost::Message,
         {
             let (_, message) =
                 TransportMessage::create(&self.peer, self.environment.clone(), message);
-            let (message_dispatch, future) = MessageDispatch::new(message);
+            let request = DispatchRequest::Remote(message);
+            let (message_dispatch, future) = MessageDispatch::new(request);
+            self.dispatcher.dispatch(message_dispatch)?;
+            Ok(future)
+        }
+
+        fn dispatch_local<M>(&mut self, message: M) -> Result<DispatchFuture, Error>
+        where
+            M: crate::Message + prost::Message + 'static,
+        {
+            let message = Arc::new(message);
+            let request = DispatchRequest::Local(M::name(), message);
+            let (message_dispatch, future) = MessageDispatch::new(request);
             self.dispatcher.dispatch(message_dispatch)?;
             Ok(future)
         }
@@ -308,7 +334,7 @@ mod tests {
     #[derive(crate::Handler)]
     struct HandlerWithDefaultDispatchQueue {}
 
-    #[derive(prost::Message, crate::Command)]
+    #[derive(prost::Message, crate::Command, Clone)]
     #[zebus(namespace = "Abc.Test")]
     struct ParseCommand {
         #[prost(string, required, tag = 1)]
@@ -469,5 +495,95 @@ mod tests {
 
         assert_eq!(err.count(), 1);
         assert_eq!(dispatched.kind, MessageKind::Command);
+    }
+
+    #[tokio::test]
+    async fn dispatch_local_message_to_handler_with_no_response() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "987612".to_string(),
+        };
+        let dispatched = fixture
+            .dispatch_local(command)
+            .expect("failed to dispatch command")
+            .await;
+        assert_eq!(dispatched.kind, MessageKind::Command);
+        assert!(matches!(dispatched.result, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn dispatch_local_message_to_handler_with_response() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "987612".to_string(),
+        };
+        let dispatched = fixture
+            .dispatch_local(command)
+            .expect("failed to dispatch command")
+            .await;
+        let response = Fixture::decode_as::<ParseResponse>(&dispatched.result);
+        assert_eq!(dispatched.kind, MessageKind::Command);
+        assert_eq!(response, Some(ParseResponse { value: 987612 }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_local_command_with_success_result() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "987612".to_string(),
+        };
+        let result = fixture.send(command).await.unwrap();
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn dispatch_local_command_with_success_result_and_response() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "987612".to_string(),
+        };
+        let result = fixture.send(command).await.unwrap();
+        let response = result.decode_as::<ParseResponse>();
+        assert_eq!(response, Some(Ok(ParseResponse { value: 987612 })));
+    }
+
+    #[tokio::test]
+    async fn dispatch_local_command_with_error_result() {
+        let mut fixture = Fixture::new();
+        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+            h.handles::<ParseCommand>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let command = ParseCommand {
+            value: "NotANumber".to_string(),
+        };
+        let result = fixture.send(command).await.unwrap();
+        assert_eq!(result.is_err(), true);
     }
 }

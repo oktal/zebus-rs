@@ -3,7 +3,7 @@ use std::{
     collections::{hash_map::Entry, HashMap},
 };
 
-use super::{Dispatch, MessageDispatch};
+use super::{Dispatch, DispatchRequest, MessageDispatch};
 use crate::{
     core::{Handler, IntoResponse, MessagePayload},
     sync::LockCell,
@@ -39,19 +39,33 @@ where
     pub fn handles<M>(&mut self) -> &mut Self
     where
         H: Handler<M> + 'static,
-        M: Message + prost::Message + Default + 'static,
+        M: Message + prost::Message + Clone + Default + 'static,
     {
         let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
-            if let Some(Ok(message)) = dispatch.message.decode_as::<M>() {
-                // Safety:
-                //   1. `handler` is of type `Box<H>
-                //   2. `H` has an explicit bound on `Handler<M>`
-                let res = unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
-                let handler_type = std::any::type_name::<H>();
-
-                dispatch.set_kind(MessageKind::Command);
-                dispatch.set_response(handler_type, res.into_response());
+            let handler_type = std::any::type_name::<H>();
+            match &dispatch.request {
+                DispatchRequest::Remote(message) => {
+                    if let Some(Ok(message)) = message.decode_as::<M>() {
+                        // Safety:
+                        //   1. `handler` is of type `Box<H>
+                        //   2. `H` has an explicit bound on `Handler<M>`
+                        let res = unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
+                        dispatch.set_response(handler_type, res.into_response());
+                    }
+                }
+                DispatchRequest::Local(_message_type, message) => {
+                    if let Some(message) = message.downcast_ref::<M>() {
+                        // Safety:
+                        //   1. `handler` is of type `Box<H>
+                        //   2. `H` has an explicit bound on `Handler<M>`
+                        let res = unsafe { handler.downcast_mut_unchecked::<H>() }
+                            .handle(message.clone());
+                        dispatch.set_response(handler_type, res.into_response());
+                    }
+                }
             }
+
+            dispatch.set_kind(MessageKind::Command);
         };
 
         self.add::<M>(|| Box::new(invoker));
@@ -136,9 +150,8 @@ where
     H: DispatchHandler + Send + 'static,
 {
     fn dispatch(&mut self, dispatch: &MessageDispatch) {
-        let message_type_id = &dispatch.message.message_type_id;
-
-        if let Some(entry) = self.invokers.get_mut(message_type_id.full_name.as_str()) {
+        let message_type = dispatch.request.message_type();
+        if let Some(entry) = self.invokers.get_mut(message_type) {
             self.handler.apply_mut(|h| {
                 (entry.invoker)(dispatch, h);
             });

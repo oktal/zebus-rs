@@ -4,23 +4,20 @@ use std::{
     task::{Poll, Waker},
 };
 
-use super::{DispatchError, Dispatched};
-use crate::{
-    core::Response,
-    transport::TransportMessage, MessageKind,
-};
+use super::{DispatchError, DispatchRequest, Dispatched};
+use crate::{core::Response, transport::TransportMessage, MessageKind};
 
 struct Context {
-    message: TransportMessage,
+    request: DispatchRequest,
     kind: Option<MessageKind>,
     errors: DispatchError,
     response: Option<Response>,
 }
 
 impl Context {
-    fn new(message: TransportMessage) -> Self {
+    fn new(request: DispatchRequest) -> Self {
         Self {
-            message,
+            request,
             kind: None,
             errors: DispatchError::default(),
             response: None,
@@ -40,7 +37,7 @@ impl Context {
 
 impl Into<Dispatched> for Context {
     fn into(self) -> Dispatched {
-        let message = self.message;
+        let request = self.request;
         let kind = self.kind.expect("missing message kind in dispatch context");
         let result = if self.errors.is_empty() {
             Ok(self.response)
@@ -49,7 +46,7 @@ impl Into<Dispatched> for Context {
         };
 
         Dispatched {
-            message,
+            request,
             kind,
             result,
         }
@@ -68,10 +65,10 @@ struct Repr {
 }
 
 impl Repr {
-    fn new(message: TransportMessage) -> Self {
+    fn new(request: DispatchRequest) -> Self {
         Self {
             completed: false,
-            context: Some(Context::new(message)),
+            context: Some(Context::new(request)),
             waker: None,
         }
     }
@@ -90,9 +87,9 @@ impl Clone for DispatchFuture {
 }
 
 impl DispatchFuture {
-    pub(super) fn new(message: TransportMessage) -> Self {
+    pub(super) fn new(request: DispatchRequest) -> Self {
         Self {
-            repr: Arc::new(Mutex::new(Repr::new(message))),
+            repr: Arc::new(Mutex::new(Repr::new(request))),
         }
     }
 

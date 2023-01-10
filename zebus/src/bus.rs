@@ -7,7 +7,9 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    core::RawMessage, transport::MessageExecutionCompleted, Command, MessageType, Peer, PeerId,
+    core::{MessagePayload, RawMessage},
+    transport::MessageExecutionCompleted,
+    Command, MessageType, Peer, PeerId,
 };
 
 /// An error which can be returned when sending a command
@@ -30,6 +32,22 @@ pub enum CommandError {
 
 /// Execution result of a [`Command`]
 pub type CommandResult = Result<Option<RawMessage<MessageType>>, CommandError>;
+
+impl MessagePayload for CommandResult {
+    fn message_type(&self) -> Option<&str> {
+        match self {
+            Ok(Some(message)) => message.message_type(),
+            _ => None,
+        }
+    }
+
+    fn content(&self) -> Option<&[u8]> {
+        match self {
+            Ok(Some(message)) => message.content(),
+            _ => None,
+        }
+    }
+}
 
 impl From<MessageExecutionCompleted> for CommandResult {
     fn from(message: MessageExecutionCompleted) -> Self {
@@ -79,15 +97,15 @@ pub trait Bus {
     fn stop(&mut self) -> Result<(), Self::Err>;
 
     /// Send a [`Command`] to the handling [`Peer`]
-    fn send<C: Command + prost::Message>(
+    fn send<C: Command + prost::Message + Send + 'static>(
         &mut self,
-        command: &C,
+        command: C,
     ) -> Result<CommandFuture, Self::Err>;
 
     /// Send a [`Command`] to a destination [`Peer`]
     fn send_to<C: Command + prost::Message>(
         &mut self,
-        command: &C,
+        command: C,
         peer: Peer,
     ) -> Result<CommandFuture, Self::Err>;
 }
