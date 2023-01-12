@@ -35,7 +35,6 @@ pub trait DirectoryReader {
     /// Returns `Some` if the peer exists and has been found or `None` otherwise
     fn get(&self, peer_id: &PeerId) -> Option<Peer>;
 
-
     /// Get the list of [`Peer`] peers handling a [`crate::Message`] message based on the
     /// subscriptions of the peers
     fn get_peers_handling<M: crate::Message>(&self, message: &M) -> Vec<Peer>;
@@ -47,7 +46,7 @@ pub(crate) trait Directory: Send + Sync + DirectoryReader + 'static {
     /// Type of [`PeerEvent`] [`Stream`] that the directory will yield
     type EventStream: Stream<Item = PeerEvent> + Send + 'static;
 
-    /// Type of [`Handler`] that will be used to handled commands and events related to the
+    /// Type of [`Handler`] that will be used to handle commands and events related to the
     /// directory
     type Handler: Handler<PeerStarted>
         + Handler<PeerStopped>
@@ -62,7 +61,10 @@ pub(crate) trait Directory: Send + Sync + DirectoryReader + 'static {
         + 'static;
 
     /// Create a new instance of the directory
-    fn new() -> (Arc<Self>, Self::EventStream);
+    fn new() -> Arc<Self>;
+
+    /// Create a new subscription to the peer events stream
+    fn subscribe(&self) -> Self::EventStream;
 
     /// Create a new instance of a [`Self::Handler`]
     fn handler(&self) -> Box<Self::Handler>;

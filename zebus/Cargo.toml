@@ -18,7 +18,8 @@ thiserror = "1.0.37"
 itertools = "0.10.5"
 signals2 = "0.3.2"
 futures-core = "0.3.25"
-tokio-stream = "0.1.11"
+tokio-stream = { version = "0.1.11", features = ["sync"] }
+pin-project = "1.0.12"
 
 [dependencies.uuid]
 version = "1.2.0"

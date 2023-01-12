@@ -109,7 +109,6 @@ enum State<T: Transport, D: Directory> {
         configuration: BusConfiguration,
         transport: T,
         directory: Arc<D>,
-        directory_rx: D::EventStream,
         dispatcher: MessageDispatcher,
     },
 
@@ -430,7 +429,6 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         configuration: BusConfiguration,
         transport: T,
         directory: Arc<D>,
-        directory_rx: D::EventStream,
         dispatcher: MessageDispatcher,
     ) -> Self {
         Self {
@@ -439,7 +437,6 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 configuration,
                 transport,
                 directory,
-                directory_rx,
                 dispatcher,
             }),
         }
@@ -454,11 +451,13 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 configuration,
                 mut transport,
                 directory,
-                directory_rx,
                 dispatcher,
             }) => {
                 // Wrap tokio's runtime inside an Arc to share it with other components
                 let runtime = Arc::new(runtime);
+
+                // Subscribe to the directory event stream
+                let directory_rx = directory.subscribe();
 
                 // Pin the directory event stream
                 let directory_rx = Box::pin(directory_rx);
@@ -816,10 +815,10 @@ impl<T: Transport> BusBuilder<T> {
         let dispatcher = self.dispatcher;
 
         // Create peer directory client
-        let (client, rx) = directory::Client::new();
+        let client = directory::Client::new();
 
         // Create the bus
-        let mut bus = Bus::new(runtime, configuration, transport, client, rx, dispatcher);
+        let mut bus = Bus::new(runtime, configuration, transport, client, dispatcher);
 
         // Configure the bus
         bus.configure(peer_id, environment)
@@ -853,7 +852,7 @@ mod tests {
         DirectoryReader,
     };
     use crate::message_type_id::MessageTypeId;
-    use tokio_stream::wrappers::ReceiverStream;
+    use tokio::sync::broadcast;
 
     /// Inner [`MemoryTransport`] state
     struct MemoryTransportInner {
@@ -893,14 +892,14 @@ mod tests {
     struct MemoryTransport {
         /// The peer the transport is operating on
         peer: Peer,
-        /// Shared transport state 
+        /// Shared transport state
         inner: Arc<Mutex<MemoryTransportInner>>,
     }
 
     /// Inner [`MemoryDirectory`] state
     struct MemoryDirectoryInner {
         /// Sender channel for peer events
-        events_tx: mpsc::Sender<PeerEvent>,
+        events_tx: broadcast::Sender<PeerEvent>,
 
         /// A collection of messages that have been handled by the directory, indexed by their
         /// message type
@@ -908,16 +907,16 @@ mod tests {
     }
 
     impl MemoryDirectoryInner {
-        fn new() -> (Self, mpsc::Receiver<PeerEvent>) {
-            let (events_tx, events_rx) = mpsc::channel(128);
+        fn new() -> Self {
+            let (events_tx, _events_rx) = broadcast::channel(128);
+            Self {
+                events_tx,
+                messages: HashMap::new(),
+            }
+        }
 
-            (
-                Self {
-                    events_tx,
-                    messages: HashMap::new(),
-                },
-                events_rx,
-            )
+        fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+            self.events_tx.subscribe()
         }
     }
 
@@ -1132,17 +1131,17 @@ mod tests {
     }
 
     impl Directory for MemoryDirectory {
-        type EventStream = ReceiverStream<PeerEvent>;
+        type EventStream = crate::sync::stream::BroadcastStream<PeerEvent>;
         type Handler = MemoryDirectoryHandler;
 
-        fn new() -> (Arc<Self>, Self::EventStream) {
-            let (inner, events_rx) = MemoryDirectoryInner::new();
-            (
-                Arc::new(Self {
-                    inner: Arc::new(Mutex::new(inner)),
-                }),
-                ReceiverStream::new(events_rx),
-            )
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: Arc::new(Mutex::new(MemoryDirectoryInner::new())),
+            })
+        }
+        fn subscribe(&self) -> Self::EventStream {
+            let inner = self.inner.lock().unwrap();
+            inner.subscribe().into()
         }
 
         fn handler(&self) -> Box<Self::Handler> {
@@ -1171,7 +1170,7 @@ mod tests {
             let transport = MemoryTransport::new(peer.clone());
 
             let environment = "Test".to_string();
-            let (directory, directory_rx) = MemoryDirectory::new();
+            let directory = MemoryDirectory::new();
 
             let dispatcher = MessageDispatcher::new();
             let bus = Bus::new(
@@ -1179,7 +1178,6 @@ mod tests {
                 configuration,
                 transport.clone(),
                 directory.clone(),
-                directory_rx,
                 dispatcher,
             );
 
@@ -1197,15 +1195,7 @@ mod tests {
         }
 
         fn configuration() -> BusConfiguration {
-            BusConfiguration {
-                directory_endpoints: vec!["tcp://localhost:89676".to_string()],
-                registration_timeout: DEFAULT_REGISTRATION_TIMEOUT,
-                start_replay_timeout: DEFAULT_START_REPLAY_TIMEOUT,
-                is_persistent: false,
-                pick_random_directory: false,
-                enable_error_publication: false,
-                message_batch_size: DEFAULT_MAX_BATCH_SIZE,
-            }
+            BusConfiguration::default().with_directory_endpoints(["tcp://localhost:12500"]).with_random_directory(false)
         }
 
         fn configure(&mut self) -> Result<(), Error> {
@@ -1238,10 +1228,10 @@ mod tests {
         timeout: Duration,
     ) {
         // Create configuration
-        let mut configuration = Fixture::configuration();
-        configuration.directory_endpoints =
-            directory_endpoints.into_iter().map(|e| e.into()).collect();
-        configuration.registration_timeout = timeout;
+        let configuration = BusConfiguration::default()
+            .with_directory_endpoints(directory_endpoints)
+            .with_registration_timeout(timeout)
+            .with_random_directory(false);
 
         let directory_count = configuration.directory_endpoints.len();
 
@@ -1254,7 +1244,7 @@ mod tests {
         // Start the bus
         let res = fixture.bus.start();
 
-        // Make sure a RegisterPeerCommand was sent for every directory
+        // Make sure a RegisterPeerCommand was sent to every directory
         assert_eq!(
             fixture.transport.get::<RegisterPeerCommand>().len(),
             directory_count
@@ -1324,7 +1314,13 @@ mod tests {
         assert_eq!(fixture.transport.get::<RegisterPeerCommand>().len(), 1);
 
         // Make sure a RegisterPeerResponse was sent and forwarded to the directory
-        assert_eq!(fixture.directory.get_handled::<RegisterPeerResponse>().len(), 1);
+        assert_eq!(
+            fixture
+                .directory
+                .get_handled::<RegisterPeerResponse>()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1333,12 +1329,11 @@ mod tests {
         let directory_2 = "tcp://localhost:13500";
         let directory_3 = "tcp://localhost:14500";
 
-        let mut configuration = Fixture::configuration();
-        configuration.registration_timeout = Duration::from_millis(50);
-        configuration.directory_endpoints = [directory_1, directory_2, directory_3]
-            .into_iter()
-            .map(Into::into)
-            .collect();
+        // Create configuration
+        let configuration = BusConfiguration::default()
+            .with_directory_endpoints([directory_1, directory_2, directory_3])
+            .with_registration_timeout(Duration::from_millis(50))
+            .with_random_directory(false);
 
         let mut fixture = Fixture::new(configuration);
 
@@ -1372,6 +1367,12 @@ mod tests {
         assert_eq!(fixture.transport.get::<RegisterPeerCommand>().len(), 3);
 
         // Make sure a RegisterPeerResponse was sent and forwarded to the directory
-        assert_eq!(fixture.directory.get_handled::<RegisterPeerResponse>().len(), 1);
+        assert_eq!(
+            fixture
+                .directory
+                .get_handled::<RegisterPeerResponse>()
+                .len(),
+            1
+        );
     }
 }

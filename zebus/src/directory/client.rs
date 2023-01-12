@@ -1,6 +1,6 @@
 //! A client to communicate with a a peer directory
 use itertools::Itertools;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 use crate::{
     core::MessagePayload,
@@ -14,8 +14,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio_stream::wrappers::ReceiverStream;
-
 use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
@@ -23,9 +21,6 @@ use super::{
     Directory, DirectoryReader, PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted,
     PeerStopped,
 };
-
-/// Receiver for [`PeerEvent`] events raised by [`Client`]
-pub(crate) type Receiver = mpsc::Receiver<PeerEvent>;
 
 #[derive(Debug)]
 struct SubscriptionIndex(HashMap<MessageType, PeerSubscriptionTree>);
@@ -193,12 +188,12 @@ impl PeerEntry {
 
 struct PeerUpdate<'a> {
     id: &'a PeerId,
-    events_tx: mpsc::Sender<PeerEvent>,
+    events_tx: broadcast::Sender<PeerEvent>,
 }
 
 impl PeerUpdate<'_> {
     fn raise(&self, event_fn: impl FnOnce(PeerId) -> PeerEvent) {
-        if let Err(_) = self.events_tx.blocking_send(event_fn(self.id.clone())) {}
+        if let Err(_) = self.events_tx.send(event_fn(self.id.clone())) {}
     }
 
     fn forget(self) {}
@@ -208,21 +203,22 @@ impl PeerUpdate<'_> {
 struct Inner {
     subscriptions: SubscriptionIndex,
     peers: HashMap<PeerId, PeerEntry>,
-    events_tx: mpsc::Sender<PeerEvent>,
+    events_tx: broadcast::Sender<PeerEvent>,
 }
 
 impl Inner {
-    fn new() -> (Self, tokio::sync::mpsc::Receiver<PeerEvent>) {
-        let (events_tx, events_rx) = tokio::sync::mpsc::channel(128);
+    fn new() -> Self {
+        let (events_tx, _) = broadcast::channel(128);
 
-        (
-            Self {
-                subscriptions: SubscriptionIndex::new(),
-                peers: HashMap::new(),
-                events_tx,
-            },
-            events_rx,
-        )
+        Self {
+            subscriptions: SubscriptionIndex::new(),
+            peers: HashMap::new(),
+            events_tx,
+        }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+        self.events_tx.subscribe()
     }
 
     fn add_or_update(&mut self, descriptor: PeerDescriptor) -> PeerUpdate {
@@ -464,18 +460,18 @@ impl DirectoryReader for Client {
 }
 
 impl Directory for Client {
-    type EventStream = ReceiverStream<PeerEvent>;
+    type EventStream = crate::sync::stream::BroadcastStream<PeerEvent>;
     type Handler = DirectoryHandler;
 
-    fn new() -> (Arc<Self>, Self::EventStream) {
-        let (inner, events_rx) = Inner::new();
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::new(Mutex::new(Inner::new())),
+        })
+    }
 
-        (
-            Arc::new(Self {
-                inner: Arc::new(Mutex::new(inner)),
-            }),
-            ReceiverStream::new(events_rx),
-        )
+    fn subscribe(&self) -> Self::EventStream {
+        let inner = self.inner.lock().unwrap();
+        inner.subscribe().into()
     }
 
     fn handler(&self) -> Box<Self::Handler> {
@@ -568,7 +564,7 @@ impl crate::Handler<PeerSubscriptionsForTypeUpdated> for DirectoryHandler {
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
-    use tokio::sync::mpsc::Receiver;
+    use tokio_stream::StreamExt;
 
     use super::*;
     use crate::proto::{IntoProtobuf, MessageTypeId, Subscription};
@@ -600,12 +596,13 @@ mod tests {
         client: Arc<Client>,
         handler: Box<DirectoryHandler>,
         descriptor: PeerDescriptor,
-        events_rx: Receiver<PeerEvent>,
+        events_rx: crate::sync::stream::BroadcastStream<PeerEvent>,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let (client, events_rx) = Client::new();
+            let client = Client::new();
+            let events_rx = client.subscribe();
             let handler = client.handler();
             let descriptor = Self::create_descriptor();
 
@@ -613,20 +610,13 @@ mod tests {
                 client,
                 handler,
                 descriptor,
-                events_rx: ReceiverStream::into_inner(events_rx),
+                events_rx,
             }
         }
 
-        fn recv(&mut self) -> Option<PeerEvent> {
-            self.events_rx.blocking_recv()
-        }
-
-        fn recv_n(&mut self, n: usize) -> Vec<PeerEvent> {
-            (0..n).filter_map(|_| self.recv()).collect()
-        }
-
-        fn try_recv_n(&mut self, n: usize) -> Vec<Option<PeerEvent>> {
-            (0..n).map(|_| self.events_rx.try_recv().ok()).collect()
+        async fn try_recv_n(self, n: usize) -> Vec<Option<PeerEvent>> {
+            use crate::sync::stream::StreamExt;
+            self.events_rx.take_exact(n).collect().await
         }
 
         fn peer_id(&self) -> PeerId {
@@ -681,8 +671,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn handle_registration() {
+    #[tokio::test]
+    async fn handle_registration() {
         let mut fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
         fixture.handler.handle(RegisterPeerResponse {
@@ -697,19 +687,22 @@ mod tests {
         assert_eq!(fixture.client.get(&PeerId::new("Test.Peer.0")), None);
     }
 
-    #[test]
-    fn handle_registration_does_not_raise_peer_started_event() {
+    #[tokio::test]
+    async fn handle_registration_does_not_raise_peer_started_event() {
         let mut fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
         fixture.handler.handle(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 
-        assert_eq!(fixture.try_recv_n(5), vec![None, None, None, None, None]);
+        assert_eq!(
+            fixture.try_recv_n(5).await,
+            vec![None, None, None, None, None]
+        );
     }
 
-    #[test]
-    fn handle_registration_with_command_subscriptions() {
+    #[tokio::test]
+    async fn handle_registration_with_command_subscriptions() {
         let mut fixture = Fixture::new();
         let command_1 = RoutableCommand {
             name: "routable_command".into(),
@@ -751,8 +744,8 @@ mod tests {
         assert_eq!(peer_3, vec![]);
     }
 
-    #[test]
-    fn handle_registration_with_event_subscriptions() {
+    #[tokio::test]
+    async fn handle_registration_with_event_subscriptions() {
         let mut fixture = Fixture::new();
         let event_1 = TestEvent {
             _outcome: "Passed".to_string(),
@@ -783,8 +776,8 @@ mod tests {
         assert_eq!(peers_2, peers);
     }
 
-    #[test]
-    fn handle_registration_with_routable_event_subscriptions() {
+    #[tokio::test]
+    async fn handle_registration_with_routable_event_subscriptions() {
         let mut fixture = Fixture::new();
         let event_1 = RoutableTestEvent {
             outcome: "Passed".to_string(),
@@ -831,20 +824,25 @@ mod tests {
         assert_eq!(peers_2, descriptor_peers_2);
     }
 
-    #[test]
-    fn handle_peer_started() {
+    #[tokio::test]
+    async fn handle_peer_started() {
         let mut fixture = Fixture::new();
         fixture.handler.handle(PeerStarted {
             descriptor: fixture.descriptor.clone(),
         });
 
+        let peer_id = fixture.peer_id();
+
         assert_eq!(fixture.client.get(&fixture.peer_id()), Some(fixture.peer()));
         assert_eq!(fixture.client.get(&PeerId::new("Test.Peer.0")), None);
-        assert_eq!(fixture.recv(), Some(PeerEvent::Started(fixture.peer_id())));
+        assert_eq!(
+            fixture.try_recv_n(1).await,
+            vec![Some(PeerEvent::Started(peer_id))]
+        );
     }
 
-    #[test]
-    fn handle_peer_stopped() {
+    #[tokio::test]
+    async fn handle_peer_stopped() {
         let mut fixture = Fixture::new();
         let peer = fixture.peer();
         let timestamp_utc = chrono::Utc::now();
@@ -858,7 +856,9 @@ mod tests {
             timestamp_utc: Some(timestamp_utc.into_protobuf()),
         });
 
-        let peer_stopped = fixture.client.get(&fixture.peer_id());
+        let peer_id = fixture.peer_id();
+
+        let peer_stopped = fixture.client.get(&peer_id);
         assert_eq!(
             peer_stopped,
             Some(Peer {
@@ -869,18 +869,18 @@ mod tests {
             })
         );
 
-        let events = fixture.recv_n(2);
+        let events = fixture.try_recv_n(2).await;
         assert_eq!(
             events,
             vec![
-                PeerEvent::Started(fixture.peer_id()),
-                PeerEvent::Stopped(fixture.peer_id())
+                Some(PeerEvent::Started(peer_id.clone())),
+                Some(PeerEvent::Stopped(peer_id.clone()))
             ]
         );
     }
 
-    #[test]
-    fn handle_peer_started_after_peer_stopped_with_updated_subscriptions() {
+    #[tokio::test]
+    async fn handle_peer_started_after_peer_stopped_with_updated_subscriptions() {
         let mut fixture = Fixture::new();
         let command_1 = RoutableCommand {
             name: "routable_command".into(),
@@ -941,7 +941,7 @@ mod tests {
         assert_eq!(peers_3, vec![]);
 
         assert_eq!(
-            fixture.try_recv_n(4),
+            fixture.try_recv_n(4).await,
             vec![
                 Some(PeerEvent::Started(peer.id.clone())),
                 Some(PeerEvent::Stopped(peer.id.clone())),
@@ -951,8 +951,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn handle_peer_subscriptions_for_type_updated() {
+    #[tokio::test]
+    async fn handle_peer_subscriptions_for_type_updated() {
         let mut fixture = Fixture::new();
         let command_1 = RoutableCommand {
             name: "routable_command".into(),
@@ -968,6 +968,7 @@ mod tests {
             descriptor: fixture.descriptor.clone(),
         });
 
+        let peer_id = fixture.peer_id();
         let now = chrono::Utc::now();
 
         fixture.handler.handle(PeerSubscriptionsForTypeUpdated {
@@ -980,18 +981,18 @@ mod tests {
         assert_eq!(peers_1, vec![fixture.peer()]);
         let peers_2 = fixture.client.get_peers_handling(&command_2);
         assert!(peers_2.is_empty());
-        let events = fixture.recv_n(2);
+        let events = fixture.try_recv_n(2).await;
         assert_eq!(
             events,
             vec![
-                PeerEvent::Started(fixture.peer_id()),
-                PeerEvent::Updated(fixture.peer_id())
+                Some(PeerEvent::Started(peer_id.clone())),
+                Some(PeerEvent::Updated(peer_id.clone()))
             ]
         );
     }
 
-    #[test]
-    fn handle_peer_subscriptions_for_type_updated_discard_outdated() {
+    #[tokio::test]
+    async fn handle_peer_subscriptions_for_type_updated_discard_outdated() {
         let mut fixture = Fixture::new();
         let command_1 = RoutableCommand {
             name: "routable_command".into(),
@@ -1008,6 +1009,7 @@ mod tests {
             descriptor: fixture.descriptor.clone(),
         });
 
+        let peer_id = fixture.peer_id();
         let now = chrono::Utc::now();
 
         fixture.handler.handle(PeerSubscriptionsForTypeUpdated {
@@ -1027,10 +1029,10 @@ mod tests {
         let peers_2 = fixture.client.get_peers_handling(&command_2);
         assert!(peers_2.is_empty());
         assert_eq!(
-            fixture.try_recv_n(3),
+            fixture.try_recv_n(3).await,
             vec![
-                Some(PeerEvent::Started(fixture.peer_id())),
-                Some(PeerEvent::Updated(fixture.peer_id())),
+                Some(PeerEvent::Started(peer_id.clone())),
+                Some(PeerEvent::Updated(peer_id.clone())),
                 None
             ]
         );
