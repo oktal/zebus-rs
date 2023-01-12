@@ -14,11 +14,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use tokio_stream::wrappers::ReceiverStream;
+
 use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
     events::{PeerSubscriptionsForTypeUpdated, SubscriptionsForType},
-    PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
+    Directory, DirectoryReader, PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted,
+    PeerStopped,
 };
 
 /// Receiver for [`PeerEvent`] events raised by [`Client`]
@@ -424,36 +427,9 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    pub(crate) fn new() -> (Self, tokio::sync::mpsc::Receiver<PeerEvent>) {
-        let (inner, events_rx) = Inner::new();
-
-        (
-            Self {
-                inner: Arc::new(Mutex::new(inner)),
-            },
-            events_rx,
-        )
-    }
-
     pub(crate) fn replay(&mut self, mut messages: Vec<TransportMessage>) -> Vec<TransportMessage> {
         messages.retain(|m| self.replay_message(m));
         messages
-    }
-
-    pub(crate) fn handler(&self) -> Box<DirectoryHandler> {
-        Box::new(DirectoryHandler {
-            inner: Arc::clone(&self.inner),
-        })
-    }
-
-    pub(crate) fn get(&self, peer_id: &PeerId) -> Option<Peer> {
-        let inner = self.inner.lock().unwrap();
-        inner.entry(peer_id, None).map(|e| e.peer.clone())
-    }
-
-    pub(crate) fn get_peers_handling<M: crate::Message>(&self, message: &M) -> Vec<Peer> {
-        let inner = self.inner.lock().unwrap();
-        inner.get_peers_handling(message)
     }
 
     fn replay_message(&mut self, message: &TransportMessage) -> bool {
@@ -475,6 +451,40 @@ impl Client {
     }
 }
 
+impl DirectoryReader for Client {
+    fn get(&self, peer_id: &PeerId) -> Option<Peer> {
+        let inner = self.inner.lock().unwrap();
+        inner.entry(peer_id, None).map(|e| e.peer.clone())
+    }
+
+    fn get_peers_handling<M: crate::Message>(&self, message: &M) -> Vec<Peer> {
+        let inner = self.inner.lock().unwrap();
+        inner.get_peers_handling(message)
+    }
+}
+
+impl Directory for Client {
+    type EventStream = ReceiverStream<PeerEvent>;
+    type Handler = DirectoryHandler;
+
+    fn new() -> (Arc<Self>, Self::EventStream) {
+        let (inner, events_rx) = Inner::new();
+
+        (
+            Arc::new(Self {
+                inner: Arc::new(Mutex::new(inner)),
+            }),
+            ReceiverStream::new(events_rx),
+        )
+    }
+
+    fn handler(&self) -> Box<Self::Handler> {
+        Box::new(DirectoryHandler {
+            inner: Arc::clone(&self.inner),
+        })
+    }
+}
+
 impl Clone for Client {
     fn clone(&self) -> Self {
         Self {
@@ -483,7 +493,7 @@ impl Clone for Client {
     }
 }
 
-impl crate::Handler<RegisterPeerResponse> for Client {
+impl crate::Handler<RegisterPeerResponse> for DirectoryHandler {
     type Response = ();
 
     fn handle(&mut self, message: RegisterPeerResponse) {
@@ -558,6 +568,7 @@ impl crate::Handler<PeerSubscriptionsForTypeUpdated> for DirectoryHandler {
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
+    use tokio::sync::mpsc::Receiver;
 
     use super::*;
     use crate::proto::{IntoProtobuf, MessageTypeId, Subscription};
@@ -586,10 +597,10 @@ mod tests {
     }
 
     struct Fixture {
-        client: Client,
+        client: Arc<Client>,
         handler: Box<DirectoryHandler>,
         descriptor: PeerDescriptor,
-        events_rx: mpsc::Receiver<PeerEvent>,
+        events_rx: Receiver<PeerEvent>,
     }
 
     impl Fixture {
@@ -602,7 +613,7 @@ mod tests {
                 client,
                 handler,
                 descriptor,
-                events_rx,
+                events_rx: ReceiverStream::into_inner(events_rx),
             }
         }
 
@@ -674,7 +685,7 @@ mod tests {
     fn handle_registration() {
         let mut fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
-        fixture.client.handle(RegisterPeerResponse {
+        fixture.handler.handle(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 
@@ -690,7 +701,7 @@ mod tests {
     fn handle_registration_does_not_raise_peer_started_event() {
         let mut fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
-        fixture.client.handle(RegisterPeerResponse {
+        fixture.handler.handle(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 
@@ -728,7 +739,7 @@ mod tests {
             has_debugger_attached: Some(false),
         };
 
-        fixture.client.handle(RegisterPeerResponse {
+        fixture.handler.handle(RegisterPeerResponse {
             peers: vec![peer_desc_1.clone(), peer_desc_2.clone()],
         });
 
@@ -762,7 +773,7 @@ mod tests {
         });
         let peers: Vec<_> = descriptors.iter().cloned().map(|d| d.peer).collect();
 
-        fixture.client.handle(RegisterPeerResponse {
+        fixture.handler.handle(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 
@@ -810,7 +821,7 @@ mod tests {
             .cloned()
             .collect_vec();
 
-        fixture.client.handle(RegisterPeerResponse {
+        fixture.handler.handle(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 

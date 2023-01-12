@@ -4,9 +4,10 @@ mod originator_info;
 mod send_context;
 mod transport_message;
 pub mod zmq;
-use std::{borrow::Cow, sync::Arc};
 
-use crate::{directory, Peer, PeerId};
+use crate::{directory::event::PeerEvent, Peer, PeerId};
+use futures_core::stream::BoxStream;
+use std::{borrow::Cow, sync::Arc};
 
 pub use message_execution_completed::MessageExecutionCompleted;
 pub use originator_info::OriginatorInfo;
@@ -26,7 +27,7 @@ pub trait Transport: Send + 'static {
         &mut self,
         peer_id: PeerId,
         environment: String,
-        directory_rx: directory::Receiver,
+        directory_rx: BoxStream<'static, PeerEvent>,
         runtime: Arc<Runtime>,
     ) -> Result<(), Self::Err>;
 

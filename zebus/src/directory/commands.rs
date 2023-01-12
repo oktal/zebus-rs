@@ -3,7 +3,7 @@ use crate::proto;
 /// [`Command`] to send to register a [`Peer`] to the directory
 #[derive(prost::Message, crate::Command, Clone)]
 #[zebus(namespace = "Abc.Zebus.Directory", infrastructure)]
-pub(super) struct RegisterPeerCommand {
+pub(crate) struct RegisterPeerCommand {
     #[prost(message, required, tag = "1")]
     /// [`PeerDescriptor`] description of the peer to register
     pub peer: proto::PeerDescriptor,

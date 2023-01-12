@@ -19,7 +19,7 @@ use crate::{
     },
     core::MessagePayload,
     directory::{
-        self, commands::PingPeerCommand, events::PeerSubscriptionsForTypeUpdated,
+        self, commands::PingPeerCommand, events::PeerSubscriptionsForTypeUpdated, Directory,
         PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
         Registration,
     },
@@ -29,7 +29,7 @@ use crate::{
     },
     proto::FromProtobuf,
     transport::{self, MessageExecutionCompleted, SendContext, Transport, TransportMessage},
-    Bus, BusConfiguration, Command, Event, Handler, MessageId, Peer, PeerId,
+    BusConfiguration, Command, Event, Handler, MessageId, Peer, PeerId,
 };
 
 #[derive(Debug)]
@@ -56,6 +56,13 @@ impl RegistrationError {
     fn add(&mut self, peer: Peer, error: directory::RegistrationError) {
         self.inner.push((peer, error))
     }
+
+    fn find(
+        &self,
+        predicate: impl Fn(&directory::RegistrationError) -> bool,
+    ) -> Option<&directory::RegistrationError> {
+        self.inner.iter().find(|e| predicate(&e.1)).map(|x| &x.1)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -70,7 +77,7 @@ pub enum SendError {
 
     /// The sender has been closed
     #[error("sender has been closed")]
-    Closed
+    Closed,
 }
 
 #[derive(Debug, Error)]
@@ -96,11 +103,13 @@ pub enum Error {
     InvalidOperation,
 }
 
-enum State<T: Transport> {
+enum State<T: Transport, D: Directory> {
     Init {
         runtime: Runtime,
         configuration: BusConfiguration,
         transport: T,
+        directory: Arc<D>,
+        directory_rx: D::EventStream,
         dispatcher: MessageDispatcher,
     },
 
@@ -110,7 +119,7 @@ enum State<T: Transport> {
         transport: T,
         dispatcher: MessageDispatcher,
 
-        directory: directory::Client,
+        directory: Arc<D>,
         peer_id: PeerId,
         environment: String,
     },
@@ -121,7 +130,7 @@ enum State<T: Transport> {
         self_peer: Peer,
         environment: String,
 
-        directory: directory::Client,
+        directory: Arc<D>,
 
         pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
         snd_tx: mpsc::Sender<SendEntry>,
@@ -191,7 +200,7 @@ enum LocalDispatchRequest {
     Event {
         message_type: &'static str,
         message: Arc<AnyMessage>,
-    }
+    },
 }
 
 impl LocalDispatchRequest {
@@ -204,7 +213,7 @@ impl LocalDispatchRequest {
         let request = Self::Command {
             tx,
             message_type: C::name(),
-            message: Arc::new(command)
+            message: Arc::new(command),
         };
 
         (request, rx)
@@ -217,29 +226,29 @@ impl LocalDispatchRequest {
     {
         Self::Event {
             message_type: E::name(),
-            message: Arc::new(event)
+            message: Arc::new(event),
         }
     }
 }
 
-struct ReceiverContext {
+struct ReceiverContext<D: Directory> {
     transport_rx: transport::Receiver,
     dispatch_rx: mpsc::Receiver<LocalDispatchRequest>,
     tx: mpsc::Sender<SendEntry>,
     self_peer: Peer,
     environment: String,
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
-    directory: directory::Client,
+    directory: Arc<D>,
     dispatcher: MessageDispatcher,
 }
 
-impl ReceiverContext {
+impl<D: Directory> ReceiverContext<D> {
     fn new(
         transport_rx: transport::Receiver,
         tx: mpsc::Sender<SendEntry>,
         self_peer: Peer,
         environment: String,
-        directory: directory::Client,
+        directory: Arc<D>,
         dispatcher: MessageDispatcher,
     ) -> (
         Self,
@@ -285,7 +294,7 @@ impl ReceiverContext {
 }
 
 /// Reception loop for [`TransportMesssage`] messages
-async fn receiver(mut ctx: ReceiverContext) {
+async fn receiver<D: Directory>(mut ctx: ReceiverContext<D>) {
     loop {
         tokio::select! {
 
@@ -411,15 +420,17 @@ fn try_register<T: Transport>(
     Err(Error::Registration(error))
 }
 
-struct BusImpl<T: Transport> {
-    inner: Option<State<T>>,
+struct Bus<T: Transport, D: Directory> {
+    inner: Option<State<T, D>>,
 }
 
-impl<T: Transport> BusImpl<T> {
+impl<T: Transport, D: Directory> Bus<T, D> {
     fn new(
         runtime: Runtime,
         configuration: BusConfiguration,
         transport: T,
+        directory: Arc<D>,
+        directory_rx: D::EventStream,
         dispatcher: MessageDispatcher,
     ) -> Self {
         Self {
@@ -427,28 +438,30 @@ impl<T: Transport> BusImpl<T> {
                 runtime,
                 configuration,
                 transport,
+                directory,
+                directory_rx,
                 dispatcher,
             }),
         }
     }
 }
 
-impl<T: Transport> Bus for BusImpl<T> {
-    type Err = Error;
-
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err> {
+impl<T: Transport, D: Directory> Bus<T, D> {
+    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Error> {
         let (inner, res) = match self.inner.take() {
             Some(State::Init {
                 runtime,
                 configuration,
                 mut transport,
+                directory,
+                directory_rx,
                 dispatcher,
             }) => {
                 // Wrap tokio's runtime inside an Arc to share it with other components
                 let runtime = Arc::new(runtime);
 
-                // Create peer directory client
-                let (directory, directory_rx) = directory::Client::new();
+                // Pin the directory event stream
+                let directory_rx = Box::pin(directory_rx);
 
                 // Configure transport
                 transport
@@ -480,7 +493,7 @@ impl<T: Transport> Bus for BusImpl<T> {
         res
     }
 
-    fn start(&mut self) -> Result<(), Self::Err> {
+    fn start(&mut self) -> Result<(), Error> {
         let (inner, res) = match self.inner.take() {
             Some(State::Configured {
                 runtime,
@@ -488,17 +501,18 @@ impl<T: Transport> Bus for BusImpl<T> {
                 mut transport,
                 mut dispatcher,
                 peer_id,
-                mut directory,
+                directory,
                 environment,
             }) => {
                 // Start transport
                 let transport_receiver =
                     transport.start().map_err(|e| Error::Transport(e.into()))?;
+
+                // Setup peer
                 let endpoint = transport
                     .inbound_endpoint()
                     .map_err(|e| Error::Transport(e.into()))?;
 
-                // Register to directory
                 let self_peer = Peer {
                     id: peer_id.clone(),
                     endpoint: endpoint.to_string(),
@@ -506,6 +520,7 @@ impl<T: Transport> Bus for BusImpl<T> {
                     is_responding: true,
                 };
 
+                // Register to directory
                 let registration = try_register(
                     &mut transport,
                     &transport_receiver,
@@ -515,13 +530,16 @@ impl<T: Transport> Bus for BusImpl<T> {
                     &configuration,
                 )?;
 
+                let mut directory_handler = directory.handler();
+
+                // Handle peer directory response
                 if let Ok(response) = registration.result {
-                    directory.handle(response);
+                    directory_handler.handle(response);
                 }
 
                 // Setup peer directory client handler
                 dispatcher
-                    .add(dispatch::registry::for_handler(directory.handler(), |h| {
+                    .add(dispatch::registry::for_handler(directory_handler, |h| {
                         h.handles::<PeerStarted>()
                             .handles::<PeerStopped>()
                             .handles::<PeerDecommissioned>()
@@ -578,14 +596,14 @@ impl<T: Transport> Bus for BusImpl<T> {
         res
     }
 
-    fn stop(&mut self) -> Result<(), Self::Err> {
+    fn stop(&mut self) -> Result<(), Error> {
         todo!()
     }
 
     fn send<C: Command + prost::Message + Send + 'static>(
         &mut self,
         command: C,
-    ) -> Result<CommandFuture, Self::Err> {
+    ) -> Result<CommandFuture, Error> {
         match self.inner.as_mut() {
             Some(State::Started {
                 ref snd_tx,
@@ -610,11 +628,13 @@ impl<T: Transport> Bus for BusImpl<T> {
                 // If we are the receiver of the command, do a local dispatch
                 if dst_peer.id == self_peer.id {
                     // Create the local dispatch request for the command
-                    let (request, rx)  = LocalDispatchRequest::for_command(command);
+                    let (request, rx) = LocalDispatchRequest::for_command(command);
 
                     // Send the command
                     // TODO(oktal): use async send
-                    dispatch_tx.blocking_send(request).map_err(|_| Error::Send(SendError::Closed))?;
+                    dispatch_tx
+                        .blocking_send(request)
+                        .map_err(|_| Error::Send(SendError::Closed))?;
 
                     // Return the future
                     Ok(CommandFuture(rx))
@@ -641,7 +661,7 @@ impl<T: Transport> Bus for BusImpl<T> {
         &mut self,
         command: C,
         peer: crate::Peer,
-    ) -> Result<CommandFuture, Self::Err> {
+    ) -> Result<CommandFuture, Error> {
         match self.inner.as_mut() {
             Some(State::Started {
                 ref snd_tx,
@@ -665,6 +685,37 @@ impl<T: Transport> Bus for BusImpl<T> {
             }
             _ => Err(Error::InvalidOperation),
         }
+    }
+}
+
+impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
+    type Err = Error;
+
+    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err> {
+        self.configure(peer_id, environment)
+    }
+
+    fn start(&mut self) -> Result<(), Self::Err> {
+        self.start()
+    }
+
+    fn stop(&mut self) -> Result<(), Self::Err> {
+        self.stop()
+    }
+
+    fn send<C: Command + prost::Message + Send + 'static>(
+        &mut self,
+        command: C,
+    ) -> Result<CommandFuture, Self::Err> {
+        self.send(command)
+    }
+
+    fn send_to<C: Command + prost::Message>(
+        &mut self,
+        command: C,
+        peer: Peer,
+    ) -> Result<CommandFuture, Self::Err> {
+        self.send_to(command, peer)
     }
 }
 
@@ -750,7 +801,7 @@ impl<T: Transport> BusBuilder<T> {
         self
     }
 
-    pub fn create(self) -> Result<impl Bus, CreateError<Error>> {
+    pub fn create(self) -> Result<impl crate::Bus, CreateError<Error>> {
         let (transport, peer_id, configuration, environment) = (
             self.transport,
             self.peer_id.unwrap_or(Self::testing_peer_id()),
@@ -764,8 +815,11 @@ impl<T: Transport> BusBuilder<T> {
 
         let dispatcher = self.dispatcher;
 
+        // Create peer directory client
+        let (client, rx) = directory::Client::new();
+
         // Create the bus
-        let mut bus = BusImpl::new(runtime, configuration, transport, dispatcher);
+        let mut bus = Bus::new(runtime, configuration, transport, client, rx, dispatcher);
 
         // Configure the bus
         bus.configure(peer_id, environment)
@@ -785,5 +839,539 @@ impl<T: Transport> BusBuilder<T> {
         let uuid = uuid::Uuid::new_v4();
         let peer_id = format!("Abc.Testing.{uuid}");
         PeerId::new(peer_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{any::Any, borrow::Cow, convert::Infallible, time::Duration};
+
+    use super::*;
+    use crate::directory::{
+        commands::{RegisterPeerCommand, RegisterPeerResponse},
+        event::PeerEvent,
+        DirectoryReader,
+    };
+    use crate::message_type_id::MessageTypeId;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    /// Inner [`MemoryTransport`] state
+    struct MemoryTransportInner {
+        /// Configured peer id
+        peer_id: Option<PeerId>,
+
+        /// Configured environment
+        environment: Option<String>,
+
+        /// Flag indicating whether the transport has been started
+        started: bool,
+
+        /// Sender channel for transport messages
+        tx: Option<mpsc::Sender<TransportMessage>>,
+
+        /// Transmit queue
+        /// Messages that are sent through the transport will be stored in this queue along with
+        /// the recipient peers
+        tx_queue: Vec<(TransportMessage, Vec<Peer>)>,
+
+        /// Reception queue
+        /// Messages that should be "sent" back as a response to a transport message will be stored
+        /// in this queue.
+        ///
+        /// This queue holds two callbacks:
+        /// First callback is a predicate that will be used to determine whether the transport
+        /// should respond to a particular message
+        /// Second callback will be used to create an instance of a transport message that should
+        /// be sent back
+        rx_queue: Vec<(
+            Box<dyn Fn(&TransportMessage, &Peer) -> bool + Send + 'static>,
+            Box<dyn FnOnce(TransportMessage, Peer, String) -> TransportMessage + Send + 'static>,
+        )>,
+    }
+
+    /// A [`Transport`] that stores state in memory and has simplified logic for test purposes
+    struct MemoryTransport {
+        /// The peer the transport is operating on
+        peer: Peer,
+        /// Shared transport state 
+        inner: Arc<Mutex<MemoryTransportInner>>,
+    }
+
+    /// Inner [`MemoryDirectory`] state
+    struct MemoryDirectoryInner {
+        /// Sender channel for peer events
+        events_tx: mpsc::Sender<PeerEvent>,
+
+        /// A collection of messages that have been handled by the directory, indexed by their
+        /// message type
+        messages: HashMap<&'static str, Vec<Arc<dyn Any + Send + Sync>>>,
+    }
+
+    impl MemoryDirectoryInner {
+        fn new() -> (Self, mpsc::Receiver<PeerEvent>) {
+            let (events_tx, events_rx) = mpsc::channel(128);
+
+            (
+                Self {
+                    events_tx,
+                    messages: HashMap::new(),
+                },
+                events_rx,
+            )
+        }
+    }
+
+    /// A [`Directory`] that stores state in memory and has simplified
+    /// logic for test purposes
+    struct MemoryDirectory {
+        inner: Arc<Mutex<MemoryDirectoryInner>>,
+    }
+
+    impl MemoryDirectory {
+        /// Get a list of messages handled by the directory
+        fn get_handled<M: crate::Message + Send + Sync + 'static>(&self) -> Vec<Arc<M>> {
+            let inner = self.inner.lock().unwrap();
+
+            let name = M::name();
+            match inner.messages.get(name) {
+                Some(entry) => entry
+                    .iter()
+                    .filter_map(|m| m.clone().downcast::<M>().ok())
+                    .collect(),
+                None => vec![],
+            }
+        }
+    }
+
+    #[derive(Handler)]
+    struct MemoryDirectoryHandler {
+        inner: Arc<Mutex<MemoryDirectoryInner>>,
+    }
+
+    impl MemoryDirectoryHandler {
+        /// Ad a `message` to the list of handled messages by the directory
+        fn add_handled<M: crate::Message + Send + Sync + 'static>(&mut self, message: M) {
+            let mut inner = self.inner.lock().unwrap();
+            let name = M::name();
+            let entry = inner.messages.entry(name).or_insert(Vec::new());
+            entry.push(Arc::new(message));
+        }
+    }
+
+    impl MemoryTransport {
+        fn new(peer: Peer) -> Self {
+            Self {
+                peer,
+                inner: Arc::new(Mutex::new(MemoryTransportInner {
+                    peer_id: None,
+                    environment: None,
+                    started: false,
+                    tx: None,
+                    tx_queue: Vec::new(),
+                    rx_queue: Vec::new(),
+                })),
+            }
+        }
+
+        fn is_started(&self) -> bool {
+            let inner = self.inner.lock().unwrap();
+            inner.started
+        }
+
+        /// Queue a message that will be sent back as a response to a transport message
+        fn queue_message<M: crate::Message + prost::Message>(
+            &self,
+            predicate: impl Fn(&TransportMessage, &Peer) -> bool + Send + 'static,
+            message_fn: impl Fn(TransportMessage) -> M + Send + Sync + 'static,
+        ) -> Option<()> {
+            let message_fn = Box::new(message_fn);
+            let create_fn = Box::new(move |transport_message, sender, environment| {
+                let message = message_fn(transport_message);
+                let (_id, transport) = TransportMessage::create(&sender, environment, &message);
+                transport
+            });
+
+            let mut inner = self.inner.lock().unwrap();
+            inner.rx_queue.push((Box::new(predicate), create_fn));
+            Some(())
+        }
+
+        /// Get the list of messages that have been sent through the transport
+        fn get<M: crate::Message + prost::Message + Default>(&self) -> Vec<(M, Vec<Peer>)> {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .tx_queue
+                .iter()
+                .filter_map(|(msg, peers)| {
+                    let message = msg.decode_as::<M>()?.ok()?;
+                    Some((message, peers.clone()))
+                })
+                .collect()
+        }
+
+        /// Get the configured peer id
+        fn get_peer_id(&self) -> Option<PeerId> {
+            let inner = self.inner.lock().unwrap();
+            inner.peer_id.clone()
+        }
+
+        /// Get the configured environment
+        fn get_environment(&self) -> Option<String> {
+            let inner = self.inner.lock().unwrap();
+            inner.environment.clone()
+        }
+    }
+
+    impl Clone for MemoryTransport {
+        fn clone(&self) -> Self {
+            Self {
+                peer: self.peer.clone(),
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
+
+    impl Transport for MemoryTransport {
+        type Err = Infallible;
+
+        fn configure(
+            &mut self,
+            peer_id: PeerId,
+            environment: String,
+            _directory_rx: directory::EventStream,
+            _runtime: Arc<Runtime>,
+        ) -> Result<(), Self::Err> {
+            let mut inner = self.inner.lock().unwrap();
+            inner.peer_id = Some(peer_id);
+            inner.environment = Some(environment);
+            Ok(())
+        }
+
+        fn start(&mut self) -> Result<transport::Receiver, Self::Err> {
+            let mut inner = self.inner.lock().unwrap();
+            let (tx, rx) = mpsc::channel(128);
+            inner.started = true;
+            inner.tx = Some(tx);
+            Ok(rx)
+        }
+
+        fn stop(&mut self) -> Result<(), Self::Err> {
+            Ok(())
+        }
+
+        fn peer_id(&self) -> Result<&PeerId, Self::Err> {
+            unimplemented!()
+        }
+
+        fn inbound_endpoint(&self) -> Result<Cow<'_, str>, Self::Err> {
+            Ok(Cow::Owned("tcp://localhost:5050".to_string()))
+        }
+
+        fn send(
+            &mut self,
+            peers: impl Iterator<Item = Peer>,
+            message: TransportMessage,
+            _context: SendContext,
+        ) -> Result<(), Self::Err> {
+            let peers: Vec<_> = peers.collect();
+
+            let mut inner = self.inner.lock().unwrap();
+            let environment = inner.environment.clone().unwrap();
+
+            // TODO(oktal): drain_filter
+            for peer in &peers {
+                let mut i = 0;
+                while i < inner.rx_queue.len() {
+                    let entry = &inner.rx_queue[i];
+                    if (entry.0)(&message, peer) {
+                        let entry = inner.rx_queue.remove(i);
+                        let response =
+                            (entry.1)(message.clone(), self.peer.clone(), environment.clone());
+                        let tx = inner.tx.as_ref().unwrap();
+                        tx.blocking_send(response).unwrap();
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+
+            inner.tx_queue.push((message, peers));
+            Ok(())
+        }
+    }
+
+    macro_rules! impl_handler {
+        ($msg:ty, $ty: ty) => {
+            impl Handler<$msg> for $ty {
+                type Response = ();
+
+                fn handle(&mut self, message: $msg) -> Self::Response {
+                    self.add_handled(message);
+                }
+            }
+        };
+    }
+
+    impl_handler!(PeerStarted, MemoryDirectoryHandler);
+    impl_handler!(PeerStopped, MemoryDirectoryHandler);
+    impl_handler!(PeerDecommissioned, MemoryDirectoryHandler);
+    impl_handler!(PeerNotResponding, MemoryDirectoryHandler);
+    impl_handler!(PeerResponding, MemoryDirectoryHandler);
+    impl_handler!(PeerSubscriptionsForTypeUpdated, MemoryDirectoryHandler);
+    impl_handler!(PingPeerCommand, MemoryDirectoryHandler);
+    impl_handler!(RegisterPeerResponse, MemoryDirectoryHandler);
+
+    impl DirectoryReader for MemoryDirectory {
+        fn get(&self, _peer_id: &PeerId) -> Option<Peer> {
+            todo!()
+        }
+
+        fn get_peers_handling<M: crate::Message>(&self, _message: &M) -> Vec<Peer> {
+            todo!()
+        }
+    }
+
+    impl Directory for MemoryDirectory {
+        type EventStream = ReceiverStream<PeerEvent>;
+        type Handler = MemoryDirectoryHandler;
+
+        fn new() -> (Arc<Self>, Self::EventStream) {
+            let (inner, events_rx) = MemoryDirectoryInner::new();
+            (
+                Arc::new(Self {
+                    inner: Arc::new(Mutex::new(inner)),
+                }),
+                ReceiverStream::new(events_rx),
+            )
+        }
+
+        fn handler(&self) -> Box<Self::Handler> {
+            Box::new(MemoryDirectoryHandler {
+                inner: Arc::clone(&self.inner),
+            })
+        }
+    }
+
+    struct Fixture {
+        peer: Peer,
+        environment: String,
+        transport: MemoryTransport,
+        directory: Arc<MemoryDirectory>,
+        bus: Bus<MemoryTransport, MemoryDirectory>,
+    }
+
+    impl Fixture {
+        fn new(configuration: BusConfiguration) -> Self {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let peer = Peer::test();
+            let transport = MemoryTransport::new(peer.clone());
+
+            let environment = "Test".to_string();
+            let (directory, directory_rx) = MemoryDirectory::new();
+
+            let dispatcher = MessageDispatcher::new();
+            let bus = Bus::new(
+                runtime,
+                configuration,
+                transport.clone(),
+                directory.clone(),
+                directory_rx,
+                dispatcher,
+            );
+
+            Self {
+                peer,
+                environment,
+                transport,
+                directory,
+                bus,
+            }
+        }
+
+        fn new_default() -> Self {
+            Self::new(Self::configuration())
+        }
+
+        fn configuration() -> BusConfiguration {
+            BusConfiguration {
+                directory_endpoints: vec!["tcp://localhost:89676".to_string()],
+                registration_timeout: DEFAULT_REGISTRATION_TIMEOUT,
+                start_replay_timeout: DEFAULT_START_REPLAY_TIMEOUT,
+                is_persistent: false,
+                pick_random_directory: false,
+                enable_error_publication: false,
+                message_batch_size: DEFAULT_MAX_BATCH_SIZE,
+            }
+        }
+
+        fn configure(&mut self) -> Result<(), Error> {
+            self.bus
+                .configure(self.peer.id.clone(), self.environment.clone())
+        }
+
+        fn start(&mut self) -> Result<(), Error> {
+            self.bus.start()
+        }
+    }
+
+    #[test]
+    fn configure_bus_will_configure_transport() {
+        let mut fixture = Fixture::new_default();
+
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(
+            fixture.transport.get_peer_id(),
+            Some(fixture.peer.id.clone())
+        );
+        assert_eq!(
+            fixture.transport.get_environment(),
+            Some(fixture.environment.clone())
+        );
+    }
+
+    fn test_registration_timeout<T: Into<String>>(
+        directory_endpoints: impl IntoIterator<Item = T>,
+        timeout: Duration,
+    ) {
+        // Create configuration
+        let mut configuration = Fixture::configuration();
+        configuration.directory_endpoints =
+            directory_endpoints.into_iter().map(|e| e.into()).collect();
+        configuration.registration_timeout = timeout;
+
+        let directory_count = configuration.directory_endpoints.len();
+
+        // Create fixture
+        let mut fixture = Fixture::new(configuration);
+
+        // Configure the bus
+        fixture.configure().expect("Failed to configure bus");
+
+        // Start the bus
+        let res = fixture.bus.start();
+
+        // Make sure a RegisterPeerCommand was sent for every directory
+        assert_eq!(
+            fixture.transport.get::<RegisterPeerCommand>().len(),
+            directory_count
+        );
+
+        // Make sure start returned error
+        assert_eq!(res.is_err(), true);
+
+        // Make sure registration errored with timeout
+        if let Err(Error::Registration(err)) = res {
+            assert_eq!(
+                err.find(|e| matches!(e, &directory::RegistrationError::Timeout(_)))
+                    .is_some(),
+                true
+            );
+        } else {
+            assert!(false, "Registration failed with unexpected error {res:?}");
+        }
+    }
+
+    #[test]
+    fn start_bus_will_register_to_directory_timeout() {
+        test_registration_timeout(["tcp://localhost:12500"], Duration::from_millis(50));
+    }
+
+    #[test]
+    fn start_bus_will_register_to_multiple_directories_timeout() {
+        test_registration_timeout(
+            [
+                "tcp://localhost:12500",
+                "tcp://localhost:13500",
+                "tcp://localhost:14500",
+            ],
+            Duration::from_millis(50),
+        );
+    }
+
+    #[test]
+    fn start_bus_will_register_to_directory() {
+        let mut fixture = Fixture::new_default();
+
+        // Queue a RegisterPeerResponse to be sent when receiving a RegisterPeerCommand
+        fixture.transport.queue_message(
+            |m, _peer| m.is::<RegisterPeerCommand>(),
+            |message| {
+                use prost::Message;
+
+                let response = RegisterPeerResponse { peers: Vec::new() };
+                let message_type = MessageTypeId::of::<RegisterPeerResponse>();
+
+                MessageExecutionCompleted {
+                    command_id: message.id,
+                    error_code: 0,
+                    payload_type_id: Some(message_type.into_protobuf()),
+                    payload: Some(response.encode_to_vec()),
+                    response_message: None,
+                }
+            },
+        );
+
+        // Basic assertions
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(fixture.start().is_ok(), true);
+        assert_eq!(fixture.transport.is_started(), true);
+
+        // Make sure a RegisterPeerCommand was sent
+        assert_eq!(fixture.transport.get::<RegisterPeerCommand>().len(), 1);
+
+        // Make sure a RegisterPeerResponse was sent and forwarded to the directory
+        assert_eq!(fixture.directory.get_handled::<RegisterPeerResponse>().len(), 1);
+    }
+
+    #[test]
+    fn start_bus_will_try_register_to_multiple_directories() {
+        let directory_1 = "tcp://localhost:12500";
+        let directory_2 = "tcp://localhost:13500";
+        let directory_3 = "tcp://localhost:14500";
+
+        let mut configuration = Fixture::configuration();
+        configuration.registration_timeout = Duration::from_millis(50);
+        configuration.directory_endpoints = [directory_1, directory_2, directory_3]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+
+        let mut fixture = Fixture::new(configuration);
+
+        // Queue a RegisterPeerResponse to be sent when receiving a RegisterPeerCommand for last
+        // directory
+        // Other registrations attempt will timeout
+        fixture.transport.queue_message(
+            |m, peer| m.is::<RegisterPeerCommand>() && peer.endpoint == *directory_3,
+            |message| {
+                use prost::Message;
+
+                let response = RegisterPeerResponse { peers: Vec::new() };
+                let message_type = MessageTypeId::of::<RegisterPeerResponse>();
+
+                MessageExecutionCompleted {
+                    command_id: message.id,
+                    error_code: 0,
+                    payload_type_id: Some(message_type.into_protobuf()),
+                    payload: Some(response.encode_to_vec()),
+                    response_message: None,
+                }
+            },
+        );
+
+        // Basic assertions
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(fixture.start().is_ok(), true);
+        assert_eq!(fixture.transport.is_started(), true);
+
+        // Make sure a RegisterPeerCommand was sent for every directory
+        assert_eq!(fixture.transport.get::<RegisterPeerCommand>().len(), 3);
+
+        // Make sure a RegisterPeerResponse was sent and forwarded to the directory
+        assert_eq!(fixture.directory.get_handled::<RegisterPeerResponse>().len(), 1);
     }
 }

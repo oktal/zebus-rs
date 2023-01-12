@@ -17,6 +17,8 @@ chrono = "0.4.22"
 thiserror = "1.0.37"
 itertools = "0.10.5"
 signals2 = "0.3.2"
+futures-core = "0.3.25"
+tokio-stream = "0.1.11"
 
 [dependencies.uuid]
 version = "1.2.0"

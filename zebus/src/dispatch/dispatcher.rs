@@ -286,9 +286,7 @@ mod tests {
             M: crate::Message + prost::Message + 'static,
         {
             let dispatched = self.dispatch_local(message)?.await;
-            Ok(dispatched
-                .into_command_result()
-                .expect("missing CommandResult"))
+            Ok(dispatched.try_into().expect("missing CommandResult"))
         }
 
         fn dispatch<M>(&mut self, message: &M) -> Result<DispatchFuture, Error>

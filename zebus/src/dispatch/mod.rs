@@ -158,27 +158,29 @@ impl TryInto<CommandResult> for Dispatched {
     type Error = ();
 
     fn try_into(self) -> Result<CommandResult, Self::Error> {
-        self.is_command().then(|| match self.result {
-            Ok(None) => Ok(None),
-            Ok(Some(response)) => match response {
-                Response::Message(raw) => {
-                    let (message_type, payload) = raw.into();
-                    Ok(Some(RawMessage::new(message_type, payload)))
-                }
-                Response::Error(code, message) => Err(CommandError::Command {
-                    code,
-                    message: Some(message),
-                }),
-                Response::StandardError(e) => Err(CommandError::Command {
+        self.is_command()
+            .then(|| match self.result {
+                Ok(None) => Ok(None),
+                Ok(Some(response)) => match response {
+                    Response::Message(raw) => {
+                        let (message_type, payload) = raw.into();
+                        Ok(Some(RawMessage::new(message_type, payload)))
+                    }
+                    Response::Error(code, message) => Err(CommandError::Command {
+                        code,
+                        message: Some(message),
+                    }),
+                    Response::StandardError(e) => Err(CommandError::Command {
+                        code: HANDLER_ERROR_CODE,
+                        message: Some(e.to_string()),
+                    }),
+                },
+                Err(e) => Err(CommandError::Command {
                     code: HANDLER_ERROR_CODE,
                     message: Some(e.to_string()),
                 }),
-            },
-            Err(e) => Err(CommandError::Command {
-                code: HANDLER_ERROR_CODE,
-                message: Some(e.to_string()),
-            }),
-        }).ok_or(())
+            })
+            .ok_or(())
     }
 }
 

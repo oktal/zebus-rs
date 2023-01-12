@@ -12,6 +12,7 @@ use tokio::{
     runtime::Runtime,
     sync::{broadcast, mpsc},
 };
+use tokio_stream::StreamExt;
 
 use crate::{
     directory::{self, event::PeerEvent},
@@ -85,7 +86,7 @@ enum Inner {
         options: ZmqSocketOptions,
         peer_id: PeerId,
         environment: String,
-        directory_rx: directory::Receiver,
+        directory_rx: directory::EventStream,
         runtime: Arc<Runtime>,
     },
     Started {
@@ -194,7 +195,7 @@ struct OutboundWorker {
     peer_id: PeerId,
     outbound_sockets: HashMap<PeerId, ZmqOutboundSocket>,
     actions_rx: mpsc::Receiver<OuboundSocketAction>,
-    directory_rx: directory::Receiver,
+    directory_rx: directory::EventStream,
     shutdown_rx: broadcast::Receiver<()>,
 }
 
@@ -202,7 +203,7 @@ impl OutboundWorker {
     fn start(
         context: zmq::Context,
         peer_id: PeerId,
-        directory_rx: directory::Receiver,
+        directory_rx: directory::EventStream,
         shutdown_tx: broadcast::Sender<()>,
         runtime: Arc<Runtime>,
     ) -> Result<(mpsc::Sender<OuboundSocketAction>, JoinHandle<()>), Error> {
@@ -250,7 +251,7 @@ impl OutboundWorker {
                 Some(action) = self.actions_rx.recv() => {
                     self.handle_action(action, &mut encode_buf)?;
                 },
-                Some(event) = self.directory_rx.recv() => {
+                Some(event) = self.directory_rx.next()=> {
                     self.handle_event(event);
                 },
             }
@@ -367,7 +368,7 @@ impl Transport for ZmqTransport {
         &mut self,
         peer_id: PeerId,
         environment: String,
-        directory_rx: directory::Receiver,
+        directory_rx: directory::EventStream,
         runtime: Arc<Runtime>,
     ) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {

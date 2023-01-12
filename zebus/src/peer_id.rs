@@ -32,4 +32,9 @@ impl PeerId {
         let value = format!("Abc.Zebus.Directory.{instance_id}");
         Self { value }
     }
+
+    pub(crate) fn test() -> Self {
+        let id = uuid::Uuid::new_v4();
+        Self::new(format!("Peer.Test.{id}"))
+    }
 }

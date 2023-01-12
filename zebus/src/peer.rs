@@ -19,9 +19,8 @@ pub struct Peer {
 
 impl Peer {
     pub(crate) fn test() -> Self {
-        let id = uuid::Uuid::new_v4();
         Self {
-            id: PeerId::new(format!("Peer.Test.{id}")),
+            id: PeerId::test(),
             endpoint: "tcp://*:*".to_string(),
             is_up: true,
             is_responding: true,
