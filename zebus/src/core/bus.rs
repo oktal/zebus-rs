@@ -11,6 +11,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
+use tokio_stream::StreamExt;
 
 use crate::{
     bus::{CommandFuture, CommandResult},
@@ -19,8 +20,8 @@ use crate::{
     },
     core::MessagePayload,
     directory::{
-        self, commands::PingPeerCommand, events::PeerSubscriptionsForTypeUpdated, Directory,
-        PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
+        self, commands::PingPeerCommand, events::PeerSubscriptionsForTypeUpdated, registration,
+        Directory, PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
         Registration,
     },
     dispatch::{
@@ -230,8 +231,8 @@ impl LocalDispatchRequest {
     }
 }
 
-struct ReceiverContext<D: Directory> {
-    transport_rx: transport::Receiver,
+struct ReceiverContext<T: Transport, D: Directory> {
+    rcv_rx: T::MessageStream,
     dispatch_rx: mpsc::Receiver<LocalDispatchRequest>,
     tx: mpsc::Sender<SendEntry>,
     self_peer: Peer,
@@ -241,9 +242,9 @@ struct ReceiverContext<D: Directory> {
     dispatcher: MessageDispatcher,
 }
 
-impl<D: Directory> ReceiverContext<D> {
+impl<T: Transport, D: Directory> ReceiverContext<T, D> {
     fn new(
-        transport_rx: transport::Receiver,
+        transport_rx: T::MessageStream,
         tx: mpsc::Sender<SendEntry>,
         self_peer: Peer,
         environment: String,
@@ -259,7 +260,7 @@ impl<D: Directory> ReceiverContext<D> {
 
         (
             Self {
-                transport_rx,
+                rcv_rx: transport_rx,
                 dispatch_rx,
                 tx,
                 self_peer,
@@ -293,12 +294,12 @@ impl<D: Directory> ReceiverContext<D> {
 }
 
 /// Reception loop for [`TransportMesssage`] messages
-async fn receiver<D: Directory>(mut ctx: ReceiverContext<D>) {
+async fn receiver<T: Transport, D: Directory>(mut ctx: ReceiverContext<T, D>) {
     loop {
         tokio::select! {
 
             // Handle inbound TransportMessage
-            Some(message) = ctx.transport_rx.recv() => {
+            Some(message) = ctx.rcv_rx.next() => {
                 // Handle MessageExecutionCompleted
                 if let Some(message_execution_completed) = message.decode_as::<MessageExecutionCompleted>()
                 {
@@ -375,12 +376,11 @@ async fn sender<T: Transport>(mut ctx: SenderContext<T>) {
     }
 }
 
-fn try_register<T: Transport>(
+/// Register to the directory
+async fn register<T: Transport>(
     transport: &mut T,
-    receiver: &transport::Receiver,
-    runtime: Arc<Runtime>,
-    self_peer: Peer,
-    environment: String,
+    self_peer: &Peer,
+    environment: &String,
     configuration: &BusConfiguration,
 ) -> Result<Registration, Error> {
     let directory_peers =
@@ -402,15 +402,15 @@ fn try_register<T: Transport>(
     let timeout = configuration.registration_timeout;
     let mut error = RegistrationError::new();
     for directory_peer in directory_peers {
-        match directory::registration::block_on(
-            Arc::clone(&runtime),
+        match directory::registration::register(
             transport,
-            receiver,
             self_peer.clone(),
             environment.clone(),
             directory_peer.clone(),
             timeout,
-        ) {
+        )
+        .await
+        {
             Ok(r) => return Ok(r),
             Err(e) => error.add(directory_peer.clone(), e),
         }
@@ -504,8 +504,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 environment,
             }) => {
                 // Start transport
-                let transport_receiver =
-                    transport.start().map_err(|e| Error::Transport(e.into()))?;
+                transport.start().map_err(|e| Error::Transport(e.into()))?;
 
                 // Setup peer
                 let endpoint = transport
@@ -520,14 +519,9 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 };
 
                 // Register to directory
-                let registration = try_register(
-                    &mut transport,
-                    &transport_receiver,
-                    Arc::clone(&runtime),
-                    self_peer.clone(),
-                    environment.clone(),
-                    &configuration,
-                )?;
+                let registration = runtime.block_on(async {
+                    register(&mut transport, &self_peer, &environment, &configuration).await
+                })?;
 
                 let mut directory_handler = directory.handler();
 
@@ -552,12 +546,17 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
 
+                // Create transport reception stream
+                let rcv_rx = transport
+                    .subscribe()
+                    .map_err(|e| Error::Transport(e.into()))?;
+
                 // Create sender
                 let (snd_tx, snd_ctx) = SenderContext::new(transport);
 
                 // Create receiver
-                let (rcv_ctx, dispatch_tx, pending_commands) = ReceiverContext::new(
-                    transport_receiver,
+                let (rcv_ctx, dispatch_tx, pending_commands) = ReceiverContext::<T, D>::new(
+                    rcv_rx,
                     snd_tx.clone(),
                     self_peer.clone(),
                     environment.clone(),
@@ -843,7 +842,7 @@ impl<T: Transport> BusBuilder<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{any::Any, borrow::Cow, convert::Infallible, time::Duration};
+    use std::{any::Any, borrow::Cow, time::Duration};
 
     use super::*;
     use crate::directory::{
@@ -866,7 +865,7 @@ mod tests {
         started: bool,
 
         /// Sender channel for transport messages
-        tx: Option<mpsc::Sender<TransportMessage>>,
+        rcv_tx: Option<broadcast::Sender<TransportMessage>>,
 
         /// Transmit queue
         /// Messages that are sent through the transport will be stored in this queue along with
@@ -957,6 +956,12 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Error)]
+    enum MemoryTransportError {
+        #[error("invalid operation")]
+        InvalidOperation,
+    }
+
     impl MemoryTransport {
         fn new(peer: Peer) -> Self {
             Self {
@@ -965,7 +970,7 @@ mod tests {
                     peer_id: None,
                     environment: None,
                     started: false,
-                    tx: None,
+                    rcv_tx: None,
                     tx_queue: Vec::new(),
                     rx_queue: Vec::new(),
                 })),
@@ -1031,7 +1036,8 @@ mod tests {
     }
 
     impl Transport for MemoryTransport {
-        type Err = Infallible;
+        type Err = MemoryTransportError;
+        type MessageStream = crate::sync::stream::BroadcastStream<TransportMessage>;
 
         fn configure(
             &mut self,
@@ -1046,12 +1052,20 @@ mod tests {
             Ok(())
         }
 
-        fn start(&mut self) -> Result<transport::Receiver, Self::Err> {
+        fn subscribe(&self) -> Result<Self::MessageStream, Self::Err> {
+            let inner = self.inner.lock().unwrap();
+            match inner.rcv_tx.as_ref() {
+                Some(rcv_tx) => Ok(rcv_tx.subscribe().into()),
+                None => Err(MemoryTransportError::InvalidOperation),
+            }
+        }
+
+        fn start(&mut self) -> Result<(), Self::Err> {
             let mut inner = self.inner.lock().unwrap();
-            let (tx, rx) = mpsc::channel(128);
+            let (rcv_tx, _) = broadcast::channel(128);
             inner.started = true;
-            inner.tx = Some(tx);
-            Ok(rx)
+            inner.rcv_tx = Some(rcv_tx);
+            Ok(())
         }
 
         fn stop(&mut self) -> Result<(), Self::Err> {
@@ -1086,8 +1100,8 @@ mod tests {
                         let entry = inner.rx_queue.remove(i);
                         let response =
                             (entry.1)(message.clone(), self.peer.clone(), environment.clone());
-                        let tx = inner.tx.as_ref().unwrap();
-                        tx.blocking_send(response).unwrap();
+                        let tx = inner.rcv_tx.as_ref().unwrap();
+                        tx.send(response).unwrap();
                     } else {
                         i += 1;
                     }
@@ -1195,7 +1209,9 @@ mod tests {
         }
 
         fn configuration() -> BusConfiguration {
-            BusConfiguration::default().with_directory_endpoints(["tcp://localhost:12500"]).with_random_directory(false)
+            BusConfiguration::default()
+                .with_directory_endpoints(["tcp://localhost:12500"])
+                .with_random_directory(false)
         }
 
         fn configure(&mut self) -> Result<(), Error> {

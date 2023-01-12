@@ -18,7 +18,7 @@ use crate::{
     directory::{self, event::PeerEvent},
     transport::{
         zmq::{ZmqSocketOptions, ZmqTransportConfiguration},
-        Receiver, SendContext, Transport, TransportMessage,
+        SendContext, Transport, TransportMessage,
     },
     Peer, PeerId,
 };
@@ -102,6 +102,7 @@ enum Inner {
 
         outbound_thread: JoinHandle<()>,
         actions_tx: mpsc::Sender<OuboundSocketAction>,
+        rcv_tx: broadcast::Sender<TransportMessage>,
 
         shutdown_tx: broadcast::Sender<()>,
     },
@@ -128,22 +129,19 @@ impl ZmqTransport {
 
 struct InboundWorker {
     inbound_socket: ZmqInboundSocket,
-    rcv_tx: mpsc::Sender<TransportMessage>,
+    rcv_tx: broadcast::Sender<TransportMessage>,
     shutdown_rx: broadcast::Receiver<()>,
 }
 
 impl InboundWorker {
     fn start(
         inbound_socket: ZmqInboundSocket,
+        rcv_tx: broadcast::Sender<TransportMessage>,
         shutdown_tx: broadcast::Sender<()>,
         runtime: Arc<tokio::runtime::Runtime>,
-    ) -> Result<(Receiver, JoinHandle<()>), Error> {
+    ) -> Result<JoinHandle<()>, Error> {
         // Subscribe to shutdown channel
         let shutdown_rx = shutdown_tx.subscribe();
-
-        // Create the channel to receive transport messages
-        // TODO(oktal): remove hardcoded bound limit
-        let (rcv_tx, rcv_rx) = mpsc::channel(128);
 
         // Create inbound worker
         let inbound_worker = InboundWorker {
@@ -160,7 +158,7 @@ impl InboundWorker {
             })
             .map_err(Error::Io)?;
 
-        Ok((rcv_rx, inbound_thread))
+        Ok(inbound_thread)
     }
 
     fn block_on(self, runtime: Arc<Runtime>) {
@@ -181,7 +179,9 @@ impl InboundWorker {
                 // TODO(oktal): Handle error properly
                 Ok(size) = self.inbound_socket.read(&mut rcv_buf[..]) => {
                     match TransportMessage::decode(&rcv_buf[..size]) {
-                        Ok(message) => self.rcv_tx.send(message).await.unwrap(),
+                        Ok(message) =>  {
+                            let _ = self.rcv_tx.send(message);
+                        },
                         Err(e) => eprintln!("Failed to decode: {e}. bytes {rcv_buf:?}"),
                     };
                 }
@@ -364,6 +364,8 @@ impl OutboundWorker {
 impl Transport for ZmqTransport {
     type Err = Error;
 
+    type MessageStream = crate::sync::stream::BroadcastStream<TransportMessage>;
+
     fn configure(
         &mut self,
         peer_id: PeerId,
@@ -393,7 +395,14 @@ impl Transport for ZmqTransport {
         res
     }
 
-    fn start(&mut self) -> Result<Receiver, Self::Err> {
+    fn subscribe(&self) -> Result<Self::MessageStream, Self::Err> {
+        match self.inner {
+            Some(Inner::Started { ref rcv_tx, .. }) => Ok(rcv_tx.subscribe().into()),
+            _ => Err(Error::InvalidOperation),
+        }
+    }
+
+    fn start(&mut self) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Configured {
                 configuration,
@@ -432,9 +441,13 @@ impl Transport for ZmqTransport {
                     Arc::clone(&runtime),
                 )?;
 
+                // Create broadcast channel for transport message reception
+                let (rcv_tx, rcv_rx) = broadcast::channel(128);
+
                 // Start inbound worker
-                let (rcv_rx, inbound_thread) = InboundWorker::start(
+                let inbound_thread = InboundWorker::start(
                     inbound_socket,
+                    rcv_tx.clone(),
                     shutdown_tx.clone(),
                     Arc::clone(&runtime),
                 )?;
@@ -451,9 +464,10 @@ impl Transport for ZmqTransport {
                         inbound_thread,
                         outbound_thread,
                         actions_tx,
+                        rcv_tx,
                         shutdown_tx,
                     }),
-                    Ok(rcv_rx),
+                    Ok(()),
                 )
             }
             x => (x, Err(Error::InvalidOperation)),

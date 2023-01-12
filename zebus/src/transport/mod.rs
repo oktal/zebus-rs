@@ -6,7 +6,7 @@ mod transport_message;
 pub mod zmq;
 
 use crate::{directory::event::PeerEvent, Peer, PeerId};
-use futures_core::stream::BoxStream;
+use futures_core::{stream::BoxStream, Stream};
 use std::{borrow::Cow, sync::Arc};
 
 pub use message_execution_completed::MessageExecutionCompleted;
@@ -15,12 +15,14 @@ pub use send_context::SendContext;
 use tokio::runtime::Runtime;
 pub use transport_message::TransportMessage;
 
-pub type Receiver = tokio::sync::mpsc::Receiver<TransportMessage>;
-
 /// Transport layer trait
 pub trait Transport: Send + 'static {
     /// The associated error type which can be returned from the transport layer
     type Err: std::error::Error + 'static;
+
+    /// Type of [`TransportMessage`] [`Stream`]
+    /// The stream is used to receive messages from the transport
+    type MessageStream: Stream<Item = TransportMessage> + Unpin + Send + 'static;
 
     /// Configure this transport layer with a [`PeerId`]
     fn configure(
@@ -31,8 +33,11 @@ pub trait Transport: Send + 'static {
         runtime: Arc<Runtime>,
     ) -> Result<(), Self::Err>;
 
+    /// Create a new subscription to the transport messages stream
+    fn subscribe(&self) -> Result<Self::MessageStream, Self::Err>;
+
     /// Start the transport layer
-    fn start(&mut self) -> Result<Receiver, Self::Err>;
+    fn start(&mut self) -> Result<(), Self::Err>;
 
     /// Stop the transport layer
     fn stop(&mut self) -> Result<(), Self::Err>;

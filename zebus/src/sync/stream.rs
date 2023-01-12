@@ -38,7 +38,7 @@ impl<St> StreamExt for St where St: Stream {}
 /// A `BroadcastStream` wrapper similar to tokio's `BroadcastStream` wrapper
 /// except that this version will directly yield items instead of `Result`
 #[pin_project]
-pub(crate) struct BroadcastStream<T> {
+pub struct BroadcastStream<T> {
     /// Inner stream
     #[pin]
     inner: tokio_stream::wrappers::BroadcastStream<T>,

@@ -1,15 +1,9 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    ptr::NonNull,
-    sync::Arc,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::time::Duration;
 
 use chrono::Utc;
 use thiserror::Error;
-use tokio::{runtime::Runtime, time::Timeout};
+
+use tokio_stream::StreamExt;
 
 use super::{
     commands::{RegisterPeerCommand, RegisterPeerResponse},
@@ -18,7 +12,7 @@ use super::{
 use crate::{
     core::MessagePayload,
     proto::IntoProtobuf,
-    transport::{self, MessageExecutionCompleted, SendContext, Transport, TransportMessage},
+    transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
     Peer,
 };
 
@@ -42,6 +36,9 @@ pub enum RegistrationError {
 
     #[error("timeout after {0:?}")]
     Timeout(Duration),
+
+    #[error("the stream of transport messages has been closed")]
+    Closed,
 }
 
 #[derive(Debug)]
@@ -62,206 +59,90 @@ impl Registration {
     }
 }
 
-struct Inner {
-    /// The [`RegisterPeerCommand`] original message id
-    message_id: uuid::Uuid,
+/// Initiate a new registration to a peer directory
+async fn try_register<T: Transport>(
+    transport: &mut T,
+    self_peer: Peer,
+    environment: String,
+    directory_endpoint: Peer,
+) -> Result<Registration, RegistrationError> {
+    // Create `RegisterPeerCommand`
+    let utc_now = Utc::now();
 
-    /// The [`Receiver`] from which to receive transport messages
-    receiver: NonNull<transport::Receiver>,
+    let descriptor = PeerDescriptor {
+        peer: self_peer.clone(),
+        subscriptions: vec![],
+        is_persistent: false,
+        timestamp_utc: Some(utc_now.into()),
+        has_debugger_attached: Some(false),
+    };
+    let register_command = RegisterPeerCommand {
+        peer: descriptor.into_protobuf(),
+    };
+    let (_message_id, message) =
+        TransportMessage::create(&self_peer, environment, &register_command);
 
-    /// List of messages that were received during registration
-    pending_messages: Vec<TransportMessage>,
-}
+    // Subscribe tn transport messages stream
+    let mut rcv_rx = transport
+        .subscribe()
+        .map_err(|e| RegistrationError::Transport(e.into()))?;
 
-/// Provides a [`std::future::Future`] of a registration request to a directory
-pub(crate) struct RegistrationFuture {
-    inner: Option<Inner>,
-}
+    // Send `RegisterPeerCommand`
+    transport
+        .send(
+            std::iter::once(directory_endpoint),
+            message.clone(),
+            SendContext::default(),
+        )
+        .map_err(|e| RegistrationError::Transport(e.into()))?;
 
-impl RegistrationFuture {
-    unsafe fn register<T: Transport>(
-        transport: &mut T,
-        receiver: &transport::Receiver,
-        self_peer: Peer,
-        environment: String,
-        directory_endpoint: Peer,
-    ) -> Result<Self, RegistrationError> {
-        let utc_now = Utc::now();
+    let mut pending_messages = Vec::new();
 
-        let descriptor = PeerDescriptor {
-            peer: self_peer.clone(),
-            subscriptions: vec![],
-            is_persistent: false,
-            timestamp_utc: Some(utc_now.into()),
-            has_debugger_attached: Some(false),
-        };
-        let register_command = RegisterPeerCommand {
-            peer: descriptor.into_protobuf(),
-        };
-        let (message_id, message) =
-            TransportMessage::create(&self_peer, environment, &register_command);
-
-        let receiver = NonNull::from(receiver);
-
-        let registration = RegistrationFuture {
-            inner: Some(Inner {
-                message_id,
-                receiver,
-                pending_messages: vec![],
-            }),
-        };
-
-        transport
-            .send(
-                std::iter::once(directory_endpoint),
-                message.clone(),
-                SendContext::default(),
-            )
-            .map_err(|e| RegistrationError::Transport(e.into()))?;
-        Ok(registration)
-    }
-
-    pub fn with_timeout(self, timeout: Duration) -> Timeout<Self> {
-        tokio::time::timeout(timeout, self)
-    }
-}
-
-impl Future for RegistrationFuture {
-    type Output = Registration;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (inner, res) = match self.inner.take() {
-            Some(Inner {
-                message_id,
-                mut receiver,
-                mut pending_messages,
-                ..
-            }) => {
-                // Safety: this is safe  because
-                // 1. We constructed our state from a reference, so we are guaranteed that the
-                //    pointer is non-null
-                // 2. The initial caller guarantees that the `receiver` will live long enough
-                match unsafe { receiver.as_mut() }.poll_recv(cx) {
-                    Poll::Ready(Some(transport_message)) => {
-                        if let Some(message) =
-                            transport_message.decode_as::<MessageExecutionCompleted>()
-                        {
-                            match message {
-                                Ok(message_execution_completed) => {
-                                    // TODO(oktal): check that the `source_command_id` is `message_id` and error
-                                    // otherwise We received the `RegisterPeerResponse`, we can resolve the
-                                    // future
-                                    if let Some(response) = message_execution_completed
-                                        .decode_as::<RegisterPeerResponse>()
-                                    {
-                                        (
-                                            None,
-                                            Poll::Ready(Registration::new(
-                                                pending_messages,
-                                                response.map_err(|e| {
-                                                    RegistrationError::InvalidResponse(
-                                                        message_execution_completed,
-                                                        e,
-                                                    )
-                                                }),
-                                            )),
-                                        )
-                                    } else {
-                                        // We received a message other than `RegisterPeerResponse`,
-                                        // save it and keep waiting for the `RegisterPeerResponse`
-                                        pending_messages.push(transport_message);
-                                        (
-                                            Some(Inner {
-                                                message_id,
-                                                receiver,
-                                                pending_messages,
-                                            }),
-                                            Poll::Pending,
-                                        )
-                                    }
-                                }
-                                // We failed to deserialize the `MessageExecutionCompleted`,
-                                // resolve the future with an error
-                                Err(e) => (
-                                    None,
-                                    Poll::Ready(Registration::new(
-                                        pending_messages,
-                                        Err(RegistrationError::Decode(transport_message, e)),
-                                    )),
-                                ),
-                            }
-                        } else {
-                            // We received a message other than `MessageExecutionCompleted`, save
-                            // it and keep waiting for the `RegisterPeerResponse`
-                            pending_messages.push(transport_message);
-                            (
-                                Some(Inner {
-                                    message_id,
-                                    receiver,
-                                    pending_messages,
-                                }),
-                                Poll::Pending,
-                            )
-                        }
-                    }
-                    // We did not receive yet, keep waiting
-                    _ => (
-                        Some(Inner {
-                            message_id,
-                            receiver,
+    while let Some(message) = rcv_rx.next().await {
+        if let Some(completed) = message.decode_as::<MessageExecutionCompleted>() {
+            match completed {
+                Ok(completed) => {
+                    // TODO(oktal): check that the `source_command_id` is `message_id` and error
+                    // otherwise
+                    // We received the `RegisterPeerResponse`
+                    if let Some(response) = completed.decode_as::<RegisterPeerResponse>() {
+                        return Ok(Registration::new(
                             pending_messages,
-                        }),
-                        Poll::Pending,
-                    ),
+                            response.map_err(|e| RegistrationError::InvalidResponse(completed, e)),
+                        ));
+                    } else {
+                        // We received a message other than `RegisterPeerResponse`,
+                        // save it and keep waiting for the `RegisterPeerResponse`
+                        pending_messages.push(message);
+                    }
+                }
+                // We failed to deserialize the `MessageExecutionCompleted`,
+                Err(e) => {
+                    return Ok(Registration::new(
+                        pending_messages,
+                        Err(RegistrationError::Decode(message, e)),
+                    ));
                 }
             }
-            _ => panic!("attempted to poll already resolved future"),
-        };
-
-        self.inner = inner;
-        res
+        }
     }
+
+    // If we reach that point, this means the transport message reception stream has been
+    // closed unexpectedly
+    Err(RegistrationError::Closed)
 }
 
-/// Initiate a new registration to a peer directory
-/// # Safety
-/// The caller must guarantee that the lifetime of the `receiver` exceeds the lifetime of the future
-pub(crate) unsafe fn register<T: Transport>(
+/// Initiate a new registration to a peer directory with a timeout
+pub(crate) async fn register<T: Transport>(
     transport: &mut T,
-    receiver: &transport::Receiver,
     self_peer: Peer,
     environment: String,
-    directory_peer: Peer,
-) -> Result<RegistrationFuture, RegistrationError> {
-    RegistrationFuture::register(transport, receiver, self_peer, environment, directory_peer)
-}
-
-pub(crate) fn block_on<T: Transport>(
-    runtime: Arc<Runtime>,
-    transport: &mut T,
-    receiver: &transport::Receiver,
-    self_peer: Peer,
-    environment: String,
-    directory_peer: Peer,
+    directory_endpoint: Peer,
     timeout: Duration,
 ) -> Result<Registration, RegistrationError> {
-    // Safety: since we are blocking on the future, we are guaranteed that the `receiver` will
-    // live long enough
-    let registration = unsafe {
-        register(
-            transport,
-            receiver,
-            self_peer.clone(),
-            environment.clone(),
-            directory_peer.clone(),
-        )
-    }?;
-
-    match runtime.block_on(async { registration.with_timeout(timeout).await }) {
-        Ok(registration) => match registration.result {
-            Ok(_) => Ok(registration),
-            Err(e) => Err(e),
-        },
+    let future = try_register(transport, self_peer, environment, directory_endpoint);
+    match tokio::time::timeout(timeout, future).await {
+        Ok(registration) => registration,
         Err(_) => Err(RegistrationError::Timeout(timeout)),
     }
 }
