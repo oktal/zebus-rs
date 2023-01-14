@@ -26,6 +26,11 @@ impl Peer {
             is_responding: true,
         }
     }
+
+    pub(crate) fn set_not_responding(mut self) -> Self {
+        self.is_responding = false;
+        self
+    }
 }
 
 impl fmt::Display for Peer {

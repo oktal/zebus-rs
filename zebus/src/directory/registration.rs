@@ -82,7 +82,7 @@ async fn try_register<T: Transport>(
     let (_message_id, message) =
         TransportMessage::create(&self_peer, environment, &register_command);
 
-    // Subscribe tn transport messages stream
+    // Subscribe to transport messages stream
     let mut rcv_rx = transport
         .subscribe()
         .map_err(|e| RegistrationError::Transport(e.into()))?;
