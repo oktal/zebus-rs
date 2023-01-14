@@ -831,7 +831,13 @@ impl<T: Transport> BusBuilder<T> {
         let client = directory::Client::new();
 
         // Create the bus
-        let mut bus = Bus::new(Arc::new(runtime), configuration, transport, client, dispatcher);
+        let mut bus = Bus::new(
+            Arc::new(runtime),
+            configuration,
+            transport,
+            client,
+            dispatcher,
+        );
 
         // Configure the bus
         bus.configure(peer_id, environment)
@@ -859,6 +865,7 @@ mod tests {
     use std::{any::Any, borrow::Cow, time::Duration};
 
     use super::*;
+    use crate::bus::CommandError;
     use crate::message_type_id::MessageTypeId;
     use crate::{
         directory::{
@@ -1028,6 +1035,19 @@ mod tests {
 
             let mut inner = self.inner.lock().unwrap();
             inner.rx_queue.push((Box::new(predicate), create_fn));
+            Some(())
+        }
+
+        fn message_received<M: crate::Message + prost::Message>(
+            &self,
+            message: M,
+            sender: &Peer,
+            environment: String,
+        ) -> Option<()> {
+            let inner = self.inner.lock().unwrap();
+            let rcv_tx = inner.rcv_tx.as_ref()?;
+            let (_id, transport) = TransportMessage::create(sender, environment, &message);
+            rcv_tx.send(transport).ok()?;
             Some(())
         }
 
@@ -1215,7 +1235,8 @@ mod tests {
             configuration: BusConfiguration,
             dispatch_fn: impl FnOnce(&mut MessageDispatcher),
         ) -> Self {
-            let runtime = tokio::runtime::Builder::new_current_thread()
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
                 .enable_all()
                 .build()
                 .unwrap();
@@ -1296,7 +1317,7 @@ mod tests {
         }
     }
 
-    #[derive(prost::Message, crate::Command, Clone)]
+    #[derive(prost::Message, crate::Command, Clone, Eq, PartialEq)]
     #[zebus(namespace = "Abc.Test", transient)]
     struct BrewCoffeeCommand {
         #[prost(fixed64, tag = 1)]
@@ -1304,12 +1325,46 @@ mod tests {
     }
 
     #[derive(Handler)]
-    struct BrewCoffeeCommandHandler;
+    struct BrewCoffeeCommandHandler {
+        tx: std::sync::mpsc::Sender<BrewCoffeeCommand>,
+    }
+
+    #[derive(Handler)]
+    struct BrokenBrewCoffeeCommandHandler {
+        tx: std::sync::mpsc::Sender<BrewCoffeeCommand>,
+    }
+
+    const BOILER_TOO_COLD: (i32, &'static str) = (0xBADBAD, "Boiler is too cold to brew coffee");
+
+    impl BrokenBrewCoffeeCommandHandler {
+        fn new() -> (Box<Self>, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            (Box::new(Self { tx }), rx)
+        }
+    }
+
+    impl BrewCoffeeCommandHandler {
+        fn new() -> (Box<Self>, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            (Box::new(Self { tx }), rx)
+        }
+    }
 
     impl Handler<BrewCoffeeCommand> for BrewCoffeeCommandHandler {
         type Response = ();
 
-        fn handle(&mut self, _message: BrewCoffeeCommand) -> Self::Response {}
+        fn handle(&mut self, cmd: BrewCoffeeCommand) -> Self::Response {
+            self.tx.send(cmd).unwrap();
+        }
+    }
+
+    impl Handler<BrewCoffeeCommand> for BrokenBrewCoffeeCommandHandler {
+        type Response = Result<(), (i32, &'static str)>;
+
+        fn handle(&mut self, cmd: BrewCoffeeCommand) -> Self::Response {
+            self.tx.send(cmd).unwrap();
+            Err(BOILER_TOO_COLD)
+        }
     }
 
     #[test]
@@ -1529,8 +1584,12 @@ mod tests {
         assert_eq!(fixture.start_with_registration().is_ok(), true);
 
         // Setup directory with multiple peers for the same command
-        fixture.directory.add_peer_for::<BrewCoffeeCommand>(Peer::test());
-        fixture.directory.add_peer_for::<BrewCoffeeCommand>(Peer::test());
+        fixture
+            .directory
+            .add_peer_for::<BrewCoffeeCommand>(Peer::test());
+        fixture
+            .directory
+            .add_peer_for::<BrewCoffeeCommand>(Peer::test());
 
         // Attempt to send a command to multiple peers
         let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
@@ -1566,14 +1625,14 @@ mod tests {
     fn send_command_will_dispatch_locally_if_multiple_peers_handle_command_with_self() {
         // Create fixture with dispatch
         let configuration = Fixture::configuration();
+
+        let (handler, rx) = BrewCoffeeCommandHandler::new();
+
         let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
             dispatcher
-                .add(registry::for_handler(
-                    Box::new(BrewCoffeeCommandHandler),
-                    |handler| {
-                        handler.handles::<BrewCoffeeCommand>();
-                    },
-                ))
+                .add(registry::for_handler(handler, |handler| {
+                    handler.handles::<BrewCoffeeCommand>();
+                }))
                 .unwrap();
         });
 
@@ -1585,7 +1644,9 @@ mod tests {
         fixture
             .directory
             .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
-        fixture.directory.add_peer_for::<BrewCoffeeCommand>(Peer::test());
+        fixture
+            .directory
+            .add_peer_for::<BrewCoffeeCommand>(Peer::test());
 
         // Send command
         let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
@@ -1593,10 +1654,137 @@ mod tests {
         // Assert that command was successfully sent
         assert_eq!(res.is_ok(), true);
 
-        let result = res.unwrap();
-
         // Assert that command has been locally dispatched
+        let result = res.unwrap();
         let result = fixture.rt.block_on(async move { result.await });
         assert!(matches!(result, Ok(None)));
+
+        // Make sure the handler was called
+        assert_eq!(rx.try_recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
+    }
+
+    #[test]
+    fn dispatch_command_locally_with_error_response() {
+        // Create fixture with dispatch
+        let configuration = Fixture::configuration();
+
+        let (handler, rx) = BrokenBrewCoffeeCommandHandler::new();
+
+        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
+            dispatcher
+                .add(registry::for_handler(handler, |handler| {
+                    handler.handles::<BrewCoffeeCommand>();
+                }))
+                .unwrap();
+        });
+
+        // Configure and start the bus
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().is_ok(), true);
+
+        // Setup directory with self
+        fixture
+            .directory
+            .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
+
+        // Send command
+        let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
+
+        // Make sure command was successfully sent
+        assert_eq!(res.is_ok(), true);
+
+        // Make sure command resulted in an error
+        let result = res.unwrap();
+        let result = fixture.rt.block_on(async move { result.await });
+
+        // Make sure command failed with the right error
+        if let Err(CommandError::Command { code, message }) = result {
+            assert_eq!(code, BOILER_TOO_COLD.0);
+            assert_eq!(message, Some(BOILER_TOO_COLD.1.to_string()));
+        } else {
+            assert!(false, "Command failed with unexpected error {result:?}");
+        }
+
+        // Make sure the handler was called
+        assert_eq!(rx.try_recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
+    }
+
+    #[test]
+    fn dispatch_received_transport_message() {
+        // Create fixture with dispatch
+        let configuration = Fixture::configuration();
+
+        let (handler, rx) = BrewCoffeeCommandHandler::new();
+
+        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
+            dispatcher
+                .add(registry::for_handler(handler, |handler| {
+                    handler.handles::<BrewCoffeeCommand>();
+                }))
+                .unwrap();
+        });
+
+        // Configure and start the bus
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().is_ok(), true);
+
+        // Simulate reception of a message
+        let sender = Peer::test();
+        assert_eq!(
+            fixture
+                .transport
+                .message_received(
+                    BrewCoffeeCommand { id: 0xBADC0FFEE },
+                    &sender,
+                    fixture.environment.clone()
+                )
+                .is_some(),
+            true
+        );
+
+        // Make sure the handler was called
+        assert_eq!(rx.recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
+    }
+
+    #[test]
+    fn dispatch_received_transport_message_locally() {
+        // Create fixture with dispatch
+        let configuration = Fixture::configuration();
+
+        let (handler, rx) = BrewCoffeeCommandHandler::new();
+
+        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
+            dispatcher
+                .add(registry::for_handler(handler, |handler| {
+                    handler.handles::<BrewCoffeeCommand>();
+                }))
+                .unwrap();
+        });
+
+        // Configure and start the bus
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().is_ok(), true);
+
+        // Setup directory with self and other peer
+        fixture
+            .directory
+            .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
+
+        // Simulate reception of a message
+        let sender = Peer::test();
+        assert_eq!(
+            fixture
+                .transport
+                .message_received(
+                    BrewCoffeeCommand { id: 0xBADC0FFEE },
+                    &sender,
+                    fixture.environment.clone()
+                )
+                .is_some(),
+            true
+        );
+
+        // Make sure the handler was called
+        assert_eq!(rx.recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
     }
 }
