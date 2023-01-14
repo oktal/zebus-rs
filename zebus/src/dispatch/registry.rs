@@ -153,7 +153,7 @@ where
         let message_type = dispatch.request.message_type();
         if let Some(entry) = self.invokers.get_mut(message_type) {
             self.handler.apply_mut(|h| {
-                (entry.invoker)(dispatch, h);
+                (entry.invoker)(dispatch, h.as_mut() as &mut dyn Any);
             });
         }
     }

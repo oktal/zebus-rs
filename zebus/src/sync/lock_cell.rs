@@ -84,7 +84,7 @@ impl<T> LockCell<T> {
     /// Apply an [`op`] operation mutably to the underlying value
     pub(crate) fn apply_mut<R>(&mut self, op: impl FnOnce(&mut T) -> R) -> R {
         match self {
-            Self::Exclusive(value) => op(value),
+            Self::Exclusive(ref mut value) => op(value),
             Self::Shared(mtx) => {
                 let mut value = mtx.lock().unwrap();
                 op(&mut *value)
