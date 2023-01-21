@@ -1,6 +1,8 @@
 use crate::{proto::IntoProtobuf, BindingKeyFragment, Message};
 
 pub(crate) mod proto {
+    use crate::proto::prost;
+
     #[derive(Clone, prost::Message)]
     pub struct BindingKey {
         #[prost(string, repeated, tag = "1")]

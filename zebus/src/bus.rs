@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::{
     core::{MessagePayload, RawMessage},
     transport::MessageExecutionCompleted,
-    Command, MessageType, Peer, PeerId,
+    Command, MessageType, Peer, PeerId, proto::prost,
 };
 
 /// An error which can be returned when sending a command

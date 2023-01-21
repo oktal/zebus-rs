@@ -1,4 +1,3 @@
-use prost::Message;
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -16,11 +15,12 @@ use tokio_stream::StreamExt;
 
 use crate::{
     directory::{self, event::PeerEvent},
+    proto::prost::Message,
     transport::{
         zmq::{ZmqSocketOptions, ZmqTransportConfiguration},
         SendContext, Transport, TransportMessage,
     },
-    Peer, PeerId,
+    Peer, PeerId, proto::prost,
 };
 
 use super::{inbound, outbound::ZmqOutboundSocket};

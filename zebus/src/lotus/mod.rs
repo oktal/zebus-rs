@@ -1,4 +1,4 @@
-use crate::{proto::bcl, transport::TransportMessage};
+use crate::{proto::{bcl, prost}, transport::TransportMessage};
 
 /// [`crate::Event`] raised when a [`crate::Handler`] raised an error
 #[derive(prost::Message, crate::Event)]

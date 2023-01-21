@@ -28,7 +28,7 @@ use crate::{
         self, AnyMessage, DispatchOutput, DispatchRequest, Dispatched, Dispatcher,
         MessageDispatcher,
     },
-    proto::FromProtobuf,
+    proto::{FromProtobuf, prost},
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
     BusConfiguration, Command, Event, Handler, MessageId, Peer, PeerId,
 };

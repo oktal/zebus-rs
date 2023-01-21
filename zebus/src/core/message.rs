@@ -1,3 +1,5 @@
+use crate::proto::prost;
+
 /// Trait for types that expose raw content of protobuf-encoded messages
 pub trait MessagePayload {
     /// Get the string representation of the message type

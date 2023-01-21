@@ -3,6 +3,8 @@ members = [
     "zebus",
     "zebus-core",
     "zebus-macros",
+    "zebus-proto",
+    "zebus-proto-derive",
 
     "examples"
 ]

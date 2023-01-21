@@ -2,7 +2,7 @@ use crate::{proto::IntoProtobuf, MessageTypeDescriptor};
 use std::any::TypeId;
 
 pub(crate) mod proto {
-    use crate::Message;
+    use crate::{Message, proto::prost};
 
     #[derive(Clone, prost::Message, Eq, PartialEq, Hash)]
     pub struct MessageTypeId {

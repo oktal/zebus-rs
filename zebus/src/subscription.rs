@@ -3,6 +3,8 @@ use crate::{BindingKey, MessageTypeDescriptor, MessageTypeId};
 use crate::{Message, MessageBinding};
 
 pub(crate) mod proto {
+    use crate::proto::prost;
+
     #[derive(Clone, prost::Message)]
     pub struct Subscription {
         #[prost(message, required, tag = "1")]

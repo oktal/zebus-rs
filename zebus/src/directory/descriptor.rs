@@ -3,6 +3,8 @@ use chrono::Utc;
 use crate::{proto::IntoProtobuf, Peer, Subscription};
 
 pub(crate) mod proto {
+    use crate::proto::prost;
+
     #[derive(Clone, prost::Message)]
     pub struct PeerDescriptor {
         #[prost(message, required, tag = 1)]

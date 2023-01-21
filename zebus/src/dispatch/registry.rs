@@ -7,7 +7,7 @@ use super::{Dispatch, DispatchRequest, MessageDispatch};
 use crate::{
     core::{Handler, IntoResponse, MessagePayload},
     sync::LockCell,
-    DispatchHandler, Message, MessageKind, MessageTypeDescriptor,
+    DispatchHandler, Message, MessageKind, MessageTypeDescriptor, proto::prost,
 };
 
 type InvokerFn = dyn Fn(&MessageDispatch, &mut (dyn Any + 'static)) + Send;

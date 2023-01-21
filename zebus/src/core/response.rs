@@ -2,7 +2,7 @@ use core::fmt;
 
 use super::RawMessage;
 use crate::{
-    message_id::proto, proto::IntoProtobuf, transport::MessageExecutionCompleted,
+    message_id::proto, proto::{IntoProtobuf, prost}, transport::MessageExecutionCompleted,
     MessageTypeDescriptor,
 };
 
