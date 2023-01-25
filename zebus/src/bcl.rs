@@ -1,6 +1,6 @@
 use chrono::TimeZone;
 
-use crate::proto::{FromProtobuf, IntoProtobuf, prost};
+use crate::proto::{prost, FromProtobuf, IntoProtobuf};
 
 #[derive(Clone, Copy, Eq, PartialEq, prost::Message)]
 pub struct Guid {

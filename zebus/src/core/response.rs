@@ -2,8 +2,10 @@ use core::fmt;
 
 use super::RawMessage;
 use crate::{
-    message_id::proto, proto::{IntoProtobuf, prost}, transport::MessageExecutionCompleted,
-    MessageTypeDescriptor,
+    message_id::proto,
+    proto::{prost, IntoProtobuf},
+    transport::MessageExecutionCompleted,
+    MessageDescriptor, MessageTypeDescriptor,
 };
 
 /// Error code returned in [`MessageExecutionCompleted`] when a [`crate::Handler`] returned a
@@ -159,7 +161,7 @@ impl IntoResponse for () {
 /// Turn a `ResponseMessage` into a `Message` [`Response`]
 impl<T> IntoResponse for ResponseMessage<T>
 where
-    T: crate::Message + prost::Message + 'static,
+    T: MessageDescriptor + prost::Message + 'static,
 {
     fn into_response(self) -> Option<Response> {
         let message_type_descriptor = MessageTypeDescriptor::of::<T>();

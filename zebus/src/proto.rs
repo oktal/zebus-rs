@@ -5,7 +5,7 @@ pub use crate::routing::binding_key::proto::BindingKey;
 pub use crate::subscription::proto::Subscription;
 
 pub mod prost {
-    pub use zebus_proto::{EncodeError, DecodeError, Message};
+    pub use zebus_proto::{DecodeError, EncodeError, Message};
     pub use zebus_proto_derive::{Enumeration, Message};
 }
 

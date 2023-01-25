@@ -1,6 +1,6 @@
 use crate::proto::IntoProtobuf;
 use crate::{BindingKey, MessageTypeDescriptor, MessageTypeId};
-use crate::{Message, MessageBinding};
+use crate::{MessageBinding, MessageDescriptor};
 
 pub(crate) mod proto {
     use crate::proto::prost;
@@ -22,7 +22,7 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    pub fn bind<M: Message + MessageBinding + 'static>(
+    pub fn bind<M: MessageDescriptor + MessageBinding + 'static>(
         bind_fn: impl FnOnce(&mut <M as MessageBinding>::Binding),
     ) -> Self {
         let mut binding = M::Binding::default();
@@ -32,11 +32,11 @@ impl Subscription {
         Self::with_binding::<M>(binding_key)
     }
 
-    pub fn any<M: Message + MessageBinding + 'static>() -> Subscription {
+    pub fn any<M: MessageDescriptor + MessageBinding + 'static>() -> Subscription {
         Self::with_binding::<M>(M::bind(M::Binding::default()).into())
     }
 
-    pub fn with_binding<M: Message + 'static>(binding_key: BindingKey) -> Self {
+    pub fn with_binding<M: MessageDescriptor + 'static>(binding_key: BindingKey) -> Self {
         let message_type_id = MessageTypeId::from_descriptor(MessageTypeDescriptor::of::<M>());
 
         Self {

@@ -3,7 +3,7 @@ use crate::proto::{FromProtobuf, IntoProtobuf};
 pub(crate) mod proto {
     use crate::{bcl::Guid, proto::prost};
 
-    #[derive(Clone, Eq, PartialEq, prost::Message)]
+    #[derive(Copy, Clone, Eq, PartialEq, prost::Message)]
     pub struct MessageId {
         #[prost(message, required, tag = "1")]
         pub value: Guid,

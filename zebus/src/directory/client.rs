@@ -7,7 +7,7 @@ use crate::{
     proto::{self, PeerDescriptor},
     routing::tree::PeerSubscriptionTree,
     transport::TransportMessage,
-    BindingKey, Handler, MessageType, Peer, PeerId,
+    BindingKey, Handler, Message, MessageType, Peer, PeerId,
 };
 use std::{
     collections::{hash_map, HashMap, HashSet},
@@ -271,8 +271,8 @@ impl Inner {
         })
     }
 
-    fn get_peers_handling<M: crate::Message>(&self, message: &M) -> Vec<Peer> {
-        let message_type = MessageType::of::<M>();
+    fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
+        let message_type = MessageType::of_val(message);
         let binding_key = BindingKey::create(message);
         self.subscriptions.get(&message_type, &binding_key)
     }
@@ -453,7 +453,7 @@ impl DirectoryReader for Client {
         inner.entry(peer_id, None).map(|e| e.peer.clone())
     }
 
-    fn get_peers_handling<M: crate::Message>(&self, message: &M) -> Vec<Peer> {
+    fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
         let inner = self.inner.lock().unwrap();
         inner.get_peers_handling(message)
     }
@@ -567,28 +567,33 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use super::*;
-    use crate::proto::{IntoProtobuf, MessageTypeId, Subscription};
+    use crate::proto::{prost, IntoProtobuf, Subscription};
+    use crate::{Message, MessageDescriptor, MessageTypeId};
 
-    #[derive(crate::Command)]
+    #[derive(Clone, crate::Command, prost::Message)]
     #[zebus(namespace = "Abc.Test", routable)]
     struct RoutableCommand {
         #[zebus(routing_position = 1)]
+        #[prost(string, tag = 1)]
         name: String,
 
         #[zebus(routing_position = 2)]
+        #[prost(uint64, tag = 2)]
         id: u64,
     }
 
-    #[derive(crate::Event)]
+    #[derive(Clone, crate::Event, prost::Message)]
     #[zebus(namespace = "Abc.Test")]
     struct TestEvent {
+        #[prost(string, tag = 1)]
         _outcome: String,
     }
 
-    #[derive(crate::Event)]
+    #[derive(Clone, crate::Event, prost::Message)]
     #[zebus(namespace = "Abc.Test", routable)]
     struct RoutableTestEvent {
         #[zebus(routing_position = 1)]
+        #[prost(string, tag = 1)]
         outcome: String,
     }
 
@@ -649,8 +654,8 @@ mod tests {
             (0..n).into_iter().map(create_fn).collect()
         }
 
-        fn create_subscription<M: crate::Message>(message: &M) -> Subscription {
-            let message_type_id = proto::MessageTypeId::of::<M>();
+        fn create_subscription(message: &dyn Message) -> Subscription {
+            let message_type_id = MessageTypeId::of_val(message).into_protobuf();
             let binding_key = BindingKey::create(message).into_protobuf();
             Subscription {
                 message_type_id,
@@ -658,8 +663,10 @@ mod tests {
             }
         }
 
-        fn create_subscription_for<M: crate::Message>(messages: &[&M]) -> SubscriptionsForType {
-            let message_type = proto::MessageTypeId::of::<M>();
+        fn create_subscription_for<M: MessageDescriptor + 'static>(
+            messages: &[&dyn Message],
+        ) -> SubscriptionsForType {
+            let message_type = MessageTypeId::of::<M>().into_protobuf();
             let bindings = messages
                 .iter()
                 .map(|m| BindingKey::create(*m).into_protobuf())
@@ -754,7 +761,7 @@ mod tests {
             _outcome: "Failure".to_string(),
         };
         let subscription = Subscription {
-            message_type_id: MessageTypeId::of::<TestEvent>(),
+            message_type_id: MessageTypeId::of::<TestEvent>().into_protobuf(),
             binding_key: BindingKey::empty().into_protobuf(),
         };
         let descriptors = Fixture::create_descriptors_with(5, |_| PeerDescriptor {
@@ -962,7 +969,7 @@ mod tests {
             name: "routable_command".into(),
             id: 0x0EFEF,
         };
-        let subscription = Fixture::create_subscription_for(&[&command_1]);
+        let subscription = Fixture::create_subscription_for::<RoutableCommand>(&[&command_1]);
 
         fixture.handler.handle(PeerStarted {
             descriptor: fixture.descriptor.clone(),
@@ -1002,8 +1009,8 @@ mod tests {
             name: "routable_command".into(),
             id: 0x0EFEF,
         };
-        let subscription_1 = Fixture::create_subscription_for(&[&command_1]);
-        let subscription_2 = Fixture::create_subscription_for(&[&command_2]);
+        let subscription_1 = Fixture::create_subscription_for::<RoutableCommand>(&[&command_1]);
+        let subscription_2 = Fixture::create_subscription_for::<RoutableCommand>(&[&command_2]);
 
         fixture.handler.handle(PeerStarted {
             descriptor: fixture.descriptor.clone(),

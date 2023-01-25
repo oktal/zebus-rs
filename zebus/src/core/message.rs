@@ -1,4 +1,5 @@
 use crate::proto::prost;
+use crate::MessageDescriptor;
 
 /// Trait for types that expose raw content of protobuf-encoded messages
 pub trait MessagePayload {
@@ -9,12 +10,12 @@ pub trait MessagePayload {
     fn content(&self) -> Option<&[u8]>;
 
     /// Returns `true` if the protobuf-encoded message is of type `M`
-    fn is<M: crate::Message>(&self) -> bool {
+    fn is<M: MessageDescriptor>(&self) -> bool {
         self.message_type().map(|s| s == M::name()).unwrap_or(false)
     }
 
     /// Attempt to decode the protobuf-encoded message as a message of type `M`
-    fn decode_as<M: crate::Message + prost::Message + Default>(
+    fn decode_as<M: MessageDescriptor + prost::Message + Default>(
         &self,
     ) -> Option<Result<M, prost::DecodeError>> {
         // NOTE(oktal): maybe one day Rust will get `and_then` on `bool`

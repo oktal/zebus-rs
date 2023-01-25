@@ -22,7 +22,7 @@ use self::{
     events::PeerSubscriptionsForTypeUpdated,
 };
 
-use crate::{DispatchHandler, Handler, Peer, PeerId};
+use crate::{DispatchHandler, Handler, Message, Peer, PeerId};
 
 /// Alias for the [`Directory`] [`PeerEvent`] [`Stream`]
 pub(crate) type EventStream = BoxStream<'static, PeerEvent>;
@@ -37,7 +37,7 @@ pub trait DirectoryReader {
 
     /// Get the list of [`Peer`] peers handling a [`crate::Message`] message based on the
     /// subscriptions of the peers
-    fn get_peers_handling<M: crate::Message>(&self, message: &M) -> Vec<Peer>;
+    fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer>;
 }
 
 // TODO(oktal): can we relax `Sync` here ?

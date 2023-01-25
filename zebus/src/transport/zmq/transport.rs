@@ -15,12 +15,13 @@ use tokio_stream::StreamExt;
 
 use crate::{
     directory::{self, event::PeerEvent},
+    proto::prost,
     proto::prost::Message,
     transport::{
         zmq::{ZmqSocketOptions, ZmqTransportConfiguration},
         SendContext, Transport, TransportMessage,
     },
-    Peer, PeerId, proto::prost,
+    Peer, PeerId,
 };
 
 use super::{inbound, outbound::ZmqOutboundSocket};

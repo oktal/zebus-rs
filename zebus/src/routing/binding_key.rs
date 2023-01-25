@@ -1,4 +1,5 @@
-use crate::{proto::IntoProtobuf, BindingKeyFragment, Message};
+use crate::Message;
+use crate::{proto::IntoProtobuf, BindingKeyFragment};
 
 pub(crate) mod proto {
     use crate::proto::prost;
@@ -20,7 +21,7 @@ impl From<zebus_core::BindingKey> for BindingKey {
 }
 
 impl BindingKey {
-    pub(crate) fn create<M: Message>(message: &M) -> Self {
+    pub(crate) fn create(message: &dyn Message) -> Self {
         Self(message.get_binding())
     }
 
@@ -87,29 +88,36 @@ impl IntoProtobuf for BindingKey {
 
 #[cfg(test)]
 mod tests {
+    use crate::proto::prost;
+
     use super::*;
     use zebus_core::fragment;
 
-    #[derive(crate::Command)]
+    #[derive(crate::Command, prost::Message, Clone)]
     #[zebus(namespace = "Abc.Test", routable)]
     struct RoutableCommand {
         #[zebus(routing_position = 1)]
+        #[prost(string, tag = 1)]
         name: String,
 
+        #[prost(uint32, tag = 2)]
         #[zebus(routing_position = 2)]
         id: u32,
     }
 
-    #[derive(crate::Command)]
+    #[derive(crate::Command, prost::Message, Clone)]
     #[zebus(namespace = "Abc.Test", routable)]
     struct UnorderedRoutableCommand {
         #[zebus(routing_position = 3)]
+        #[prost(string, tag = 1)]
         name: String,
 
         #[zebus(routing_position = 1)]
+        #[prost(uint32, tag = 2)]
         id: u32,
 
         #[zebus(routing_position = 2)]
+        #[prost(bool, tag = 3)]
         flag: bool,
     }
 

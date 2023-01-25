@@ -249,8 +249,10 @@ mod tests {
         bus::CommandResult,
         core::MessagePayload,
         dispatch::{registry, DispatchResult},
+        proto::prost,
         transport::TransportMessage,
-        Handler, HandlerError, MessageKind, Peer, Response, ResponseMessage,
+        Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer, Response,
+        ResponseMessage,
     };
 
     struct Fixture {
@@ -303,16 +305,15 @@ mod tests {
 
         fn dispatch_local<M>(&mut self, message: M) -> Result<DispatchFuture, Error>
         where
-            M: crate::Message + prost::Message + 'static,
+            M: Message,
         {
-            let message = Arc::new(message);
-            let request = DispatchRequest::Local(M::name(), message);
+            let request = DispatchRequest::Local(Arc::new(message));
             let (message_dispatch, future) = MessageDispatch::new(request);
             self.dispatcher.dispatch(message_dispatch)?;
             Ok(future)
         }
 
-        fn decode_as<M: crate::Message + prost::Message + Default>(
+        fn decode_as<M: MessageDescriptor + prost::Message + Default>(
             result: &DispatchResult,
         ) -> Option<M> {
             if let Ok(Some(response)) = result {

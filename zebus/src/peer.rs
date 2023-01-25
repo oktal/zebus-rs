@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{PeerId, proto::prost};
+use crate::{proto::prost, PeerId};
 
 #[derive(Clone, Eq, PartialEq, prost::Message)]
 pub struct Peer {

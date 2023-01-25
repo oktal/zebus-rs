@@ -208,10 +208,20 @@ fn message_impl(
     let infrastructure = attrs.infrastructure.unwrap_or(false);
     let transient = attrs.transient.unwrap_or(false);
 
+    let flags = match (infrastructure, transient) {
+        (false, false) => quote! { ::zebus_core::MessageFlags::NONE },
+        (false, true) => quote! { ::zebus_core::MessageFlags::TRANSIENT },
+        (true, false) => quote! { ::zebus_core::MessageFlags::INFRASTRUCTURE },
+        (true, true) => {
+            quote! { ::zebus_core::MessageFlags::INFRASTRUCTURE | ::zebus_core::MessageFlags::TRANSIENT }
+        }
+    };
+
     Ok(quote! {
-        impl ::zebus_core::Message for #ident {
-            const INFRASTRUCTURE: bool = #infrastructure;
-            const TRANSIENT: bool = #transient;
+        impl ::zebus_core::MessageDescriptor for #ident {
+            fn flags() -> ::zebus_core::MessageFlags {
+                #flags
+            }
 
             fn name() -> &'static str {
                 #full_name
@@ -220,9 +230,23 @@ fn message_impl(
             fn routing() -> &'static [::zebus_core::RoutingField] {
                 &[#( #routing_fields_expanded, )*]
             }
+        }
+
+        impl ::zebus_core::Message for #ident {
+            fn flags(&self) -> ::zebus_core::MessageFlags {
+                #flags
+            }
+
+            fn name(&self) -> &'static str {
+                #full_name
+            }
 
             fn get_binding(&self) -> ::zebus_core::BindingKey {
                 #get_binding
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 

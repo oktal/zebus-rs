@@ -1,4 +1,6 @@
-use crate::{message_type_id::proto, proto::IntoProtobuf, Message};
+use crate::{
+    message_type_id::proto, proto::IntoProtobuf, Message, MessageDescriptor, MessageFlags,
+};
 use std::any::TypeId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,12 +20,25 @@ pub struct MessageTypeDescriptor {
 }
 
 impl MessageTypeDescriptor {
-    pub(crate) fn of<M: Message + 'static>() -> Self {
+    pub(crate) fn of<M: MessageDescriptor + 'static>() -> Self {
+        let flags = M::flags();
+
         Self {
             full_name: M::name().to_string(),
             r#type: TypeId::of::<M>(),
-            is_persistent: !M::TRANSIENT,
-            is_infrastructure: M::INFRASTRUCTURE,
+            is_persistent: !flags.contains(MessageFlags::TRANSIENT),
+            is_infrastructure: flags.contains(MessageFlags::INFRASTRUCTURE),
+        }
+    }
+
+    pub(crate) fn of_val(message: &dyn Message) -> Self {
+        let flags = message.flags();
+
+        Self {
+            full_name: message.name().to_string(),
+            r#type: message.type_id(),
+            is_persistent: !flags.contains(MessageFlags::TRANSIENT),
+            is_infrastructure: flags.contains(MessageFlags::INFRASTRUCTURE),
         }
     }
 }

@@ -1,4 +1,7 @@
-use crate::{proto::{self, prost}, PeerId};
+use crate::{
+    proto::{self, prost},
+    PeerId,
+};
 
 // TODO(oktal): Add transient
 /// [`Event`] raised when a new peer has been started

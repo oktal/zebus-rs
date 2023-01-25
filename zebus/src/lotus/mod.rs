@@ -1,7 +1,10 @@
-use crate::{proto::{bcl, prost}, transport::TransportMessage};
+use crate::{
+    proto::{bcl, prost},
+    transport::TransportMessage,
+};
 
 /// [`crate::Event`] raised when a [`crate::Handler`] raised an error
-#[derive(prost::Message, crate::Event)]
+#[derive(prost::Message, crate::Event, Clone)]
 #[zebus(namespace = "Abc.Zebus")]
 pub struct MessageProcessingFailed {
     /// The [`TransportMessage`] that triggered the error

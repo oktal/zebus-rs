@@ -1,8 +1,8 @@
-use crate::{proto::IntoProtobuf, MessageTypeDescriptor};
+use crate::{proto::IntoProtobuf, Message, MessageDescriptor, MessageTypeDescriptor};
 use std::any::TypeId;
 
 pub(crate) mod proto {
-    use crate::{Message, proto::prost};
+    use crate::{proto::prost, Message, MessageDescriptor};
 
     #[derive(Clone, prost::Message, Eq, PartialEq, Hash)]
     pub struct MessageTypeId {
@@ -11,13 +11,19 @@ pub(crate) mod proto {
     }
 
     impl MessageTypeId {
-        pub fn of<M: Message>() -> Self {
+        pub fn of<M: MessageDescriptor>() -> Self {
             Self {
                 full_name: M::name().to_string(),
             }
         }
 
-        pub fn is<M: Message>(&self) -> bool {
+        pub fn of_val(message: &dyn Message) -> Self {
+            Self {
+                full_name: message.name().to_string(),
+            }
+        }
+
+        pub fn is<M: MessageDescriptor>(&self) -> bool {
             self.full_name == M::name()
         }
     }
@@ -32,11 +38,15 @@ pub struct MessageTypeId {
 pub struct MessageType(String);
 
 impl MessageType {
-    pub fn of<M: crate::Message>() -> Self {
+    pub fn of<M: MessageDescriptor>() -> Self {
         Self(M::name().to_string())
     }
 
-    pub fn is<M: crate::Message>(&self) -> bool {
+    pub fn of_val(message: &dyn Message) -> Self {
+        Self(message.name().to_string())
+    }
+
+    pub fn is<M: MessageDescriptor>(&self) -> bool {
         self.0 == M::name()
     }
 
@@ -80,11 +90,15 @@ impl MessageTypeId {
         Self { descriptor }
     }
 
-    pub fn of<M: crate::Message + 'static>() -> Self {
+    pub fn of<M: MessageDescriptor + 'static>() -> Self {
         Self::from_descriptor(MessageTypeDescriptor::of::<M>())
     }
 
-    pub fn is<M: crate::Message>(&self) -> bool {
+    pub fn of_val(message: &dyn Message) -> Self {
+        Self::from_descriptor(MessageTypeDescriptor::of_val(message))
+    }
+
+    pub fn is<M: MessageDescriptor>(&self) -> bool {
         self.descriptor.full_name == M::name()
     }
 

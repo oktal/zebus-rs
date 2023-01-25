@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     core::MessagePayload,
-    proto::{IntoProtobuf, prost},
+    proto::{prost, IntoProtobuf},
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
     Peer,
 };

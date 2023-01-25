@@ -1,11 +1,12 @@
 use crate::core::MessagePayload;
-use crate::proto::{self, IntoProtobuf, prost};
+use crate::message_type_id::MessageTypeId;
+use crate::proto::{self, prost, IntoProtobuf};
 use crate::{Message, Peer};
 
 use crate::{transport::OriginatorInfo, MessageId, PeerId};
 
 /// Envelope for a message send through the bus
-#[derive(Clone, prost::Message)]
+#[derive(prost::Message, Clone)]
 pub struct TransportMessage {
     /// Id of the message
     #[prost(message, required, tag = "1")]
@@ -40,16 +41,14 @@ impl TransportMessage {
         self.persistent_peer_ids.len() > 0
     }
 
-    pub(crate) fn create<M: Message + prost::Message>(
+    pub(crate) fn create(
         sender: &Peer,
         environment: String,
-        message: &M,
+        message: &dyn Message,
     ) -> (uuid::Uuid, Self) {
         let uuid = uuid::Uuid::new_v4();
         let id = MessageId::from(uuid.clone());
-        let message_type_id = crate::proto::MessageTypeId {
-            full_name: M::name().to_string(),
-        };
+        let message_type_id = MessageTypeId::of_val(message).into_protobuf();
 
         // TODO(oktal): Reuse buffer
         let content = message.encode_to_vec();

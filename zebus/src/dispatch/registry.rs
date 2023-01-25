@@ -6,8 +6,9 @@ use std::{
 use super::{Dispatch, DispatchRequest, MessageDispatch};
 use crate::{
     core::{Handler, IntoResponse, MessagePayload},
+    proto::prost,
     sync::LockCell,
-    DispatchHandler, Message, MessageKind, MessageTypeDescriptor, proto::prost,
+    DispatchHandler, MessageDescriptor, MessageKind, MessageTypeDescriptor,
 };
 
 type InvokerFn = dyn Fn(&MessageDispatch, &mut (dyn Any + 'static)) + Send;
@@ -39,7 +40,7 @@ where
     pub fn handles<M>(&mut self) -> &mut Self
     where
         H: Handler<M> + 'static,
-        M: Message + prost::Message + Clone + Default + 'static,
+        M: MessageDescriptor + prost::Message + Clone + Default + 'static,
     {
         let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
             let handler_type = std::any::type_name::<H>();
@@ -53,7 +54,7 @@ where
                         dispatch.set_response(handler_type, res.into_response());
                     }
                 }
-                DispatchRequest::Local(_message_type, message) => {
+                DispatchRequest::Local(message) => {
                     if let Some(message) = message.downcast_ref::<M>() {
                         // Safety:
                         //   1. `handler` is of type `Box<H>
@@ -129,9 +130,8 @@ where
         self.invokers.keys().map(|k| *k)
     }
 
-    fn add<M: Message + 'static>(&mut self, invoker_fn: impl FnOnce() -> Box<InvokerFn>) {
-        let name = <M as Message>::name();
-        match self.invokers.entry(name) {
+    fn add<M: MessageDescriptor + 'static>(&mut self, invoker_fn: impl FnOnce() -> Box<InvokerFn>) {
+        match self.invokers.entry(M::name()) {
             Entry::Occupied(_) => None,
             Entry::Vacant(e) => Some(e.insert(MessageInvoker {
                 descriptor: MessageTypeDescriptor::of::<M>(),

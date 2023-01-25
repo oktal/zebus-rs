@@ -1,4 +1,8 @@
-use std::{fmt, marker::PhantomData, str::FromStr};
+use bitflags::bitflags;
+use std::{any::Any, fmt, marker::PhantomData, str::FromStr};
+
+mod upcast;
+pub use upcast::{Upcast, UpcastFrom};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoutingField {
@@ -93,25 +97,46 @@ impl<T> Default for Binding<T> {
     }
 }
 
+bitflags! {
+    /// Marker flags for a [`Message`]
+    pub struct MessageFlags: u32 {
+        /// None
+        const NONE           = 0b00000000;
+
+        /// Marker flag for infrastructure messages
+        const INFRASTRUCTURE = 0b00000001;
+
+        /// Marker flag for non-persistent messages
+        const TRANSIENT      = 0b00000010;
+    }
+}
+
+pub trait MessageDescriptor {
+    /// Get the flags for this message
+    fn flags() -> MessageFlags;
+
+    /// Get the fully qualified name of the message
+    fn name() -> &'static str;
+
+    /// Get the routing fields of the message
+    fn routing() -> &'static [RoutingField];
+}
+
 /// A message that can be sent on the bus.
 /// Messages that are sent on the bus are either [`Command`] or [`Event`]
 /// A [`Command`] is sent to a unique peer, asking for an action to be performed
 /// An [`Event`] can be published to multiple peers, notifying that an action has been performed
-pub trait Message {
-    /// Marker flag for infrastructure messages
-    const INFRASTRUCTURE: bool;
+pub trait Message: Any {
+    /// Get the flags for this message
+    fn flags(&self) -> MessageFlags;
 
-    /// Marker flag for non-persistent messages
-    const TRANSIENT: bool;
-
-    /// Namespace this messages belongs to
-    fn name() -> &'static str;
-
-    /// Fields on which this message can be routed
-    fn routing() -> &'static [RoutingField];
+    /// Get the fully qualified name of the message
+    fn name(&self) -> &'static str;
 
     /// Get the the [`BindingKey`] for this message
     fn get_binding(&self) -> BindingKey;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub trait MessageBinding {
@@ -121,10 +146,19 @@ pub trait MessageBinding {
 }
 
 /// Trait for a message that can be sent to a peer, asking for an action to be performed
-pub trait Command: Message {}
+pub trait Command: Message + Upcast<dyn Message> {}
 
 /// Trait for a message that can be published to multiple peers, notifying that an action has been performed
-pub trait Event: Message {}
+pub trait Event: Message + Upcast<dyn Message> {}
+
+impl<'a, M: Message + 'a> UpcastFrom<M> for dyn Message + 'a {
+    fn up_from(value: &M) -> &Self {
+        value
+    }
+    fn up_from_mut(value: &mut M) -> &mut Self {
+        value
+    }
+}
 
 /// Enum representing the type of a [`Message`]
 /// A [`Message`] can either be a [`Command`] command or [`Event`] event

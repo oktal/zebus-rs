@@ -1,20 +1,20 @@
 use std::{
     collections::HashMap,
-    fmt,
     sync::{Arc, Mutex},
 };
 
+use dyn_clone::clone_box;
 use itertools::Itertools;
-use thiserror::Error;
 use tokio::{
     runtime::Runtime,
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
+use zebus_core::MessageFlags;
 
 use crate::{
-    bus::{CommandFuture, CommandResult},
+    bus::{CommandFuture, CommandResult, Error, RegistrationError, Result, SendError},
     bus_configuration::{
         DEFAULT_MAX_BATCH_SIZE, DEFAULT_REGISTRATION_TIMEOUT, DEFAULT_START_REPLAY_TIMEOUT,
     },
@@ -24,89 +24,11 @@ use crate::{
         PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
         Registration,
     },
-    dispatch::{
-        self, AnyMessage, DispatchOutput, DispatchRequest, Dispatched, Dispatcher,
-        MessageDispatcher,
-    },
-    proto::{FromProtobuf, prost},
+    dispatch::{self, DispatchOutput, DispatchRequest, Dispatched, Dispatcher, MessageDispatcher},
+    proto::{prost, FromProtobuf},
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
-    BusConfiguration, Command, Event, Handler, MessageId, Peer, PeerId,
+    BusConfiguration, Command, Event, Handler, Message, MessageExt, MessageId, Peer, PeerId,
 };
-
-#[derive(Debug)]
-pub struct RegistrationError {
-    inner: Vec<(Peer, directory::RegistrationError)>,
-}
-
-impl fmt::Display for RegistrationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "failed to register to directory:")?;
-        for failure in &self.inner {
-            writeln!(f, "    tried {}: {}", failure.0, failure.1)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl RegistrationError {
-    fn new() -> Self {
-        Self { inner: vec![] }
-    }
-
-    fn add(&mut self, peer: Peer, error: directory::RegistrationError) {
-        self.inner.push((peer, error))
-    }
-
-    fn find(
-        &self,
-        predicate: impl Fn(&directory::RegistrationError) -> bool,
-    ) -> Option<&directory::RegistrationError> {
-        self.inner.iter().find(|e| predicate(&e.1)).map(|x| &x.1)
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum SendError {
-    /// An attempt to send a [`Command`] resulted in no candidat peer
-    #[error("unable to find peer for command")]
-    NoPeer,
-
-    /// An attempt to send a [`Command`] resulted in multiple candidate peers
-    #[error("can not send a command to multiple peers: {0:?}")]
-    MultiplePeers(Vec<Peer>),
-
-    /// A [`Command`] could not be send to a non responding [`Peer`]
-    #[error("can not send a transient message to non responding peer {0:?}")]
-    PeerNotResponding(Peer),
-
-    /// The sender has been closed
-    #[error("sender has been closed")]
-    Closed,
-}
-
-#[derive(Debug, Error)]
-pub enum Error {
-    /// Transport error
-    #[error("an error occured during a transport operation {0}")]
-    Transport(Box<dyn std::error::Error>),
-
-    /// None of the directories tried for registration succeeded
-    #[error("{0}")]
-    Registration(RegistrationError),
-
-    /// An error occured when sending a message to one or multiple peers
-    #[error("{0}")]
-    Send(SendError),
-
-    /// An error occured on the dispatcher
-    #[error("an error occured on the dispatcher {0}")]
-    Dispatch(dispatch::Error),
-
-    /// An operation was attempted while the [`Bus`] was in an invalid state
-    #[error("an operation was attempted while the bus was not in a valid state")]
-    InvalidOperation,
-}
 
 enum State<T: Transport, D: Directory> {
     Init {
@@ -161,14 +83,14 @@ impl<T: Transport> SenderContext<T> {
         (tx, Self { transport, rx })
     }
 
-    fn send<M: crate::Message + prost::Message>(
-        message: &M,
+    fn send(
+        message: &dyn Message,
         snd_tx: &mpsc::Sender<SendEntry>,
         self_peer: &Peer,
         environment: String,
         pending_commands: &mut HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>,
         peers: impl IntoIterator<Item = Peer>,
-    ) -> Result<CommandFuture, Error> {
+    ) -> Result<CommandFuture> {
         let (tx, rx) = oneshot::channel();
         let (id, message) = TransportMessage::create(&self_peer, environment.clone(), message);
 
@@ -196,42 +118,28 @@ enum LocalDispatchRequest {
     /// A [`Command`] to be dispatched locally
     Command {
         tx: oneshot::Sender<CommandResult>,
-        message_type: &'static str,
-        message: Arc<AnyMessage>,
+        message: Arc<dyn Message>,
     },
 
     /// An [`Event`] to be dispatched locally
-    Event {
-        message_type: &'static str,
-        message: Arc<AnyMessage>,
-    },
+    Event(Arc<dyn Message>),
 }
 
 impl LocalDispatchRequest {
     /// Create a [`LocalDispatchRequest`] for a [`Command`] message
-    fn for_command<C>(command: C) -> (Self, oneshot::Receiver<CommandResult>)
-    where
-        C: crate::Message + prost::Message + Command + Send + 'static,
-    {
+    fn for_command(command: &dyn Command) -> (Self, oneshot::Receiver<CommandResult>) {
         let (tx, rx) = oneshot::channel();
-        let request = Self::Command {
-            tx,
-            message_type: C::name(),
-            message: Arc::new(command),
-        };
+        let message = Arc::from(clone_box(command.up()));
+
+        let request = Self::Command { tx, message };
 
         (request, rx)
     }
 
     /// Create a [`LocalDispatchRequest`] for a [`Event`] message
-    fn for_event<E>(event: E) -> Self
-    where
-        E: crate::Message + prost::Message + Event + Send + 'static,
-    {
-        Self::Event {
-            message_type: E::name(),
-            message: Arc::new(event),
-        }
+    fn for_event(event: &dyn Event) -> Self {
+        let message = Arc::from(clone_box(event.up()));
+        Self::Event(message)
     }
 }
 
@@ -282,14 +190,14 @@ impl<T: Transport, D: Directory> ReceiverContext<T, D> {
         self.dispatcher.dispatch(request).await
     }
 
-    async fn send<M: prost::Message + crate::Message>(&mut self, message: &M) {
+    async fn send(&mut self, message: &dyn Message) {
         let dst_peers = self.directory.get_peers_handling(message);
         if !dst_peers.is_empty() {
             self.send_to(message, dst_peers).await;
         }
     }
 
-    async fn send_to<M: prost::Message + crate::Message>(&mut self, message: &M, peers: Vec<Peer>) {
+    async fn send_to(&mut self, message: &dyn Message, peers: Vec<Peer>) {
         let (_id, message) =
             TransportMessage::create(&self.self_peer, self.environment.clone(), message);
 
@@ -351,9 +259,9 @@ async fn receiver<T: Transport, D: Directory>(mut ctx: ReceiverContext<T, D>) {
             Some(request) = ctx.dispatch_rx.recv() => {
                 // TODO(oktal): send `MessageProcessingFailed` if dispatch failed ?
                 match request {
-                    LocalDispatchRequest::Command { tx, message_type, message } => {
+                    LocalDispatchRequest::Command { tx, message } => {
                         // Dispatch command locally
-                        let dispatched = ctx.dispatch(DispatchRequest::Local(message_type, message)).await;
+                        let dispatched = ctx.dispatch(DispatchRequest::Local(message)).await;
 
                         // Retrieve the `CommandResult`
                         let command_result: Option<CommandResult> = dispatched.try_into().ok();
@@ -363,9 +271,9 @@ async fn receiver<T: Transport, D: Directory>(mut ctx: ReceiverContext<T, D>) {
                             let _ = tx.send(command_result);
                         }
                     },
-                    LocalDispatchRequest::Event { message_type, message } => {
+                    LocalDispatchRequest::Event(message) => {
                         // Dispatch event locally
-                        let _dispatched = ctx.dispatch(DispatchRequest::Local(message_type, message)).await;
+                        let _dispatched = ctx.dispatch(DispatchRequest::Local(message)).await;
                     }
                 }
             }
@@ -386,7 +294,7 @@ async fn register<T: Transport>(
     self_peer: &Peer,
     environment: &String,
     configuration: &BusConfiguration,
-) -> Result<Registration, Error> {
+) -> Result<Registration> {
     let directory_peers =
         configuration
             .directory_endpoints
@@ -448,7 +356,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
 }
 
 impl<T: Transport, D: Directory> Bus<T, D> {
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Error> {
+    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<()> {
         let (inner, res) = match self.inner.take() {
             Some(State::Init {
                 runtime,
@@ -493,7 +401,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         res
     }
 
-    fn start(&mut self) -> Result<(), Error> {
+    fn start(&mut self) -> Result<()> {
         let (inner, res) = match self.inner.take() {
             Some(State::Configured {
                 runtime,
@@ -595,14 +503,11 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         res
     }
 
-    fn stop(&mut self) -> Result<(), Error> {
+    fn stop(&mut self) -> Result<()> {
         todo!()
     }
 
-    fn send<C: Command + prost::Message + Send + 'static>(
-        &mut self,
-        command: C,
-    ) -> Result<CommandFuture, Error> {
+    fn send(&mut self, command: &dyn Command) -> Result<CommandFuture> {
         match self.inner.as_mut() {
             Some(State::Started {
                 ref snd_tx,
@@ -614,7 +519,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 ..
             }) => {
                 // Retrieve the list of peers handling the command from the directory
-                let peers = directory.get_peers_handling(&command);
+                let peers = directory.get_peers_handling(command.up());
 
                 let self_dst_peer = peers.iter().find(|&p| p.id == self_peer.id);
                 // TODO(oktal): add local dispatch toggling
@@ -641,7 +546,10 @@ impl<T: Transport, D: Directory> Bus<T, D> {
 
                     // Attempting to send a non-persistent command to a non-responding peer result in
                     // an error
-                    if !dst_peer.is_responding && C::TRANSIENT && !C::INFRASTRUCTURE {
+                    if !dst_peer.is_responding
+                        && command.is_transient()
+                        && !command.is_infrastructure()
+                    {
                         Err(Error::Send(SendError::PeerNotResponding(dst_peer)))
                     } else {
                         // Lock the map of pending commands
@@ -649,7 +557,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
 
                         // Send the command
                         SenderContext::<T>::send(
-                            &command,
+                            command.up(),
                             snd_tx,
                             self_peer,
                             environment.clone(),
@@ -663,11 +571,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         }
     }
 
-    fn send_to<C: Command + prost::Message>(
-        &mut self,
-        command: C,
-        peer: crate::Peer,
-    ) -> Result<CommandFuture, Error> {
+    fn send_to(&mut self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
         match self.inner.as_mut() {
             Some(State::Started {
                 ref snd_tx,
@@ -678,7 +582,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
             }) => {
                 // Attempting to send a non-persistent command to a non-responding peer result in
                 // an error
-                if !peer.is_responding && C::TRANSIENT && !C::INFRASTRUCTURE {
+                if !peer.is_responding && command.is_transient() && !command.is_infrastructure() {
                     return Err(Error::Send(SendError::PeerNotResponding(peer)));
                 }
 
@@ -687,7 +591,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
 
                 // Send the command
                 SenderContext::<T>::send(
-                    &command,
+                    command.up(),
                     snd_tx,
                     self_peer,
                     environment.clone(),
@@ -701,32 +605,23 @@ impl<T: Transport, D: Directory> Bus<T, D> {
 }
 
 impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
-    type Err = Error;
-
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<(), Self::Err> {
+    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<()> {
         self.configure(peer_id, environment)
     }
 
-    fn start(&mut self) -> Result<(), Self::Err> {
+    fn start(&mut self) -> Result<()> {
         self.start()
     }
 
-    fn stop(&mut self) -> Result<(), Self::Err> {
+    fn stop(&mut self) -> Result<()> {
         self.stop()
     }
 
-    fn send<C: Command + prost::Message + Send + 'static>(
-        &mut self,
-        command: C,
-    ) -> Result<CommandFuture, Self::Err> {
+    fn send(&mut self, command: &dyn Command) -> Result<CommandFuture> {
         self.send(command)
     }
 
-    fn send_to<C: Command + prost::Message>(
-        &mut self,
-        command: C,
-        peer: Peer,
-    ) -> Result<CommandFuture, Self::Err> {
+    fn send_to(&mut self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
         self.send_to(command, peer)
     }
 }
@@ -813,7 +708,7 @@ impl<T: Transport> BusBuilder<T> {
         self
     }
 
-    pub fn create(self) -> Result<impl crate::Bus, CreateError<Error>> {
+    pub fn create(self) -> std::result::Result<impl crate::Bus, CreateError<Error>> {
         let (transport, peer_id, configuration, environment) = (
             self.transport,
             self.peer_id.unwrap_or(Self::testing_peer_id()),
@@ -874,6 +769,7 @@ mod tests {
             DirectoryReader,
         },
         dispatch::registry,
+        MessageDescriptor,
     };
     use tokio::sync::broadcast;
 
@@ -946,7 +842,7 @@ mod tests {
             self.events_tx.subscribe()
         }
 
-        fn add_peer_for<M: crate::Message>(&mut self, peer: Peer) {
+        fn add_peer_for<M: MessageDescriptor>(&mut self, peer: Peer) {
             self.peers.entry(M::name()).or_insert(vec![]).push(peer);
         }
     }
@@ -959,11 +855,10 @@ mod tests {
 
     impl MemoryDirectory {
         /// Get a list of messages handled by the directory
-        fn get_handled<M: crate::Message + Send + Sync + 'static>(&self) -> Vec<Arc<M>> {
+        fn get_handled<M: MessageDescriptor + Send + Sync + 'static>(&self) -> Vec<Arc<M>> {
             let inner = self.inner.lock().unwrap();
 
-            let name = M::name();
-            match inner.messages.get(name) {
+            match inner.messages.get(M::name()) {
                 Some(entry) => entry
                     .iter()
                     .filter_map(|m| m.clone().downcast::<M>().ok())
@@ -973,7 +868,7 @@ mod tests {
         }
 
         /// Add a peer that should hande the `Message`
-        fn add_peer_for<M: crate::Message>(&self, peer: Peer) {
+        fn add_peer_for<M: MessageDescriptor>(&self, peer: Peer) {
             let mut inner = self.inner.lock().unwrap();
             inner.add_peer_for::<M>(peer);
         }
@@ -986,15 +881,14 @@ mod tests {
 
     impl MemoryDirectoryHandler {
         /// Ad a `message` to the list of handled messages by the directory
-        fn add_handled<M: crate::Message + Send + Sync + 'static>(&mut self, message: M) {
+        fn add_handled<M: MessageDescriptor + Send + Sync + 'static>(&mut self, message: M) {
             let mut inner = self.inner.lock().unwrap();
-            let name = M::name();
-            let entry = inner.messages.entry(name).or_insert(Vec::new());
+            let entry = inner.messages.entry(M::name()).or_insert(Vec::new());
             entry.push(Arc::new(message));
         }
     }
 
-    #[derive(Debug, Error)]
+    #[derive(Debug, thiserror::Error)]
     enum MemoryTransportError {
         #[error("invalid operation")]
         InvalidOperation,
@@ -1052,7 +946,7 @@ mod tests {
         }
 
         /// Get the list of messages that have been sent through the transport
-        fn get<M: crate::Message + prost::Message + Default>(&self) -> Vec<(M, Vec<Peer>)> {
+        fn get<M: MessageDescriptor + prost::Message + Default>(&self) -> Vec<(M, Vec<Peer>)> {
             let inner = self.inner.lock().unwrap();
             inner
                 .tx_queue
@@ -1096,14 +990,14 @@ mod tests {
             environment: String,
             _directory_rx: directory::EventStream,
             _runtime: Arc<Runtime>,
-        ) -> Result<(), Self::Err> {
+        ) -> std::result::Result<(), Self::Err> {
             let mut inner = self.inner.lock().unwrap();
             inner.peer_id = Some(peer_id);
             inner.environment = Some(environment);
             Ok(())
         }
 
-        fn subscribe(&self) -> Result<Self::MessageStream, Self::Err> {
+        fn subscribe(&self) -> std::result::Result<Self::MessageStream, Self::Err> {
             let inner = self.inner.lock().unwrap();
             match inner.rcv_tx.as_ref() {
                 Some(rcv_tx) => Ok(rcv_tx.subscribe().into()),
@@ -1111,7 +1005,7 @@ mod tests {
             }
         }
 
-        fn start(&mut self) -> Result<(), Self::Err> {
+        fn start(&mut self) -> std::result::Result<(), Self::Err> {
             let mut inner = self.inner.lock().unwrap();
             let (rcv_tx, _) = broadcast::channel(128);
             inner.started = true;
@@ -1119,15 +1013,15 @@ mod tests {
             Ok(())
         }
 
-        fn stop(&mut self) -> Result<(), Self::Err> {
+        fn stop(&mut self) -> std::result::Result<(), Self::Err> {
             Ok(())
         }
 
-        fn peer_id(&self) -> Result<&PeerId, Self::Err> {
+        fn peer_id(&self) -> std::result::Result<&PeerId, Self::Err> {
             unimplemented!()
         }
 
-        fn inbound_endpoint(&self) -> Result<Cow<'_, str>, Self::Err> {
+        fn inbound_endpoint(&self) -> std::result::Result<Cow<'_, str>, Self::Err> {
             Ok(Cow::Owned("tcp://localhost:5050".to_string()))
         }
 
@@ -1136,7 +1030,7 @@ mod tests {
             peers: impl Iterator<Item = Peer>,
             message: TransportMessage,
             _context: SendContext,
-        ) -> Result<(), Self::Err> {
+        ) -> std::result::Result<(), Self::Err> {
             let peers: Vec<_> = peers.collect();
 
             let mut inner = self.inner.lock().unwrap();
@@ -1190,9 +1084,9 @@ mod tests {
             None
         }
 
-        fn get_peers_handling<M: crate::Message>(&self, _message: &M) -> Vec<Peer> {
+        fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
             let inner = self.inner.lock().unwrap();
-            if let Some(peers) = inner.peers.get(M::name()) {
+            if let Some(peers) = inner.peers.get(message.name()) {
                 peers.clone()
             } else {
                 vec![]
@@ -1283,16 +1177,16 @@ mod tests {
                 .with_random_directory(false)
         }
 
-        fn configure(&mut self) -> Result<(), Error> {
+        fn configure(&mut self) -> std::result::Result<(), Error> {
             self.bus
                 .configure(self.peer.id.clone(), self.environment.clone())
         }
 
-        fn start(&mut self) -> Result<(), Error> {
+        fn start(&mut self) -> std::result::Result<(), Error> {
             self.bus.start()
         }
 
-        fn start_with_registration(&mut self) -> Result<(), Error> {
+        fn start_with_registration(&mut self) -> std::result::Result<(), Error> {
             // Queue a RegisterPeerResponse to be sent when receiving a RegisterPeerCommand
             self.transport.queue_message(
                 |m, _peer| m.is::<RegisterPeerCommand>(),
@@ -1359,7 +1253,7 @@ mod tests {
     }
 
     impl Handler<BrewCoffeeCommand> for BrokenBrewCoffeeCommandHandler {
-        type Response = Result<(), (i32, &'static str)>;
+        type Response = std::result::Result<(), (i32, &'static str)>;
 
         fn handle(&mut self, cmd: BrewCoffeeCommand) -> Self::Response {
             self.tx.send(cmd).unwrap();
@@ -1401,7 +1295,7 @@ mod tests {
         assert_eq!(fixture.configure().is_ok(), true);
 
         // Attempt to send a command without starting the bus
-        let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
 
         // Assert that send failed with InvalidOperation
         assert!(matches!(res, Err(Error::InvalidOperation)));
@@ -1569,7 +1463,7 @@ mod tests {
         assert_eq!(fixture.start_with_registration().is_ok(), true);
 
         // Attempt to send a command with empty directory
-        let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
 
         // Assert that send failed with NoPeer
         assert!(matches!(res, Err(Error::Send(SendError::NoPeer))));
@@ -1592,7 +1486,7 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(Peer::test());
 
         // Attempt to send a command to multiple peers
-        let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
 
         // Assert that send failed with MultiplePeers
         assert!(matches!(res, Err(Error::Send(SendError::MultiplePeers(_)))));
@@ -1612,7 +1506,7 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(Peer::test().set_not_responding());
 
         // Attempt to send a command to multiple peers
-        let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
 
         // Assert that send failed with PeerNotResponding
         assert!(matches!(
@@ -1649,7 +1543,7 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(Peer::test());
 
         // Send command
-        let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
 
         // Assert that command was successfully sent
         assert_eq!(res.is_ok(), true);
@@ -1688,7 +1582,7 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
 
         // Send command
-        let res = fixture.bus.send(BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
 
         // Make sure command was successfully sent
         assert_eq!(res.is_ok(), true);

@@ -19,7 +19,7 @@ mod subscription;
 mod sync;
 pub mod transport;
 
-pub use bus::Bus;
+pub use bus::{Bus, Command, CommandError, Event, Message, MessageExt, SendError};
 pub use bus_configuration::BusConfiguration;
 
 pub use crate::core::{
@@ -35,8 +35,8 @@ use message_type_descriptor::MessageTypeDescriptor;
 use message_type_id::{MessageType, MessageTypeId};
 
 pub use zebus_core::{
-    BindingKeyFragment, Command, DispatchHandler, Event, Message, MessageBinding, MessageKind,
-    DEFAULT_DISPATCH_QUEUE,
+    BindingKeyFragment, DispatchHandler, MessageBinding, MessageDescriptor, MessageFlags,
+    MessageKind, Upcast, DEFAULT_DISPATCH_QUEUE,
 };
 pub use zebus_macros::{Command, Event, Handler};
 

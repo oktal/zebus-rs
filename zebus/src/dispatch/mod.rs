@@ -3,13 +3,14 @@ mod future;
 mod queue;
 pub(crate) mod registry;
 
-use std::{any::Any, fmt::Display, sync::Arc};
+use std::{fmt::Display, sync::Arc};
 
 use crate::bus::{CommandError, CommandResult};
 use crate::core::RawMessage;
 use crate::core::{response::HANDLER_ERROR_CODE, Response};
 use crate::lotus::MessageProcessingFailed;
 use crate::proto::IntoProtobuf;
+use crate::Message;
 use crate::{
     transport::{MessageExecutionCompleted, TransportMessage},
     MessageKind, Peer,
@@ -18,24 +19,21 @@ pub(crate) use dispatcher::{Error, MessageDispatcher};
 
 use self::future::DispatchFuture;
 
-/// A type alias for any [`crate::Message`]
-pub(crate) type AnyMessage = dyn Any + Send + Sync;
-
 /// A dispatch request
 #[derive(Debug, Clone)]
 pub(crate) enum DispatchRequest {
     /// Dispatch a [`TransportMessage`] from a remote peer
     Remote(TransportMessage),
 
-    /// Dispatch a local [`crate::Message`]
-    Local(&'static str, Arc<AnyMessage>),
+    /// Dispatch a local [`Message`]
+    Local(Arc<dyn Message>),
 }
 
 impl DispatchRequest {
     fn message_type(&self) -> &str {
         match self {
             DispatchRequest::Remote(message) => message.message_type_id.full_name.as_str(),
-            DispatchRequest::Local(message_type, _) => message_type,
+            DispatchRequest::Local(message) => message.name(),
         }
     }
 }

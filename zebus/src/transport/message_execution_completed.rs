@@ -1,4 +1,7 @@
-use crate::{core::MessagePayload, proto::{self, prost}};
+use crate::{
+    core::MessagePayload,
+    proto::{self, prost},
+};
 
 /// Message sent to notify completion of a command
 #[derive(Clone, prost::Message, crate::Event)]
