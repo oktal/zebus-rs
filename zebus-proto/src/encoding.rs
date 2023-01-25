@@ -23,8 +23,7 @@ use crate::Message;
 /// Encodes an integer value into LEB128 variable length format, and writes it to the buffer.
 /// The buffer must have enough remaining space (maximum 10 bytes).
 #[inline]
-pub fn encode_varint(mut value: u64, buf: &mut dyn BufMut)
-{
+pub fn encode_varint(mut value: u64, buf: &mut dyn BufMut) {
     loop {
         if value < 0x80 {
             buf.put_u8(value as u8);
@@ -274,8 +273,7 @@ impl TryFrom<u64> for WireType {
 /// Encodes a Protobuf field key, which consists of a wire type designator and
 /// the field tag.
 #[inline]
-pub fn encode_key(tag: u32, wire_type: WireType, buf: &mut dyn BufMut)
-{
+pub fn encode_key(tag: u32, wire_type: WireType, buf: &mut dyn BufMut) {
     debug_assert!((MIN_TAG..=MAX_TAG).contains(&tag));
     let key = (tag << 3) | wire_type as u32;
     encode_varint(u64::from(key), buf);
@@ -392,8 +390,7 @@ where
 /// Helper macro which emits an `encode_repeated` function for the type.
 macro_rules! encode_repeated {
     ($ty:ty) => {
-        pub fn encode_repeated(tag: u32, values: &[$ty], buf: &mut dyn BufMut)
-        {
+        pub fn encode_repeated(tag: u32, values: &[$ty], buf: &mut dyn BufMut) {
             for value in values {
                 encode(tag, value, buf);
             }
@@ -578,8 +575,7 @@ macro_rules! fixed_width {
         pub mod $proto_ty {
             use crate::encoding::*;
 
-            pub fn encode(tag: u32, value: &$ty, buf: &mut dyn BufMut)
-            {
+            pub fn encode(tag: u32, value: &$ty, buf: &mut dyn BufMut) {
                 encode_key(tag, $wire_type, buf);
                 buf.$put(*value);
             }
@@ -603,8 +599,7 @@ macro_rules! fixed_width {
 
             encode_repeated!($ty);
 
-            pub fn encode_packed(tag: u32, values: &[$ty], buf: &mut dyn BufMut)
-            {
+            pub fn encode_packed(tag: u32, values: &[$ty], buf: &mut dyn BufMut) {
                 if values.is_empty() {
                     return;
                 }
@@ -759,8 +754,7 @@ macro_rules! length_delimited {
 pub mod string {
     use super::*;
 
-    pub fn encode(tag: u32, value: &String, buf: &mut dyn BufMut)
-    {
+    pub fn encode(tag: u32, value: &String, buf: &mut dyn BufMut) {
         encode_key(tag, WireType::LengthDelimited, buf);
         encode_varint(value.len() as u64, buf);
         buf.put_slice(value.as_bytes());
@@ -872,8 +866,7 @@ impl sealed::BytesAdapter for Bytes {
         *self = buf.copy_to_bytes(buf.remaining());
     }
 
-    fn append_to(&self, buf: &mut dyn BufMut)
-    {
+    fn append_to(&self, buf: &mut dyn BufMut) {
         buf.put_slice(&self[..]);
     }
 }
@@ -894,8 +887,7 @@ impl sealed::BytesAdapter for Vec<u8> {
         self.put(buf);
     }
 
-    fn append_to(&self, buf: &mut dyn BufMut)
-    {
+    fn append_to(&self, buf: &mut dyn BufMut) {
         buf.put_slice(self.as_slice())
     }
 }
@@ -1480,7 +1472,7 @@ mod test {
     where
         T: Debug + Default + PartialEq + Borrow<B>,
         B: ?Sized,
-        E: FnOnce(u32, &B, &mut BytesMut),
+        E: FnOnce(u32, &B, &mut dyn BufMut),
         M: FnMut(WireType, &mut T, &mut Bytes, DecodeContext) -> Result<(), DecodeError>,
         L: FnOnce(u32, &B) -> usize,
     {

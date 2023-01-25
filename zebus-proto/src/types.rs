@@ -20,8 +20,7 @@ use crate::{
 
 /// `google.protobuf.BoolValue`
 impl Message for bool {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if *self {
             bool::encode(1, self, buf)
         }
@@ -57,8 +56,7 @@ impl Message for bool {
 
 /// `google.protobuf.UInt32Value`
 impl Message for u32 {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if *self != 0 {
             uint32::encode(1, self, buf)
         }
@@ -94,8 +92,7 @@ impl Message for u32 {
 
 /// `google.protobuf.UInt64Value`
 impl Message for u64 {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if *self != 0 {
             uint64::encode(1, self, buf)
         }
@@ -131,8 +128,7 @@ impl Message for u64 {
 
 /// `google.protobuf.Int32Value`
 impl Message for i32 {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if *self != 0 {
             int32::encode(1, self, buf)
         }
@@ -168,8 +164,7 @@ impl Message for i32 {
 
 /// `google.protobuf.Int64Value`
 impl Message for i64 {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if *self != 0 {
             int64::encode(1, self, buf)
         }
@@ -205,8 +200,7 @@ impl Message for i64 {
 
 /// `google.protobuf.FloatValue`
 impl Message for f32 {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if *self != 0.0 {
             float::encode(1, self, buf)
         }
@@ -242,8 +236,7 @@ impl Message for f32 {
 
 /// `google.protobuf.DoubleValue`
 impl Message for f64 {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if *self != 0.0 {
             double::encode(1, self, buf)
         }
@@ -279,8 +272,7 @@ impl Message for f64 {
 
 /// `google.protobuf.StringValue`
 impl Message for String {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if !self.is_empty() {
             string::encode(1, self, buf)
         }
@@ -316,8 +308,7 @@ impl Message for String {
 
 /// `google.protobuf.BytesValue`
 impl Message for Vec<u8> {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if !self.is_empty() {
             bytes::encode(1, self, buf)
         }
@@ -353,8 +344,7 @@ impl Message for Vec<u8> {
 
 /// `google.protobuf.BytesValue`
 impl Message for Bytes {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         if !self.is_empty() {
             bytes::encode(1, self, buf)
         }
@@ -390,9 +380,7 @@ impl Message for Bytes {
 
 /// `google.protobuf.Empty`
 impl Message for () {
-    fn encode_raw(&self, _buf: &mut dyn BufMut)
-    {
-    }
+    fn encode_raw(&self, _buf: &mut dyn BufMut) {}
 
     fn merge_field<B>(
         &mut self,

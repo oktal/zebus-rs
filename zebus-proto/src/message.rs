@@ -43,8 +43,7 @@ pub trait Message: Debug + Send + Sync {
     /// Encodes the message to a buffer.
     ///
     /// An error will be returned if the buffer does not have sufficient capacity.
-    fn encode(&self, buf: &mut dyn BufMut) -> Result<(), EncodeError>
-    {
+    fn encode(&self, buf: &mut dyn BufMut) -> Result<(), EncodeError> {
         let required = self.encoded_len();
         let remaining = buf.remaining_mut();
         if required > buf.remaining_mut() {
@@ -56,8 +55,7 @@ pub trait Message: Debug + Send + Sync {
     }
 
     /// Encodes the message to a newly allocated buffer.
-    fn encode_to_vec(&self) -> Vec<u8>
-    {
+    fn encode_to_vec(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.encoded_len());
 
         self.encode_raw(&mut buf);
@@ -67,8 +65,7 @@ pub trait Message: Debug + Send + Sync {
     /// Encodes the message with a length-delimiter to a buffer.
     ///
     /// An error will be returned if the buffer does not have sufficient capacity.
-    fn encode_length_delimited(&self, buf: &mut dyn BufMut) -> Result<(), EncodeError>
-    {
+    fn encode_length_delimited(&self, buf: &mut dyn BufMut) -> Result<(), EncodeError> {
         let len = self.encoded_len();
         let required = len + encoded_len_varint(len as u64);
         let remaining = buf.remaining_mut();
@@ -81,8 +78,7 @@ pub trait Message: Debug + Send + Sync {
     }
 
     /// Encodes the message with a length-delimiter to a newly allocated buffer.
-    fn encode_length_delimited_to_vec(&self) -> Vec<u8>
-    {
+    fn encode_length_delimited_to_vec(&self) -> Vec<u8> {
         let len = self.encoded_len();
         let mut buf = Vec::with_capacity(len + encoded_len_varint(len as u64));
 
@@ -153,8 +149,7 @@ impl<M> Message for Box<M>
 where
     M: Message,
 {
-    fn encode_raw(&self, buf: &mut dyn BufMut)
-    {
+    fn encode_raw(&self, buf: &mut dyn BufMut) {
         (**self).encode_raw(buf)
     }
     fn merge_field<B>(
