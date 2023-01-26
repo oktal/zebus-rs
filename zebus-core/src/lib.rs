@@ -112,6 +112,9 @@ bitflags! {
 }
 
 pub trait MessageDescriptor {
+    /// Get the [`MessageKind`] of this message
+    fn kind() -> MessageKind;
+
     /// Get the flags for this message
     fn flags() -> MessageFlags;
 
@@ -127,6 +130,9 @@ pub trait MessageDescriptor {
 /// A [`Command`] is sent to a unique peer, asking for an action to be performed
 /// An [`Event`] can be published to multiple peers, notifying that an action has been performed
 pub trait Message: Any {
+    /// Get the [`MessageKind`] of this message
+    fn kind(&self) -> MessageKind;
+
     /// Get the flags for this message
     fn flags(&self) -> MessageFlags;
 

@@ -108,10 +108,10 @@ pub fn command(input: TokenStream) -> TokenStream {
 
 #[proc_macro_derive(Event, attributes(zebus))]
 pub fn event(input: TokenStream) -> TokenStream {
-    derive::event(input).unwrap()
+    derive::event(input).unwrap_or_else(|e| e.into_compile_error().into())
 }
 
 #[proc_macro_derive(Handler, attributes(zebus))]
 pub fn handler(input: TokenStream) -> TokenStream {
-    derive::handler(input).unwrap()
+    derive::handler(input).unwrap_or_else(|e| e.into_compile_error().into())
 }

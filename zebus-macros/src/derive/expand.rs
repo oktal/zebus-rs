@@ -169,6 +169,7 @@ fn message_impl(
     ident: &syn::Ident,
     attrs: ZebusStructAttrs,
     routing_fields: &[RoutingField],
+    kind: proc_macro2::TokenStream,
     derive: proc_macro2::TokenStream,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let namespace = attrs.namespace.ok_or(syn::Error::new(
@@ -219,6 +220,10 @@ fn message_impl(
 
     Ok(quote! {
         impl ::zebus_core::MessageDescriptor for #ident {
+            fn kind() -> ::zebus_core::MessageKind {
+                #kind
+            }
+
             fn flags() -> ::zebus_core::MessageFlags {
                 #flags
             }
@@ -233,6 +238,10 @@ fn message_impl(
         }
 
         impl ::zebus_core::Message for #ident {
+            fn kind(&self) -> ::zebus_core::MessageKind {
+                #kind
+            }
+
             fn flags(&self) -> ::zebus_core::MessageFlags {
                 #flags
             }
@@ -254,7 +263,7 @@ fn message_impl(
     })
 }
 
-fn message(input: TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<TokenStream> {
+fn message(input: TokenStream, kind: proc_macro2::TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<TokenStream> {
     let input: DeriveInput = syn::parse(input)?;
     let span = input.span();
     let ident = &input.ident;
@@ -286,7 +295,7 @@ fn message(input: TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<
         .collect::<Result<Vec<_>, _>>()?;
     let routing_fields = routing_fields(ident, &root_attrs, &fields[..])?;
 
-    let message_impl_expanded = message_impl(ident, root_attrs, &routing_fields[..], derive)?;
+    let message_impl_expanded = message_impl(ident, root_attrs, &routing_fields[..], kind, derive)?;
     let message_binding_expanded = message_binding(ident, &routing_fields[..]);
 
     let expanded = quote! {
@@ -299,11 +308,11 @@ fn message(input: TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<
 }
 
 pub(crate) fn command(input: TokenStream) -> syn::Result<TokenStream> {
-    message(input, quote! { ::zebus_core::Command })
+    message(input, quote! { ::zebus_core::MessageKind::Command }, quote! { ::zebus_core::Command })
 }
 
 pub(crate) fn event(input: TokenStream) -> syn::Result<TokenStream> {
-    message(input, quote! { ::zebus_core::Event })
+    message(input, quote! { ::zebus_core::MessageKind::Event }, quote! { ::zebus_core::Event })
 }
 
 pub(crate) fn handler(input: TokenStream) -> syn::Result<TokenStream> {
