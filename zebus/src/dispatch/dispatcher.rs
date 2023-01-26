@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use super::{
-    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchRequest,
+    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchContext,
     Dispatcher, MessageDispatch,
 };
 use crate::DispatchHandler;
@@ -162,7 +162,7 @@ impl DispatchMap {
     fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
         let entry = self
             .message_entries
-            .get_mut(message_dispatch.request.message_type())
+            .get_mut(message_dispatch.message_type())
             .and_then(|dispatch_entry| self.entries.get_mut(dispatch_entry));
 
         entry
@@ -232,8 +232,8 @@ impl MessageDispatcher {
 }
 
 impl Dispatcher for MessageDispatcher {
-    fn dispatch(&mut self, request: DispatchRequest) -> DispatchFuture {
-        let (dispatch, future) = MessageDispatch::new(request);
+    fn dispatch(&mut self, context: DispatchContext) -> DispatchFuture {
+        let (dispatch, future) = MessageDispatch::new(context);
         // TODO(oktal): correctly handle underlying result
         self.dispatch(dispatch).unwrap();
         future
@@ -246,14 +246,41 @@ mod tests {
 
     use super::*;
     use crate::{
-        bus::CommandResult,
+        bus::{self, CommandResult},
         core::MessagePayload,
-        dispatch::{registry, DispatchResult},
+        dispatch::{registry, DispatchRequest, DispatchResult},
         proto::prost,
         transport::TransportMessage,
-        Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer, Response,
-        ResponseMessage,
+        Bus, Command, Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer, PeerId,
+        Response, ResponseMessage,
     };
+
+    struct TestBus;
+    impl Bus for TestBus {
+        fn configure(&self, _peer_id: PeerId, _environment: String) -> bus::Result<()> {
+            Err(bus::Error::InvalidOperation)
+        }
+
+        fn start(&self) -> bus::Result<()> {
+            Err(bus::Error::InvalidOperation)
+        }
+
+        fn stop(&self) -> bus::Result<()> {
+            Err(bus::Error::InvalidOperation)
+        }
+
+        fn send(&self, _command: &dyn Command) -> bus::Result<crate::bus::CommandFuture> {
+            Err(bus::Error::InvalidOperation)
+        }
+
+        fn send_to(
+            &self,
+            _command: &dyn Command,
+            _peer: Peer,
+        ) -> bus::Result<crate::bus::CommandFuture> {
+            Err(bus::Error::InvalidOperation)
+        }
+    }
 
     struct Fixture {
         dispatcher: MessageDispatcher,
@@ -298,7 +325,9 @@ mod tests {
             let (_, message) =
                 TransportMessage::create(&self.peer, self.environment.clone(), message);
             let request = DispatchRequest::Remote(message);
-            let (message_dispatch, future) = MessageDispatch::new(request);
+            let bus = Arc::new(TestBus);
+            let context = DispatchContext::new(request, bus);
+            let (message_dispatch, future) = MessageDispatch::new(context);
             self.dispatcher.dispatch(message_dispatch)?;
             Ok(future)
         }
@@ -308,7 +337,9 @@ mod tests {
             M: Message,
         {
             let request = DispatchRequest::Local(Arc::new(message));
-            let (message_dispatch, future) = MessageDispatch::new(request);
+            let bus = Arc::new(TestBus);
+            let context = DispatchContext::new(request, bus);
+            let (message_dispatch, future) = MessageDispatch::new(context);
             self.dispatcher.dispatch(message_dispatch)?;
             Ok(future)
         }

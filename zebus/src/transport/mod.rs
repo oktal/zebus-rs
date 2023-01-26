@@ -5,8 +5,8 @@ mod send_context;
 mod transport_message;
 pub mod zmq;
 
-use crate::{directory::event::PeerEvent, Peer, PeerId};
-use futures_core::{stream::BoxStream, Stream};
+use crate::{directory, Peer, PeerId};
+use futures_core::Stream;
 use std::{borrow::Cow, sync::Arc};
 
 pub use message_execution_completed::MessageExecutionCompleted;
@@ -16,7 +16,7 @@ use tokio::runtime::Runtime;
 pub use transport_message::TransportMessage;
 
 /// Transport layer trait
-pub trait Transport: Send + 'static {
+pub trait Transport: Send + Sync + 'static {
     /// The associated error type which can be returned from the transport layer
     type Err: std::error::Error + 'static;
 
@@ -29,7 +29,7 @@ pub trait Transport: Send + 'static {
         &mut self,
         peer_id: PeerId,
         environment: String,
-        directory_rx: BoxStream<'static, PeerEvent>,
+        directory_rx: directory::EventStream,
         runtime: Arc<Runtime>,
     ) -> Result<(), Self::Err>;
 

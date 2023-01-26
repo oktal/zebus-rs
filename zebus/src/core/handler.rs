@@ -1,4 +1,10 @@
+use crate::Bus;
+
 use super::IntoResponse;
+
+pub struct Context<'a> {
+    pub bus: &'a dyn Bus,
+}
 
 /// A trait for Zebus message handlers
 ///
@@ -10,4 +16,10 @@ pub trait Handler<T> {
 
     /// Handle `message`
     fn handle(&mut self, message: T) -> Self::Response;
+}
+
+pub trait ContextAwareHandler<T> {
+    type Response: IntoResponse;
+
+    fn handle(&mut self, message: T, ctx: Context<'_>) -> Self::Response;
 }

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     sync::{Arc, Mutex},
 };
 
@@ -11,7 +12,6 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
-use zebus_core::MessageFlags;
 
 use crate::{
     bus::{CommandFuture, CommandResult, Error, RegistrationError, Result, SendError},
@@ -24,11 +24,28 @@ use crate::{
         PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
         Registration,
     },
-    dispatch::{self, DispatchOutput, DispatchRequest, Dispatched, Dispatcher, MessageDispatcher},
-    proto::{prost, FromProtobuf},
+    dispatch::{
+        self, DispatchContext, DispatchOutput, DispatchRequest, Dispatched, Dispatcher,
+        MessageDispatcher,
+    },
+    proto::FromProtobuf,
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
     BusConfiguration, Command, Event, Handler, Message, MessageExt, MessageId, Peer, PeerId,
 };
+
+struct Core<T: Transport, D: Directory> {
+    _runtime: Arc<Runtime>,
+    _configuration: BusConfiguration,
+    self_peer: Peer,
+    environment: String,
+
+    directory: Arc<D>,
+
+    pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
+    snd_tx: mpsc::Sender<SendEntry>,
+    dispatch_tx: mpsc::Sender<LocalDispatchRequest>,
+    _transport: PhantomData<T>,
+}
 
 enum State<T: Transport, D: Directory> {
     Init {
@@ -51,16 +68,7 @@ enum State<T: Transport, D: Directory> {
     },
 
     Started {
-        runtime: Arc<Runtime>,
-        configuration: BusConfiguration,
-        self_peer: Peer,
-        environment: String,
-
-        directory: Arc<D>,
-
-        pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
-        snd_tx: mpsc::Sender<SendEntry>,
-        dispatch_tx: mpsc::Sender<LocalDispatchRequest>,
+        core: Arc<Core<T, D>>,
         rx_handle: JoinHandle<()>,
         tx_handle: JoinHandle<()>,
     },
@@ -186,8 +194,10 @@ impl<T: Transport, D: Directory> ReceiverContext<T, D> {
         )
     }
 
-    async fn dispatch(&mut self, request: DispatchRequest) -> Dispatched {
-        self.dispatcher.dispatch(request).await
+    async fn dispatch(&mut self, request: DispatchRequest, bus: Arc<dyn crate::Bus>) -> Dispatched {
+        self.dispatcher
+            .dispatch(DispatchContext::new(request, bus))
+            .await
     }
 
     async fn send(&mut self, message: &dyn Message) {
@@ -206,7 +216,10 @@ impl<T: Transport, D: Directory> ReceiverContext<T, D> {
 }
 
 /// Reception loop for [`TransportMesssage`] messages
-async fn receiver<T: Transport, D: Directory>(mut ctx: ReceiverContext<T, D>) {
+async fn receiver<T: Transport, D: Directory>(
+    mut ctx: ReceiverContext<T, D>,
+    bus: Arc<dyn crate::Bus>,
+) {
     loop {
         tokio::select! {
 
@@ -233,7 +246,7 @@ async fn receiver<T: Transport, D: Directory>(mut ctx: ReceiverContext<T, D>) {
                 // Handle message
                 else {
                     // Dispatch message
-                    let dispatched = ctx.dispatch(DispatchRequest::Remote(message)).await;
+                    let dispatched = ctx.dispatch(DispatchRequest::Remote(message), bus.clone()).await;
 
                     // Retrieve the output of the dispatch
                     let output: DispatchOutput = dispatched.into();
@@ -261,7 +274,7 @@ async fn receiver<T: Transport, D: Directory>(mut ctx: ReceiverContext<T, D>) {
                 match request {
                     LocalDispatchRequest::Command { tx, message } => {
                         // Dispatch command locally
-                        let dispatched = ctx.dispatch(DispatchRequest::Local(message)).await;
+                        let dispatched = ctx.dispatch(DispatchRequest::Local(message), bus.clone()).await;
 
                         // Retrieve the `CommandResult`
                         let command_result: Option<CommandResult> = dispatched.try_into().ok();
@@ -273,7 +286,7 @@ async fn receiver<T: Transport, D: Directory>(mut ctx: ReceiverContext<T, D>) {
                     },
                     LocalDispatchRequest::Event(message) => {
                         // Dispatch event locally
-                        let _dispatched = ctx.dispatch(DispatchRequest::Local(message)).await;
+                        let _dispatched = ctx.dispatch(DispatchRequest::Local(message), bus.clone()).await;
                     }
                 }
             }
@@ -331,8 +344,101 @@ async fn register<T: Transport>(
     Err(Error::Registration(error))
 }
 
+impl<T: Transport, D: Directory> Core<T, D> {
+    fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+        // Retrieve the list of peers handling the command from the directory
+        let peers = self.directory.get_peers_handling(command.up());
+
+        let self_dst_peer = peers.iter().find(|&p| p.id == self.self_peer.id);
+        // TODO(oktal): add local dispatch toggling
+        // If we are the receiver of the command, do a local dispatch
+        if self_dst_peer.is_some() {
+            // Create the local dispatch request for the command
+            let (request, rx) = LocalDispatchRequest::for_command(command);
+
+            // Send the command
+            // TODO(oktal): use async send
+            self.dispatch_tx
+                .blocking_send(request)
+                .map_err(|_| Error::Send(SendError::Closed))?;
+
+            // Return the future
+            Ok(CommandFuture(rx))
+        } else {
+            // Make sure there is only one peer handling the command
+            let dst_peer = peers
+                .into_iter()
+                .at_most_one()
+                .map_err(|e| Error::Send(SendError::MultiplePeers(e.collect())))?
+                .ok_or(Error::Send(SendError::NoPeer))?;
+
+            // Attempting to send a non-persistent command to a non-responding peer result in
+            // an error
+            if !dst_peer.is_responding && command.is_transient() && !command.is_infrastructure() {
+                Err(Error::Send(SendError::PeerNotResponding(dst_peer)))
+            } else {
+                // Lock the map of pending commands
+                let mut pending_commands = self.pending_commands.lock().unwrap();
+
+                // Send the command
+                SenderContext::<T>::send(
+                    command.up(),
+                    &self.snd_tx,
+                    &self.self_peer,
+                    self.environment.clone(),
+                    &mut pending_commands,
+                    std::iter::once(dst_peer),
+                )
+            }
+        }
+    }
+
+    fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
+        // Attempting to send a non-persistent command to a non-responding peer result in
+        // an error
+        if !peer.is_responding && command.is_transient() && !command.is_infrastructure() {
+            return Err(Error::Send(SendError::PeerNotResponding(peer)));
+        }
+
+        // Lock the map of pending commands
+        let mut pending_commands = self.pending_commands.lock().unwrap();
+
+        // Send the command
+        SenderContext::<T>::send(
+            command.up(),
+            &self.snd_tx,
+            &self.self_peer,
+            self.environment.clone(),
+            &mut pending_commands,
+            std::iter::once(peer),
+        )
+    }
+}
+
+impl<T: Transport, D: Directory> crate::Bus for Core<T, D> {
+    fn configure(&self, _peer_id: PeerId, _environment: String) -> Result<()> {
+        Err(Error::InvalidOperation)
+    }
+
+    fn start(&self) -> Result<()> {
+        Err(Error::InvalidOperation)
+    }
+
+    fn stop(&self) -> Result<()> {
+        Err(Error::InvalidOperation)
+    }
+
+    fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+        self.send(command)
+    }
+
+    fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
+        self.send_to(command, peer)
+    }
+}
+
 struct Bus<T: Transport, D: Directory> {
-    inner: Option<State<T, D>>,
+    inner: Mutex<Option<State<T, D>>>,
 }
 
 impl<T: Transport, D: Directory> Bus<T, D> {
@@ -344,20 +450,22 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         dispatcher: MessageDispatcher,
     ) -> Self {
         Self {
-            inner: Some(State::Init {
+            inner: Mutex::new(Some(State::Init {
                 runtime,
                 configuration,
                 transport,
                 directory,
                 dispatcher,
-            }),
+            })),
         }
     }
 }
 
 impl<T: Transport, D: Directory> Bus<T, D> {
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<()> {
-        let (inner, res) = match self.inner.take() {
+    fn configure(&self, peer_id: PeerId, environment: String) -> Result<()> {
+        let mut state = self.inner.lock().unwrap();
+
+        let (inner, res) = match state.take() {
             Some(State::Init {
                 runtime,
                 configuration,
@@ -397,12 +505,14 @@ impl<T: Transport, D: Directory> Bus<T, D> {
             x => (x, Err(Error::InvalidOperation)),
         };
 
-        self.inner = inner;
+        *state = inner;
         res
     }
 
-    fn start(&mut self) -> Result<()> {
-        let (inner, res) = match self.inner.take() {
+    fn start(&self) -> Result<()> {
+        let mut state = self.inner.lock().unwrap();
+
+        let (inner, res) = match state.take() {
             Some(State::Configured {
                 runtime,
                 configuration,
@@ -473,23 +583,28 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                     dispatcher,
                 );
 
+                let core = Arc::new(Core::<T, D> {
+                    _runtime: Arc::clone(&runtime),
+                    _configuration: configuration,
+                    self_peer,
+                    environment,
+                    directory,
+                    pending_commands,
+                    snd_tx,
+                    dispatch_tx,
+                    _transport: PhantomData,
+                });
+
                 // Start sender
                 let tx_handle = runtime.spawn(sender(snd_ctx));
 
                 // Start receiver
-                let rx_handle = runtime.spawn(receiver(rcv_ctx));
+                let rx_handle = runtime.spawn(receiver(rcv_ctx, core.clone()));
 
                 // Transition to started state
                 (
                     Some(State::Started {
-                        runtime,
-                        configuration,
-                        self_peer,
-                        environment,
-                        directory,
-                        pending_commands,
-                        snd_tx,
-                        dispatch_tx,
+                        core,
                         rx_handle,
                         tx_handle,
                     }),
@@ -499,129 +614,51 @@ impl<T: Transport, D: Directory> Bus<T, D> {
             x => (x, Err(Error::InvalidOperation)),
         };
 
-        self.inner = inner;
+        *state = inner;
         res
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&self) -> Result<()> {
         todo!()
     }
 
-    fn send(&mut self, command: &dyn Command) -> Result<CommandFuture> {
-        match self.inner.as_mut() {
-            Some(State::Started {
-                ref snd_tx,
-                ref pending_commands,
-                ref self_peer,
-                ref directory,
-                ref environment,
-                ref dispatch_tx,
-                ..
-            }) => {
-                // Retrieve the list of peers handling the command from the directory
-                let peers = directory.get_peers_handling(command.up());
+    fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+        let inner = self.inner.lock().unwrap();
 
-                let self_dst_peer = peers.iter().find(|&p| p.id == self_peer.id);
-                // TODO(oktal): add local dispatch toggling
-                // If we are the receiver of the command, do a local dispatch
-                if self_dst_peer.is_some() {
-                    // Create the local dispatch request for the command
-                    let (request, rx) = LocalDispatchRequest::for_command(command);
-
-                    // Send the command
-                    // TODO(oktal): use async send
-                    dispatch_tx
-                        .blocking_send(request)
-                        .map_err(|_| Error::Send(SendError::Closed))?;
-
-                    // Return the future
-                    Ok(CommandFuture(rx))
-                } else {
-                    // Make sure there is only one peer handling the command
-                    let dst_peer = peers
-                        .into_iter()
-                        .at_most_one()
-                        .map_err(|e| Error::Send(SendError::MultiplePeers(e.collect())))?
-                        .ok_or(Error::Send(SendError::NoPeer))?;
-
-                    // Attempting to send a non-persistent command to a non-responding peer result in
-                    // an error
-                    if !dst_peer.is_responding
-                        && command.is_transient()
-                        && !command.is_infrastructure()
-                    {
-                        Err(Error::Send(SendError::PeerNotResponding(dst_peer)))
-                    } else {
-                        // Lock the map of pending commands
-                        let mut pending_commands = pending_commands.lock().unwrap();
-
-                        // Send the command
-                        SenderContext::<T>::send(
-                            command.up(),
-                            snd_tx,
-                            self_peer,
-                            environment.clone(),
-                            &mut pending_commands,
-                            std::iter::once(dst_peer),
-                        )
-                    }
-                }
-            }
+        match inner.as_ref() {
+            Some(State::Started { ref core, .. }) => core.send(command),
             _ => Err(Error::InvalidOperation),
         }
     }
 
-    fn send_to(&mut self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
-        match self.inner.as_mut() {
-            Some(State::Started {
-                ref snd_tx,
-                ref pending_commands,
-                ref self_peer,
-                ref environment,
-                ..
-            }) => {
-                // Attempting to send a non-persistent command to a non-responding peer result in
-                // an error
-                if !peer.is_responding && command.is_transient() && !command.is_infrastructure() {
-                    return Err(Error::Send(SendError::PeerNotResponding(peer)));
-                }
+    fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
+        let inner = self.inner.lock().unwrap();
 
-                // Lock the map of pending commands
-                let mut pending_commands = pending_commands.lock().unwrap();
-
-                // Send the command
-                SenderContext::<T>::send(
-                    command.up(),
-                    snd_tx,
-                    self_peer,
-                    environment.clone(),
-                    &mut pending_commands,
-                    std::iter::once(peer),
-                )
-            }
+        match inner.as_ref() {
+            Some(State::Started { ref core, .. }) => core.send_to(command, peer),
             _ => Err(Error::InvalidOperation),
         }
     }
 }
 
 impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<()> {
+    fn configure(&self, peer_id: PeerId, environment: String) -> Result<()> {
         self.configure(peer_id, environment)
     }
 
-    fn start(&mut self) -> Result<()> {
+    fn start(&self) -> Result<()> {
         self.start()
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&self) -> Result<()> {
         self.stop()
     }
 
-    fn send(&mut self, command: &dyn Command) -> Result<CommandFuture> {
+    fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
         self.send(command)
     }
 
-    fn send_to(&mut self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
+    fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
         self.send_to(command, peer)
     }
 }
@@ -726,7 +763,7 @@ impl<T: Transport> BusBuilder<T> {
         let client = directory::Client::new();
 
         // Create the bus
-        let mut bus = Bus::new(
+        let bus = Bus::new(
             Arc::new(runtime),
             configuration,
             transport,
@@ -762,6 +799,7 @@ mod tests {
     use super::*;
     use crate::bus::CommandError;
     use crate::message_type_id::MessageTypeId;
+    use crate::proto::prost;
     use crate::{
         directory::{
             commands::{RegisterPeerCommand, RegisterPeerResponse},
@@ -915,7 +953,7 @@ mod tests {
         }
 
         /// Queue a message that will be sent back as a response to a transport message
-        fn queue_message<M: crate::Message + prost::Message>(
+        fn queue_message<M: Message>(
             &self,
             predicate: impl Fn(&TransportMessage, &Peer) -> bool + Send + 'static,
             message_fn: impl Fn(TransportMessage) -> M + Send + Sync + 'static,

@@ -247,21 +247,21 @@ impl<T: Message + crate::core::Command> Command for T {}
 impl<T: Message + crate::core::Event> Event for T {}
 
 /// A Bus
-pub trait Bus {
+pub trait Bus: Send + Sync + 'static {
     /// Configure the bus with the provided [`PeerId`] `peer_id` and `environment`
-    fn configure(&mut self, peer_id: PeerId, environment: String) -> Result<()>;
+    fn configure(&self, peer_id: PeerId, environment: String) -> Result<()>;
 
     /// Start the bus
-    fn start(&mut self) -> Result<()>;
+    fn start(&self) -> Result<()>;
 
     /// Stop the bus
-    fn stop(&mut self) -> Result<()>;
+    fn stop(&self) -> Result<()>;
 
     /// Send a [`Command`] to the handling [`Peer`]
-    fn send(&mut self, command: &dyn Command) -> Result<CommandFuture>;
+    fn send(&self, command: &dyn Command) -> Result<CommandFuture>;
 
     /// Send a [`Command`] to a destination [`Peer`]
-    fn send_to(&mut self, command: &dyn Command, peer: Peer) -> Result<CommandFuture>;
+    fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture>;
 }
 
 #[cfg(test)]

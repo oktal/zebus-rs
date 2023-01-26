@@ -2,9 +2,9 @@
 #![feature(map_try_insert)]
 
 mod bcl;
-mod bus;
+pub mod bus;
 mod bus_configuration;
-mod core;
+pub mod core;
 mod directory;
 mod dispatch;
 pub mod lotus;
@@ -23,7 +23,8 @@ pub use bus::{Bus, Command, CommandError, Event, Message, MessageExt, SendError}
 pub use bus_configuration::BusConfiguration;
 
 pub use crate::core::{
-    BusBuilder, CreateError, Error, Handler, HandlerError, IntoResponse, Response, ResponseMessage,
+    BusBuilder, Context, ContextAwareHandler, CreateError, Error, Handler, HandlerError,
+    IntoResponse, Response, ResponseMessage,
 };
 
 pub use message_id::MessageId;

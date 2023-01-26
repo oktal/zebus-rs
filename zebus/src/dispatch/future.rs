@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::{DispatchError, DispatchRequest, Dispatched};
-use crate::{core::Response, transport::TransportMessage, MessageKind};
+use crate::{core::Response, MessageKind};
 
 struct Context {
     request: DispatchRequest,

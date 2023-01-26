@@ -6,15 +6,15 @@ pub(crate) mod registry;
 use std::{fmt::Display, sync::Arc};
 
 use crate::bus::{CommandError, CommandResult};
-use crate::core::RawMessage;
+use crate::core::{self, RawMessage};
 use crate::core::{response::HANDLER_ERROR_CODE, Response};
 use crate::lotus::MessageProcessingFailed;
 use crate::proto::IntoProtobuf;
-use crate::Message;
 use crate::{
     transport::{MessageExecutionCompleted, TransportMessage},
     MessageKind, Peer,
 };
+use crate::{Bus, Message};
 pub(crate) use dispatcher::{Error, MessageDispatcher};
 
 use self::future::DispatchFuture;
@@ -29,6 +29,24 @@ pub(crate) enum DispatchRequest {
     Local(Arc<dyn Message>),
 }
 
+#[derive(Clone)]
+pub(crate) struct DispatchContext {
+    request: DispatchRequest,
+    bus: Arc<dyn Bus>,
+}
+
+impl DispatchContext {
+    pub(crate) fn new(request: DispatchRequest, bus: Arc<dyn Bus>) -> Self {
+        Self { request, bus }
+    }
+
+    pub(crate) fn handler_context(&self) -> core::Context<'_> {
+        core::Context {
+            bus: self.bus.as_ref(),
+        }
+    }
+}
+
 impl DispatchRequest {
     fn message_type(&self) -> &str {
         match self {
@@ -40,18 +58,21 @@ impl DispatchRequest {
 
 /// A [`DispatchRequest`] to be dispatched
 pub(crate) struct MessageDispatch {
-    request: DispatchRequest,
+    context: DispatchContext,
     future: DispatchFuture,
 }
 
 impl MessageDispatch {
-    pub(self) fn new(request: DispatchRequest) -> (Self, DispatchFuture) {
-        let dispatch = Self {
-            request: request.clone(),
-            future: DispatchFuture::new(request),
-        };
+    pub(self) fn new(context: DispatchContext) -> (Self, DispatchFuture) {
+        let future = DispatchFuture::new(context.request.clone());
+
+        let dispatch = Self { context, future };
         let future = dispatch.future.clone();
         (dispatch, future)
+    }
+
+    pub(self) fn message_type(&self) -> &str {
+        self.context.request.message_type()
     }
 
     pub(self) fn set_kind(&self, kind: MessageKind) {
@@ -250,7 +271,7 @@ impl Into<DispatchOutput> for Dispatched {
 }
 
 pub(crate) trait Dispatcher {
-    fn dispatch(&mut self, request: DispatchRequest) -> DispatchFuture;
+    fn dispatch(&mut self, context: DispatchContext) -> DispatchFuture;
 }
 
 pub(crate) trait Dispatch {

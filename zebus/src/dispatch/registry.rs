@@ -5,7 +5,7 @@ use std::{
 
 use super::{Dispatch, DispatchRequest, MessageDispatch};
 use crate::{
-    core::{Handler, IntoResponse, MessagePayload},
+    core::{Context, ContextAwareHandler, Handler, IntoResponse, MessagePayload},
     proto::prost,
     sync::LockCell,
     DispatchHandler, MessageDescriptor, MessageKind, MessageTypeDescriptor,
@@ -44,13 +44,14 @@ where
     {
         let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
             let handler_type = std::any::type_name::<H>();
-            match &dispatch.request {
+            match &dispatch.context.request {
                 DispatchRequest::Remote(message) => {
                     if let Some(Ok(message)) = message.decode_as::<M>() {
                         // Safety:
                         //   1. `handler` is of type `Box<H>
                         //   2. `H` has an explicit bound on `Handler<M>`
                         let res = unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
+                        dispatch.set_kind(M::kind());
                         dispatch.set_response(handler_type, res.into_response());
                     }
                 }
@@ -61,18 +62,53 @@ where
                         //   2. `H` has an explicit bound on `Handler<M>`
                         let res = unsafe { handler.downcast_mut_unchecked::<H>() }
                             .handle(message.clone());
+                        dispatch.set_kind(M::kind());
                         dispatch.set_response(handler_type, res.into_response());
                     }
                 }
             }
-
-            dispatch.set_kind(MessageKind::Command);
         };
 
         self.add::<M>(|| Box::new(invoker));
         self
     }
 
+    pub fn context_aware_handles<M>(&mut self) -> &mut Self
+    where
+        H: ContextAwareHandler<M> + 'static,
+        M: MessageDescriptor + prost::Message + Clone + Default + 'static,
+    {
+        let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
+            let handler_type = std::any::type_name::<H>();
+            match &dispatch.context.request {
+                DispatchRequest::Remote(message) => {
+                    if let Some(Ok(message)) = message.decode_as::<M>() {
+                        // Safety:
+                        //   1. `handler` is of type `Box<H>
+                        //   2. `H` has an explicit bound on `ContextAwareHandler<M>`
+                        let res = unsafe { handler.downcast_mut_unchecked::<H>() }
+                            .handle(message, dispatch.context.handler_context());
+                        dispatch.set_kind(M::kind());
+                        dispatch.set_response(handler_type, res.into_response());
+                    }
+                }
+                DispatchRequest::Local(message) => {
+                    if let Some(message) = message.downcast_ref::<M>() {
+                        // Safety:
+                        //   1. `handler` is of type `Box<H>
+                        //   2. `H` has an explicit bound on `Handler<M>`
+                        let res = unsafe { handler.downcast_mut_unchecked::<H>() }
+                            .handle(message.clone(), dispatch.context.handler_context());
+                        dispatch.set_kind(M::kind());
+                        dispatch.set_response(handler_type, res.into_response());
+                    }
+                }
+            }
+        };
+
+        self.add::<M>(|| Box::new(invoker));
+        self
+    }
     pub(crate) fn split_half(
         self,
         pred: impl Fn(&MessageTypeDescriptor) -> bool,
@@ -150,7 +186,7 @@ where
     H: DispatchHandler + Send + 'static,
 {
     fn dispatch(&mut self, dispatch: &MessageDispatch) {
-        let message_type = dispatch.request.message_type();
+        let message_type = dispatch.message_type();
         if let Some(entry) = self.invokers.get_mut(message_type) {
             self.handler.apply_mut(|h| {
                 (entry.invoker)(dispatch, h.as_mut() as &mut dyn Any);

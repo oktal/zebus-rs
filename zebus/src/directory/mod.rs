@@ -6,8 +6,8 @@ pub mod events;
 mod client;
 pub(crate) use client::Client;
 
-use futures_core::{stream::BoxStream, Stream};
-use std::sync::Arc;
+use futures_core::Stream;
+use std::{pin::Pin, sync::Arc};
 
 pub use events::{PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped};
 
@@ -25,12 +25,12 @@ use self::{
 use crate::{DispatchHandler, Handler, Message, Peer, PeerId};
 
 /// Alias for the [`Directory`] [`PeerEvent`] [`Stream`]
-pub(crate) type EventStream = BoxStream<'static, PeerEvent>;
+pub(crate) type EventStream = Pin<Box<dyn Stream<Item = PeerEvent> + Send + Sync + 'static>>;
 
 /// Trait to read state from the directory
 /// The Directory is where the state of the bus and the peers registered with the bus is stored
 /// This component can be used to retrieve information about the state of the registered peers
-pub trait DirectoryReader {
+pub trait DirectoryReader: Send + Sync + 'static {
     /// Get the [`Peer`] corresponding to a [`PeerId`]
     /// Returns `Some` if the peer exists and has been found or `None` otherwise
     fn get(&self, peer_id: &PeerId) -> Option<Peer>;
@@ -42,9 +42,9 @@ pub trait DirectoryReader {
 
 // TODO(oktal): can we relax `Sync` here ?
 /// A description trait for a directory
-pub(crate) trait Directory: Send + Sync + DirectoryReader + 'static {
+pub(crate) trait Directory: DirectoryReader {
     /// Type of [`PeerEvent`] [`Stream`] that the directory will yield
-    type EventStream: Stream<Item = PeerEvent> + Send + 'static;
+    type EventStream: Stream<Item = PeerEvent> + Send + Sync + 'static;
 
     /// Type of [`Handler`] that will be used to handle commands and events related to the
     /// directory
