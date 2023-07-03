@@ -577,7 +577,7 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use super::*;
-    use crate::proto::{prost, IntoProtobuf, Subscription};
+    use crate::proto::{IntoProtobuf, Subscription};
     use crate::{Message, MessageDescriptor, MessageTypeId};
 
     #[derive(Clone, crate::Command, prost::Message)]

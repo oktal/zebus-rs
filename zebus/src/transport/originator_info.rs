@@ -1,4 +1,4 @@
-use crate::{proto::prost, PeerId};
+use crate::PeerId;
 
 #[derive(Clone, prost::Message)]
 pub struct OriginatorInfo {

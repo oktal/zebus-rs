@@ -339,7 +339,6 @@ mod tests {
         bus::{self, CommandResult},
         core::{HandlerDescriptor, MessagePayload},
         dispatch::{registry, DispatchRequest, DispatchResult},
-        proto::prost,
         subscribe,
         transport::TransportMessage,
         Bus, Command, Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer, PeerId,

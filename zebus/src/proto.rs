@@ -4,11 +4,6 @@ pub use crate::message_type_id::proto::MessageTypeId;
 pub use crate::routing::binding_key::proto::BindingKey;
 pub use crate::subscription::proto::Subscription;
 
-pub mod prost {
-    pub use zebus_proto::{DecodeError, EncodeError, Message};
-    pub use zebus_proto_derive::{Enumeration, Message};
-}
-
 pub mod bcl {
     pub use crate::bcl::*;
 }

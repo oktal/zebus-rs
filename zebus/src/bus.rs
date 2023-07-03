@@ -12,7 +12,6 @@ use thiserror::Error;
 use crate::{
     core::{MessageDescriptor, MessageFlags, MessagePayload, RawMessage, Upcast, UpcastFrom},
     directory, dispatch,
-    proto::prost,
     transport::MessageExecutionCompleted,
     MessageType, Peer, PeerId,
 };
@@ -168,9 +167,19 @@ pub enum Error {
 /// A wrapper arround a [`std::result::Result`] type for bus-specific [`Error`]
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub trait EncodableMessage {
+    fn encode_to_vec(&self) -> Vec<u8>;
+}
+
+impl<M: prost::Message> EncodableMessage for M {
+    fn encode_to_vec(&self) -> Vec<u8> {
+        self.encode_to_vec()
+    }
+}
+
 /// Trait for a message that can be sent through the bus
 pub trait Message:
-    crate::core::Message + prost::Message + DynClone + Send + Sync + 'static
+    crate::core::Message + EncodableMessage + DynClone + Send + Sync + std::fmt::Debug + 'static
 {
 }
 

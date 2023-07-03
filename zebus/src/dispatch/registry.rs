@@ -9,7 +9,6 @@ use crate::{
         ContextAwareHandler, Handler, HandlerDescriptor, IntoResponse, MessagePayload,
         SubscriptionMode,
     },
-    proto::prost,
     sync::LockCell,
     BindingKey, DispatchHandler, MessageDescriptor, MessageTypeDescriptor,
 };

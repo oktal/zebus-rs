@@ -1,4 +1,3 @@
-use crate::proto::prost;
 use crate::MessageDescriptor;
 
 /// Trait for types that expose raw content of protobuf-encoded messages

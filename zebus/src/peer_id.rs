@@ -1,5 +1,3 @@
-use crate::proto::prost;
-
 /// Identifies a named peer throughout bus communication between peers
 #[derive(Clone, Eq, PartialEq, Hash, prost::Message)]
 pub struct PeerId {

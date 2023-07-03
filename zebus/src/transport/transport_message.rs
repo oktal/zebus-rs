@@ -1,6 +1,6 @@
 use crate::core::MessagePayload;
 use crate::message_type_id::MessageTypeId;
-use crate::proto::{self, prost, IntoProtobuf};
+use crate::proto::{self, IntoProtobuf};
 use crate::{Message, Peer};
 
 use crate::{transport::OriginatorInfo, MessageId, PeerId};

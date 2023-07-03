@@ -2,8 +2,6 @@ use crate::Message;
 use crate::{proto::IntoProtobuf, BindingKeyFragment};
 
 pub(crate) mod proto {
-    use crate::proto::prost;
-
     #[derive(Clone, prost::Message)]
     pub struct BindingKey {
         #[prost(string, repeated, tag = "1")]
@@ -88,8 +86,6 @@ impl IntoProtobuf for BindingKey {
 
 #[cfg(test)]
 mod tests {
-    use crate::proto::prost;
-
     use super::*;
     use zebus_core::fragment;
 

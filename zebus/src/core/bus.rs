@@ -841,7 +841,6 @@ mod tests {
     use super::*;
     use crate::bus::CommandError;
     use crate::message_type_id::MessageTypeId;
-    use crate::proto::prost;
     use crate::{
         directory::{
             commands::{RegisterPeerCommand, RegisterPeerResponse},
