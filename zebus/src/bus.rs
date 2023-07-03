@@ -6,6 +6,7 @@ use std::{
     task::{ready, Context, Poll},
 };
 
+use async_trait::async_trait;
 use dyn_clone::DynClone;
 use thiserror::Error;
 
@@ -256,6 +257,7 @@ impl<T: Message + crate::core::Command> Command for T {}
 impl<T: Message + crate::core::Event> Event for T {}
 
 /// A Bus
+#[async_trait]
 pub trait Bus: Send + Sync + 'static {
     /// Configure the bus with the provided [`PeerId`] `peer_id` and `environment`
     fn configure(&self, peer_id: PeerId, environment: String) -> Result<()>;
@@ -267,10 +269,10 @@ pub trait Bus: Send + Sync + 'static {
     fn stop(&self) -> Result<()>;
 
     /// Send a [`Command`] to the handling [`Peer`]
-    fn send(&self, command: &dyn Command) -> Result<CommandFuture>;
+    async fn send(&self, command: &dyn Command) -> Result<CommandFuture>;
 
     /// Send a [`Command`] to a destination [`Peer`]
-    fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture>;
+    async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture>;
 }
 
 #[cfg(test)]

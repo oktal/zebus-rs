@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use async_trait::async_trait;
 use dyn_clone::clone_box;
 use itertools::Itertools;
 use tokio::{
@@ -92,24 +93,31 @@ impl<T: Transport> SenderContext<T> {
         (tx, Self { transport, rx })
     }
 
-    fn send(
+    async fn send(
         message: &dyn Message,
         snd_tx: &mpsc::Sender<SendEntry>,
         self_peer: &Peer,
         environment: String,
-        pending_commands: &mut HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>,
+        pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
         peers: impl IntoIterator<Item = Peer>,
     ) -> Result<CommandFuture> {
+        // Create the reception channel for the result of the command
         let (tx, rx) = oneshot::channel();
+
+        // Create the `TransportMessage`
         let (id, message) = TransportMessage::create(&self_peer, environment.clone(), message);
 
-        pending_commands.entry(id).or_insert(tx);
+        // Insert the command in the collection of pending commands
+        pending_commands.lock().unwrap().entry(id).or_insert(tx);
 
-        // TODO(oktal): use async send
-        let _ = snd_tx.blocking_send(SendEntry {
-            message,
-            peers: peers.into_iter().collect(),
-        });
+        // Enqueue the message
+        snd_tx
+            .send(SendEntry {
+                message,
+                peers: peers.into_iter().collect(),
+            })
+            .await
+            .map_err(|_| Error::Send(SendError::Closed))?;
         Ok(CommandFuture(rx))
     }
 
@@ -377,7 +385,7 @@ fn get_startup_subscriptions(dispatcher: &MessageDispatcher) -> Result<Vec<Subsc
 }
 
 impl<T: Transport, D: Directory> Core<T, D> {
-    fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+    async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
         // Retrieve the list of peers handling the command from the directory
         let peers = self.directory.get_peers_handling(command.up());
 
@@ -389,9 +397,9 @@ impl<T: Transport, D: Directory> Core<T, D> {
             let (request, rx) = LocalDispatchRequest::for_command(command);
 
             // Send the command
-            // TODO(oktal): use async send
             self.dispatch_tx
-                .blocking_send(request)
+                .send(request)
+                .await
                 .map_err(|_| Error::Send(SendError::Closed))?;
 
             // Return the future
@@ -409,31 +417,26 @@ impl<T: Transport, D: Directory> Core<T, D> {
             if !dst_peer.is_responding && command.is_transient() && !command.is_infrastructure() {
                 Err(Error::Send(SendError::PeerNotResponding(dst_peer)))
             } else {
-                // Lock the map of pending commands
-                let mut pending_commands = self.pending_commands.lock().unwrap();
-
                 // Send the command
                 SenderContext::<T>::send(
                     command.up(),
                     &self.snd_tx,
                     &self.self_peer,
                     self.environment.clone(),
-                    &mut pending_commands,
+                    self.pending_commands.clone(),
                     std::iter::once(dst_peer),
                 )
+                .await
             }
         }
     }
 
-    fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
+    async fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
         // Attempting to send a non-persistent command to a non-responding peer result in
         // an error
         if !peer.is_responding && command.is_transient() && !command.is_infrastructure() {
             return Err(Error::Send(SendError::PeerNotResponding(peer)));
         }
-
-        // Lock the map of pending commands
-        let mut pending_commands = self.pending_commands.lock().unwrap();
 
         // Send the command
         SenderContext::<T>::send(
@@ -441,12 +444,14 @@ impl<T: Transport, D: Directory> Core<T, D> {
             &self.snd_tx,
             &self.self_peer,
             self.environment.clone(),
-            &mut pending_commands,
+            self.pending_commands.clone(),
             std::iter::once(peer),
         )
+        .await
     }
 }
 
+#[async_trait]
 impl<T: Transport, D: Directory> crate::Bus for Core<T, D> {
     fn configure(&self, _peer_id: PeerId, _environment: String) -> Result<()> {
         Err(Error::InvalidOperation)
@@ -460,12 +465,12 @@ impl<T: Transport, D: Directory> crate::Bus for Core<T, D> {
         Err(Error::InvalidOperation)
     }
 
-    fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
-        self.send(command)
+    async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+        self.send(command).await
     }
 
-    fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
-        self.send_to(command, peer)
+    async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
+        self.send_to(command, peer).await
     }
 }
 
@@ -664,25 +669,26 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         todo!()
     }
 
-    fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
-        let inner = self.inner.lock().unwrap();
-
-        match inner.as_ref() {
-            Some(State::Started { ref core, .. }) => core.send(command),
-            _ => Err(Error::InvalidOperation),
-        }
+    async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+        let core = self.core()?;
+        core.send(command).await
     }
 
-    fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
-        let inner = self.inner.lock().unwrap();
+    async fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
+        let core = self.core()?;
+        core.send_to(command, peer).await
+    }
 
+    fn core(&self) -> Result<Arc<Core<T, D>>> {
+        let inner = self.inner.lock().unwrap();
         match inner.as_ref() {
-            Some(State::Started { ref core, .. }) => core.send_to(command, peer),
+            Some(State::Started { core, .. }) => Ok(core.clone()),
             _ => Err(Error::InvalidOperation),
         }
     }
 }
 
+#[async_trait]
 impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
     fn configure(&self, peer_id: PeerId, environment: String) -> Result<()> {
         self.configure(peer_id, environment)
@@ -696,12 +702,12 @@ impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
         self.stop()
     }
 
-    fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
-        self.send(command)
+    async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+        self.send(command).await
     }
 
-    fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
-        self.send_to(command, peer)
+    async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
+        self.send_to(command, peer).await
     }
 }
 
