@@ -6,7 +6,8 @@ use super::{
     future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchContext,
     Dispatcher, MessageDispatch,
 };
-use crate::DispatchHandler;
+use crate::MessageTypeDescriptor;
+use crate::{core::SubscriptionMode, BindingKey, DispatchHandler};
 
 /// Errors that can be returned by the [`MessageDispatcher`]
 #[derive(Debug, Error)]
@@ -15,12 +16,20 @@ pub enum Error {
     #[error("dispatch queue error {0}")]
     Queue(super::queue::Error),
 
-    /// Attempted to register a handler for a message to a different dispatch queue
-    #[error("attempted to register message {message_type} to a different dispatch queue {dispatch_queue}, was previously registered to {previous}")]
-    DoubleRegister {
-        message_type: &'static str,
+    /// No dispatcher could be found for a given message
+    #[error("could not find dispatcher for message {0}")]
+    DispatcherNotFound(String),
+
+    /// A message handler was already registered with a different [`SubscriptionMode`]
+    #[error("attempted to register message {0} with a different subscription mode")]
+    SubscriptionModeConflict(String),
+
+    /// A message handler was already registered with a different dispatch queue
+    #[error("attempted to register message {message_type} to dispatch queue {dispatch_queue}. Already registered to {previous_dispatch_queue}")]
+    DispatchQueueConflict {
+        message_type: String,
         dispatch_queue: &'static str,
-        previous: &'static str,
+        previous_dispatch_queue: &'static str,
     },
 
     /// An operation was attempted while the [`MessageDispatcher`] was in an invalid state for the
@@ -35,19 +44,24 @@ pub enum Error {
 ///
 /// Other types of messages will be dispatched asynchronously through a named
 /// [`DispatchQueue`]
-enum DispatchType {
+enum DispatchFlavor {
+    /// A synchronous dispatcher that will call the message handler directly from the context of
+    /// the calling thread
     Sync(Vec<Box<dyn Dispatch + Send>>),
+
+    /// An asynchronous dispatcher that will call the message handler from the context of a
+    /// [`DispatchQueue`]
     Async(DispatchQueue),
 }
 
-impl DispatchType {
+impl DispatchFlavor {
     fn add<H>(&mut self, registry: Box<Registry<H>>) -> Result<(), Error>
     where
         H: DispatchHandler + Send + 'static,
     {
         match self {
-            DispatchType::Sync(dispatch) => Ok(dispatch.push(registry)),
-            DispatchType::Async(queue) => queue.add(registry).map_err(Error::Queue),
+            DispatchFlavor::Sync(dispatch) => Ok(dispatch.push(registry)),
+            DispatchFlavor::Async(queue) => queue.add(registry).map_err(Error::Queue),
         }
     }
 
@@ -71,17 +85,36 @@ impl DispatchType {
     }
 }
 
+/// Dispatch information for a [`Message`]
+struct MessageDispatchInfo {
+    /// The descriptor of the message to dispatch
+    descriptor: MessageTypeDescriptor,
+
+    /// Startup subscription mode
+    subscription_mode: SubscriptionMode,
+
+    /// Startup subscription bindings
+    bindings: Vec<BindingKey>,
+}
+
 /// A collection of indexed dispatchers by [`MessageTypeId`]
 struct DispatchMap {
-    entries: HashMap<&'static str, DispatchType>,
-    message_entries: HashMap<&'static str, &'static str>,
+    /// Maps a named dispatch queue to the associated dispatcher
+    message_dispatchers: HashMap<&'static str, DispatchFlavor>,
+
+    /// Maps a [`MessageTypeId`] to a named dispatch queue
+    message_dispatch_queues: HashMap<String, &'static str>,
+
+    /// Maps a [`MessageTypeId`] to its associated dispatching information
+    dispatch_info: HashMap<String, MessageDispatchInfo>,
 }
 
 impl DispatchMap {
     fn new() -> Self {
         Self {
-            entries: HashMap::new(),
-            message_entries: HashMap::new(),
+            message_dispatchers: HashMap::new(),
+            message_dispatch_queues: HashMap::new(),
+            dispatch_info: HashMap::new(),
         }
     }
 
@@ -107,13 +140,13 @@ impl DispatchMap {
 
         if let Some(async_registry) = async_registry {
             self.add_with(Box::new(async_registry), H::DISPATCH_QUEUE, |name| {
-                DispatchType::Async(DispatchQueue::new(name.to_string()))
+                DispatchFlavor::Async(DispatchQueue::new(name.to_string()))
             })?;
         }
 
         if let Some(sync_registry) = sync_registry {
             self.add_with(Box::new(sync_registry), "__zebus_internal", |_| {
-                DispatchType::Sync(vec![])
+                DispatchFlavor::Sync(vec![])
             })?;
         }
 
@@ -121,8 +154,8 @@ impl DispatchMap {
     }
 
     fn start(&mut self) -> Result<(), Error> {
-        for (_, entry) in &mut self.entries {
-            entry.start()?;
+        for dispatcher in &mut self.message_dispatchers.values_mut() {
+            dispatcher.start()?;
         }
 
         Ok(())
@@ -132,41 +165,71 @@ impl DispatchMap {
         &mut self,
         registry: Box<Registry<H>>,
         dispatch_queue: &'static str,
-        factory: impl FnOnce(&'static str) -> DispatchType,
+        factory: impl FnOnce(&'static str) -> DispatchFlavor,
     ) -> Result<(), Error>
     where
         H: DispatchHandler + Send + 'static,
     {
-        // Register all handled messages to make sure the user did not attempt to register a message handler to a different dispatch queue
-        for handled_message in registry.handled_messages() {
-            match self.message_entries.entry(handled_message) {
-                std::collections::hash_map::Entry::Occupied(e) => Err(Error::DoubleRegister {
-                    message_type: handled_message,
-                    dispatch_queue,
-                    previous: e.key(),
-                }),
+        for (handled_message, subscription_mode, bindings) in registry.handled_messages() {
+            // Attempt to register a message to its dispatch queue and make sure it was not already
+            // registered with an other dispatch queue
+            match self
+                .message_dispatch_queues
+                .entry(handled_message.full_name.clone())
+            {
+                // The message is already registered with an other dispatch queue
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    Err(Error::DispatchQueueConflict {
+                        message_type: handled_message.full_name.clone(),
+                        dispatch_queue,
+                        previous_dispatch_queue: e.get(),
+                    })
+                }
+                // Insert the message
                 std::collections::hash_map::Entry::Vacant(e) => {
                     e.insert(dispatch_queue);
                     Ok(())
                 }
             }?;
+
+            // Register the message dispatching information
+            let dispatch_info = self
+                .dispatch_info
+                .entry(handled_message.full_name.clone())
+                .or_insert(MessageDispatchInfo {
+                    descriptor: handled_message.clone(),
+                    subscription_mode,
+                    bindings: vec![],
+                });
+
+            // Make sure the startup subscription does not conflict with a previous registration
+            if dispatch_info.subscription_mode != subscription_mode {
+                return Err(Error::SubscriptionModeConflict(
+                    handled_message.full_name.clone(),
+                ));
+            }
+
+            // Add the startup bindings to the dispatching information
+            dispatch_info.bindings.extend_from_slice(bindings);
         }
 
-        // Create the dispatch entry if it does not exist and add the registry
-        self.entries
+        // Create the dispatcher if it does not exist and add the registry to it
+        self.message_dispatchers
             .entry(dispatch_queue)
             .or_insert(factory(dispatch_queue))
             .add(registry)
     }
 
     fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
-        let entry = self
-            .message_entries
+        let dispatcher = self
+            .message_dispatch_queues
             .get_mut(message_dispatch.message_type())
-            .and_then(|dispatch_entry| self.entries.get_mut(dispatch_entry));
+            .and_then(|dispatch_entry| self.message_dispatchers.get_mut(dispatch_entry));
 
-        entry
-            .ok_or(Error::InvalidOperation)
+        dispatcher
+            .ok_or(Error::DispatcherNotFound(
+                message_dispatch.message_type().to_string(),
+            ))
             .and_then(|e| e.dispatch(message_dispatch))
     }
 }
@@ -221,6 +284,33 @@ impl MessageDispatcher {
         res
     }
 
+    pub(crate) fn handled_mesages<'a>(
+        &'a self,
+    ) -> Result<
+        impl Iterator<
+            Item = (
+                &'a MessageTypeDescriptor,
+                SubscriptionMode,
+                &'a [BindingKey],
+            ),
+        >,
+        Error,
+    > {
+        match self.inner.as_ref() {
+            Some(Inner::Init(ref dispatch)) | Some(Inner::Started(ref dispatch)) => Ok(dispatch
+                .dispatch_info
+                .iter()
+                .map(|(_message_type, dispatch_info)| {
+                    (
+                        &dispatch_info.descriptor,
+                        dispatch_info.subscription_mode,
+                        &dispatch_info.bindings[..],
+                    )
+                })),
+            _ => Err(Error::InvalidOperation),
+        }
+    }
+
     fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
         let dispatch_map = match self.inner.as_mut() {
             Some(Inner::Init(map)) | Some(Inner::Started(map)) => Ok(map),
@@ -247,13 +337,16 @@ mod tests {
     use super::*;
     use crate::{
         bus::{self, CommandResult},
-        core::MessagePayload,
+        core::{HandlerDescriptor, MessagePayload},
         dispatch::{registry, DispatchRequest, DispatchResult},
         proto::prost,
+        subscribe,
         transport::TransportMessage,
         Bus, Command, Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer, PeerId,
         Response, ResponseMessage,
     };
+
+    use zebus_core::binding_key;
 
     struct TestBus;
     impl Bus for TestBus {
@@ -364,6 +457,52 @@ mod tests {
     #[derive(crate::Handler)]
     struct HandlerWithDefaultDispatchQueue {}
 
+    #[derive(crate::Command, prost::Message)]
+    #[zebus(namespace = "Abc.Test")]
+    struct AutoSubscribeCommand {
+        #[prost(uint32, tag = 1)]
+        id: u32,
+    }
+
+    #[derive(crate::Command, prost::Message)]
+    #[zebus(namespace = "Abc.Test", routable)]
+    struct AutoSubscribeCommandWithRouting {
+        #[prost(string, tag = 1)]
+        #[zebus(routing_position = 1)]
+        month: String,
+    }
+
+    #[derive(crate::Command, prost::Message)]
+    #[zebus(namespace = "Abc.Test")]
+    struct ManualSubscribeCommand {
+        #[prost(uint32, tag = 1)]
+        id: u32,
+    }
+
+    #[derive(crate::Handler)]
+    struct TestHandler {}
+
+    #[subscribe(auto)]
+    impl crate::Handler<AutoSubscribeCommand> for TestHandler {
+        type Response = ();
+
+        fn handle(&mut self, _message: AutoSubscribeCommand) -> Self::Response {}
+    }
+
+    #[subscribe(auto, binding = "october")]
+    impl crate::Handler<AutoSubscribeCommandWithRouting> for TestHandler {
+        type Response = ();
+
+        fn handle(&mut self, _message: AutoSubscribeCommandWithRouting) -> Self::Response {}
+    }
+
+    #[subscribe(manual)]
+    impl crate::Handler<ManualSubscribeCommand> for TestHandler {
+        type Response = ();
+
+        fn handle(&mut self, _message: ManualSubscribeCommand) -> Self::Response {}
+    }
+
     #[derive(prost::Message, crate::Command, Clone)]
     #[zebus(namespace = "Abc.Test")]
     struct ParseCommand {
@@ -397,12 +536,14 @@ mod tests {
     #[derive(crate::Handler)]
     struct ParseCommandResponseErrorHandler;
 
+    #[subscribe(manual)]
     impl Handler<ParseCommand> for ParseCommandHandler {
         type Response = ();
 
         fn handle(&mut self, _message: ParseCommand) {}
     }
 
+    #[subscribe(manual)]
     impl Handler<ParseCommand> for ParseCommandResponseErrorHandler {
         type Response = Result<ResponseMessage<ParseResponse>, HandlerError<ParseError>>;
 
@@ -435,6 +576,30 @@ mod tests {
             <HandlerWithDefaultDispatchQueue as DispatchHandler>::DISPATCH_QUEUE,
             zebus_core::DEFAULT_DISPATCH_QUEUE
         );
+    }
+
+    #[test]
+    fn dispatch_auto_subscribe() {
+        assert_eq!(
+            <TestHandler as HandlerDescriptor<AutoSubscribeCommand>>::subscription_mode(),
+            SubscriptionMode::Auto
+        )
+    }
+
+    #[test]
+    fn dispatch_manual_subscribe() {
+        assert_eq!(
+            <TestHandler as HandlerDescriptor<ManualSubscribeCommand>>::subscription_mode(),
+            SubscriptionMode::Manual
+        )
+    }
+
+    #[test]
+    fn dispatch_subscribe_bindings() {
+        assert_eq!(
+            <TestHandler as HandlerDescriptor<AutoSubscribeCommandWithRouting>>::bindings(),
+            vec![binding_key!["october"]]
+        )
     }
 
     #[tokio::test]

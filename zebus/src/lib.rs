@@ -39,6 +39,6 @@ pub use zebus_core::{
     BindingKeyFragment, DispatchHandler, MessageBinding, MessageDescriptor, MessageFlags,
     MessageKind, Upcast, DEFAULT_DISPATCH_QUEUE,
 };
-pub use zebus_macros::{Command, Event, Handler};
+pub use zebus_macros::{subscribe, Command, Event, Handler};
 
 pub use routing::BindingKey;

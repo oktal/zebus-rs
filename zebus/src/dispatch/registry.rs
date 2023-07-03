@@ -5,16 +5,21 @@ use std::{
 
 use super::{Dispatch, DispatchRequest, MessageDispatch};
 use crate::{
-    core::{Context, ContextAwareHandler, Handler, IntoResponse, MessagePayload},
+    core::{
+        ContextAwareHandler, Handler, HandlerDescriptor, IntoResponse, MessagePayload,
+        SubscriptionMode,
+    },
     proto::prost,
     sync::LockCell,
-    DispatchHandler, MessageDescriptor, MessageKind, MessageTypeDescriptor,
+    BindingKey, DispatchHandler, MessageDescriptor, MessageTypeDescriptor,
 };
 
 type InvokerFn = dyn Fn(&MessageDispatch, &mut (dyn Any + 'static)) + Send;
 
 pub struct MessageInvoker {
     descriptor: MessageTypeDescriptor,
+    subscription_mode: SubscriptionMode,
+    bindings: Vec<BindingKey>,
     invoker: Box<InvokerFn>,
 }
 
@@ -109,6 +114,7 @@ where
         self.add::<M>(|| Box::new(invoker));
         self
     }
+
     pub(crate) fn split_half(
         self,
         pred: impl Fn(&MessageTypeDescriptor) -> bool,
@@ -162,15 +168,32 @@ where
         }
     }
 
-    pub(crate) fn handled_messages(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.invokers.keys().map(|k| *k)
+    pub(crate) fn handled_messages<'a>(
+        &'a self,
+    ) -> impl Iterator<
+        Item = (
+            &'a MessageTypeDescriptor,
+            SubscriptionMode,
+            &'a [BindingKey],
+        ),
+    > + 'a {
+        self.invokers
+            .values()
+            .map(|v| (&v.descriptor, v.subscription_mode, &v.bindings[..]))
     }
 
-    fn add<M: MessageDescriptor + 'static>(&mut self, invoker_fn: impl FnOnce() -> Box<InvokerFn>) {
+    fn add<M>(&mut self, invoker_fn: impl FnOnce() -> Box<InvokerFn>)
+    where
+        M: MessageDescriptor + 'static,
+        H: HandlerDescriptor<M>,
+    {
+        // TODO(oktal): validate that the message is routable if we have bindings for it
         match self.invokers.entry(M::name()) {
             Entry::Occupied(_) => None,
             Entry::Vacant(e) => Some(e.insert(MessageInvoker {
                 descriptor: MessageTypeDescriptor::of::<M>(),
+                subscription_mode: H::subscription_mode(),
+                bindings: H::bindings().into_iter().map(Into::into).collect(),
                 invoker: Box::new(invoker_fn()),
             })),
         }

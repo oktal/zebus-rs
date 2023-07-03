@@ -13,7 +13,7 @@ use crate::{
     core::MessagePayload,
     proto::{prost, IntoProtobuf},
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
-    Peer,
+    Peer, Subscription,
 };
 
 #[derive(Debug, Error)]
@@ -63,6 +63,7 @@ impl Registration {
 async fn try_register<T: Transport>(
     transport: &mut T,
     self_peer: Peer,
+    subscriptions: Vec<Subscription>,
     environment: String,
     directory_endpoint: Peer,
 ) -> Result<Registration, RegistrationError> {
@@ -71,7 +72,7 @@ async fn try_register<T: Transport>(
 
     let descriptor = PeerDescriptor {
         peer: self_peer.clone(),
-        subscriptions: vec![],
+        subscriptions,
         is_persistent: false,
         timestamp_utc: Some(utc_now.into()),
         has_debugger_attached: Some(false),
@@ -136,11 +137,18 @@ async fn try_register<T: Transport>(
 pub(crate) async fn register<T: Transport>(
     transport: &mut T,
     self_peer: Peer,
+    subscriptions: Vec<Subscription>,
     environment: String,
     directory_endpoint: Peer,
     timeout: Duration,
 ) -> Result<Registration, RegistrationError> {
-    let future = try_register(transport, self_peer, environment, directory_endpoint);
+    let future = try_register(
+        transport,
+        self_peer,
+        subscriptions,
+        environment,
+        directory_endpoint,
+    );
     match tokio::time::timeout(timeout, future).await {
         Ok(registration) => registration,
         Err(_) => Err(RegistrationError::Timeout(timeout)),

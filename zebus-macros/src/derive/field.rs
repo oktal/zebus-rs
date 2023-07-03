@@ -1,4 +1,5 @@
-use super::attrs::{find_attrs, ZebusFieldAttrs};
+use super::attrs::ZebusFieldAttrs;
+use crate::attrs::find_attrs;
 
 pub(crate) enum Field {
     Normal(syn::Field),

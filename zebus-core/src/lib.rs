@@ -60,6 +60,26 @@ pub struct BindingKey {
     pub fragments: Option<Vec<BindingKeyFragment>>,
 }
 
+impl BindingKey {
+    pub fn from_raw_parts(fragments: Vec<BindingKeyFragment>) -> Self {
+        Self {
+            fragments: Some(fragments),
+        }
+    }
+}
+
+impl FromStr for BindingKey {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let fragments: Result<Vec<_>, _> = s.split('.').map(FromStr::from_str).collect();
+
+        Ok(Self {
+            fragments: Some(fragments?),
+        })
+    }
+}
+
 impl From<Vec<String>> for BindingKey {
     fn from(value: Vec<String>) -> Self {
         let fragments = value.into_iter().map(BindingKeyFragment::Value).collect();
@@ -111,6 +131,7 @@ bitflags! {
     }
 }
 
+/// Descriptor for a [`Message`]
 pub trait MessageDescriptor {
     /// Get the [`MessageKind`] of this message
     fn kind() -> MessageKind;
@@ -203,6 +224,26 @@ macro_rules! binding_key {
             fragments: Some(vec![$(::zebus_core::fragment![$x]),+])
         }
     };
+}
+
+/// Specifies the startup subscription mode for a message handler
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SubscriptionMode {
+    /// A [`Subscription`] for the message handler will automatically be performed on startup
+    Auto,
+
+    /// The subscription for the message handler must be manually performed through the
+    /// [`bus::subscribe`)[crate::Bus::subscribe] function
+    Manual,
+}
+
+/// Descriptor for a [`DispatchHandler`]
+pub trait HandlerDescriptor<T> {
+    /// The startup subscription mode for the message handler
+    fn subscription_mode() -> SubscriptionMode;
+
+    /// Get the binding keys for automatic subscription mode on startup for the message handler
+    fn bindings() -> Vec<BindingKey>;
 }
 
 /// Name of the default dispatch queue

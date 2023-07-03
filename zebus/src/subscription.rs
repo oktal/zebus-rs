@@ -22,6 +22,13 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    pub(crate) fn new(message_type_id: impl Into<MessageTypeId>, binding_key: BindingKey) -> Self {
+        Self {
+            message_type_id: message_type_id.into(),
+            binding_key,
+        }
+    }
+
     pub fn bind<M: MessageDescriptor + MessageBinding + 'static>(
         bind_fn: impl FnOnce(&mut <M as MessageBinding>::Binding),
     ) -> Self {

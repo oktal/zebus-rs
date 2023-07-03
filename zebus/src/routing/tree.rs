@@ -369,17 +369,6 @@ mod tests {
     use zebus_core::binding_key;
 
     #[test]
-    fn doc() {
-        let mut tree = PeerSubscriptionTree::new();
-        tree.add(Peer::test(), &binding_key!["france"].into());
-        tree.add(Peer::test(), &binding_key!["france", "october", *].into());
-        tree.add(Peer::test(), &binding_key![*, "june", 21].into());
-        tree.add(Peer::test(), &binding_key!["belgium", *].into());
-
-        println!("{tree}");
-    }
-
-    #[test]
     fn match_empty() {
         let peer = Peer::test();
         let mut tree = PeerSubscriptionTree::new();
@@ -424,8 +413,6 @@ mod tests {
             peer3.clone(),
             &binding_key!["my_other_routing", "september", *].into(),
         );
-
-        println!("{}", tree);
 
         let peers = tree.get_peers(&BindingKey::empty());
         assert_eq!(peers.len(), 3);

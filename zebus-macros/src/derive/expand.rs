@@ -4,10 +4,9 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{spanned::Spanned, Data, DataStruct, DeriveInput, Fields};
 
-use super::{
-    attrs::{find_attrs, ZebusStructAttrs},
-    field::Field,
-};
+use crate::attrs::find_attrs;
+
+use super::{attrs::ZebusStructAttrs, field::Field};
 
 /// A field with a `routing_position` attribute
 struct RoutingField {
@@ -263,7 +262,11 @@ fn message_impl(
     })
 }
 
-fn message(input: TokenStream, kind: proc_macro2::TokenStream, derive: proc_macro2::TokenStream) -> syn::Result<TokenStream> {
+fn message(
+    input: TokenStream,
+    kind: proc_macro2::TokenStream,
+    derive: proc_macro2::TokenStream,
+) -> syn::Result<TokenStream> {
     let input: DeriveInput = syn::parse(input)?;
     let span = input.span();
     let ident = &input.ident;
@@ -308,11 +311,19 @@ fn message(input: TokenStream, kind: proc_macro2::TokenStream, derive: proc_macr
 }
 
 pub(crate) fn command(input: TokenStream) -> syn::Result<TokenStream> {
-    message(input, quote! { ::zebus_core::MessageKind::Command }, quote! { ::zebus_core::Command })
+    message(
+        input,
+        quote! { ::zebus_core::MessageKind::Command },
+        quote! { ::zebus_core::Command },
+    )
 }
 
 pub(crate) fn event(input: TokenStream) -> syn::Result<TokenStream> {
-    message(input, quote! { ::zebus_core::MessageKind::Event }, quote! { ::zebus_core::Event })
+    message(
+        input,
+        quote! { ::zebus_core::MessageKind::Event },
+        quote! { ::zebus_core::Event },
+    )
 }
 
 pub(crate) fn handler(input: TokenStream) -> syn::Result<TokenStream> {

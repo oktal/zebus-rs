@@ -55,7 +55,6 @@ pub(crate) trait Directory: DirectoryReader {
         + Handler<PeerResponding>
         + Handler<PeerSubscriptionsForTypeUpdated>
         + Handler<PingPeerCommand>
-        + Handler<RegisterPeerResponse>
         + DispatchHandler
         + Send
         + 'static;
@@ -65,6 +64,9 @@ pub(crate) trait Directory: DirectoryReader {
 
     /// Create a new subscription to the peer events stream
     fn subscribe(&self) -> Self::EventStream;
+
+    /// Handle [`RegisterPeerResponse`] response from the directory server
+    fn handle_registration(&self, response: RegisterPeerResponse);
 
     /// Create a new instance of a [`Self::Handler`]
     fn handler(&self) -> Box<Self::Handler>;

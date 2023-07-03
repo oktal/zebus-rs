@@ -6,6 +6,7 @@ use crate::{
     core::MessagePayload,
     proto::{self, PeerDescriptor},
     routing::tree::PeerSubscriptionTree,
+    subscribe,
     transport::TransportMessage,
     BindingKey, Handler, Message, MessageType, Peer, PeerId,
 };
@@ -326,6 +327,7 @@ impl Inner {
     }
 }
 
+#[subscribe(auto)]
 impl Handler<PeerStarted> for Inner {
     type Response = ();
 
@@ -335,6 +337,7 @@ impl Handler<PeerStarted> for Inner {
     }
 }
 
+#[subscribe(auto)]
 impl Handler<PeerStopped> for Inner {
     type Response = ();
 
@@ -353,6 +356,7 @@ impl Handler<PeerStopped> for Inner {
     }
 }
 
+#[subscribe(auto)]
 impl Handler<PeerDecommissioned> for Inner {
     type Response = ();
 
@@ -364,6 +368,7 @@ impl Handler<PeerDecommissioned> for Inner {
     }
 }
 
+#[subscribe(auto)]
 impl Handler<PeerNotResponding> for Inner {
     type Response = ();
 
@@ -378,6 +383,7 @@ impl Handler<PeerNotResponding> for Inner {
     }
 }
 
+#[subscribe(auto)]
 impl Handler<PeerResponding> for Inner {
     type Response = ();
 
@@ -392,6 +398,7 @@ impl Handler<PeerResponding> for Inner {
     }
 }
 
+#[subscribe(auto)]
 impl Handler<PeerSubscriptionsForTypeUpdated> for Inner {
     type Response = ();
 
@@ -474,6 +481,13 @@ impl Directory for Client {
         inner.subscribe().into()
     }
 
+    fn handle_registration(&self, response: RegisterPeerResponse) {
+        let mut inner = self.inner.lock().unwrap();
+        for descriptor in response.peers {
+            inner.add_or_update(descriptor).forget();
+        }
+    }
+
     fn handler(&self) -> Box<Self::Handler> {
         Box::new(DirectoryHandler {
             inner: Arc::clone(&self.inner),
@@ -489,17 +503,7 @@ impl Clone for Client {
     }
 }
 
-impl crate::Handler<RegisterPeerResponse> for DirectoryHandler {
-    type Response = ();
-
-    fn handle(&mut self, message: RegisterPeerResponse) {
-        let mut inner = self.inner.lock().unwrap();
-        for descriptor in message.peers {
-            inner.add_or_update(descriptor).forget();
-        }
-    }
-}
-
+#[subscribe(auto)]
 impl crate::Handler<PeerStarted> for DirectoryHandler {
     type Response = ();
 
@@ -509,6 +513,7 @@ impl crate::Handler<PeerStarted> for DirectoryHandler {
     }
 }
 
+#[subscribe(auto)]
 impl crate::Handler<PeerStopped> for DirectoryHandler {
     type Response = ();
 
@@ -518,6 +523,7 @@ impl crate::Handler<PeerStopped> for DirectoryHandler {
     }
 }
 
+#[subscribe(auto)]
 impl crate::Handler<PeerDecommissioned> for DirectoryHandler {
     type Response = ();
 
@@ -526,6 +532,7 @@ impl crate::Handler<PeerDecommissioned> for DirectoryHandler {
     }
 }
 
+#[subscribe(auto)]
 impl crate::Handler<PeerNotResponding> for DirectoryHandler {
     type Response = ();
 
@@ -535,6 +542,7 @@ impl crate::Handler<PeerNotResponding> for DirectoryHandler {
     }
 }
 
+#[subscribe(auto)]
 impl crate::Handler<PeerResponding> for DirectoryHandler {
     type Response = ();
 
@@ -544,6 +552,7 @@ impl crate::Handler<PeerResponding> for DirectoryHandler {
     }
 }
 
+#[subscribe(auto)]
 impl crate::Handler<PingPeerCommand> for DirectoryHandler {
     type Response = ();
 
@@ -552,6 +561,7 @@ impl crate::Handler<PingPeerCommand> for DirectoryHandler {
     }
 }
 
+#[subscribe(auto)]
 impl crate::Handler<PeerSubscriptionsForTypeUpdated> for DirectoryHandler {
     type Response = ();
 
@@ -682,7 +692,7 @@ mod tests {
     async fn handle_registration() {
         let mut fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
-        fixture.handler.handle(RegisterPeerResponse {
+        fixture.client.handle_registration(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 
@@ -698,7 +708,7 @@ mod tests {
     async fn handle_registration_does_not_raise_peer_started_event() {
         let mut fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
-        fixture.handler.handle(RegisterPeerResponse {
+        fixture.client.handle_registration(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 
@@ -739,7 +749,7 @@ mod tests {
             has_debugger_attached: Some(false),
         };
 
-        fixture.handler.handle(RegisterPeerResponse {
+        fixture.client.handle_registration(RegisterPeerResponse {
             peers: vec![peer_desc_1.clone(), peer_desc_2.clone()],
         });
 
@@ -773,7 +783,7 @@ mod tests {
         });
         let peers: Vec<_> = descriptors.iter().cloned().map(|d| d.peer).collect();
 
-        fixture.handler.handle(RegisterPeerResponse {
+        fixture.client.handle_registration(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 
@@ -821,7 +831,7 @@ mod tests {
             .cloned()
             .collect_vec();
 
-        fixture.handler.handle(RegisterPeerResponse {
+        fixture.client.handle_registration(RegisterPeerResponse {
             peers: descriptors.clone(),
         });
 

@@ -34,6 +34,12 @@ pub struct MessageTypeId {
     descriptor: MessageTypeDescriptor,
 }
 
+impl From<MessageTypeDescriptor> for MessageTypeId {
+    fn from(value: MessageTypeDescriptor) -> Self {
+        Self { descriptor: value }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MessageType(String);
 

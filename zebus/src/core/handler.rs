@@ -1,6 +1,7 @@
+use super::IntoResponse;
 use crate::Bus;
 
-use super::IntoResponse;
+pub use zebus_core::HandlerDescriptor;
 
 pub struct Context<'a> {
     pub bus: &'a dyn Bus,
@@ -10,7 +11,7 @@ pub struct Context<'a> {
 ///
 /// Types must implement this trait to be able to handle `[crate::Command`] commands
 /// or [`crate::Event`] events
-pub trait Handler<T> {
+pub trait Handler<T>: HandlerDescriptor<T> {
     /// [`crate::Response`] returned to the originator of the message
     type Response: IntoResponse;
 
@@ -18,7 +19,7 @@ pub trait Handler<T> {
     fn handle(&mut self, message: T) -> Self::Response;
 }
 
-pub trait ContextAwareHandler<T> {
+pub trait ContextAwareHandler<T>: HandlerDescriptor<T> {
     type Response: IntoResponse;
 
     fn handle(&mut self, message: T, ctx: Context<'_>) -> Self::Response;

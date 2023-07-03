@@ -18,7 +18,7 @@ use crate::{
     bus_configuration::{
         DEFAULT_MAX_BATCH_SIZE, DEFAULT_REGISTRATION_TIMEOUT, DEFAULT_START_REPLAY_TIMEOUT,
     },
-    core::MessagePayload,
+    core::{MessagePayload, SubscriptionMode},
     directory::{
         self, commands::PingPeerCommand, events::PeerSubscriptionsForTypeUpdated, Directory,
         PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
@@ -30,7 +30,8 @@ use crate::{
     },
     proto::FromProtobuf,
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
-    BusConfiguration, Command, Event, Handler, Message, MessageExt, MessageId, Peer, PeerId,
+    BindingKey, BusConfiguration, Command, Event, Message, MessageExt, MessageId, Peer, PeerId,
+    Subscription,
 };
 
 struct Core<T: Transport, D: Directory> {
@@ -305,6 +306,7 @@ async fn sender<T: Transport>(mut ctx: SenderContext<T>) {
 async fn register<T: Transport>(
     transport: &mut T,
     self_peer: &Peer,
+    subscriptions: Vec<Subscription>,
     environment: &String,
     configuration: &BusConfiguration,
 ) -> Result<Registration> {
@@ -330,6 +332,7 @@ async fn register<T: Transport>(
         match directory::registration::register(
             transport,
             self_peer.clone(),
+            subscriptions.clone(),
             environment.clone(),
             directory_peer.clone(),
             timeout,
@@ -342,6 +345,35 @@ async fn register<T: Transport>(
     }
 
     Err(Error::Registration(error))
+}
+
+/// Load the list of subscriptions to send at registration from a [`MessageDispatcher`]
+fn get_startup_subscriptions(dispatcher: &MessageDispatcher) -> Result<Vec<Subscription>> {
+    let handled_messages = dispatcher.handled_mesages().map_err(Error::Dispatch)?;
+
+    let mut subscriptions = vec![];
+    for (message_type, subscription_mode, bindings) in handled_messages {
+        // If we are in `Auto` subscription mode, add the subscription to the list of startup
+        // subscriptions
+        if subscription_mode == SubscriptionMode::Auto {
+            // If we have bindings for the subscription, create a subscription for every binding
+            if bindings.len() > 0 {
+                subscriptions.extend(
+                    bindings
+                        .iter()
+                        .map(|b| Subscription::new(message_type.clone(), b.clone())),
+                );
+            } else {
+                // Create a subscription with an empty default (*) binding
+                subscriptions.push(Subscription::new(
+                    message_type.clone(),
+                    BindingKey::default(),
+                ));
+            }
+        }
+    }
+
+    Ok(subscriptions)
 }
 
 impl<T: Transport, D: Directory> Core<T, D> {
@@ -537,19 +569,8 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                     is_responding: true,
                 };
 
-                // Register to directory
-                let registration = runtime.block_on(async {
-                    register(&mut transport, &self_peer, &environment, &configuration).await
-                })?;
-
-                let mut directory_handler = directory.handler();
-
-                // Handle peer directory response
-                if let Ok(response) = registration.result {
-                    directory_handler.handle(response);
-                }
-
                 // Setup peer directory client handler
+                let directory_handler = directory.handler();
                 dispatcher
                     .add(dispatch::registry::for_handler(directory_handler, |h| {
                         h.handles::<PeerStarted>()
@@ -561,6 +582,26 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                             .handles::<PeerSubscriptionsForTypeUpdated>();
                     }))
                     .map_err(Error::Dispatch)?;
+
+                // Retrieve the list of subscriptions that should be sent at startup
+                let startup_subscriptions = get_startup_subscriptions(&dispatcher)?;
+
+                // Register to directory
+                let registration = runtime.block_on(async {
+                    register(
+                        &mut transport,
+                        &self_peer,
+                        startup_subscriptions,
+                        &environment,
+                        &configuration,
+                    )
+                    .await
+                })?;
+
+                // Handle peer directory response
+                if let Ok(response) = registration.result {
+                    directory.handle_registration(response);
+                }
 
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
@@ -583,6 +624,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                     dispatcher,
                 );
 
+                // Create Core
                 let core = Arc::new(Core::<T, D> {
                     _runtime: Arc::clone(&runtime),
                     _configuration: configuration,
@@ -807,7 +849,7 @@ mod tests {
             DirectoryReader,
         },
         dispatch::registry,
-        MessageDescriptor,
+        subscribe, Handler, MessageDescriptor,
     };
     use tokio::sync::broadcast;
 
@@ -880,6 +922,12 @@ mod tests {
             self.events_tx.subscribe()
         }
 
+        /// Ad a `message` to the list of handled messages by the directory
+        fn add_handled<M: MessageDescriptor + Send + Sync + 'static>(&mut self, message: M) {
+            let entry = self.messages.entry(M::name()).or_insert(Vec::new());
+            entry.push(Arc::new(message));
+        }
+
         fn add_peer_for<M: MessageDescriptor>(&mut self, peer: Peer) {
             self.peers.entry(M::name()).or_insert(vec![]).push(peer);
         }
@@ -921,8 +969,7 @@ mod tests {
         /// Ad a `message` to the list of handled messages by the directory
         fn add_handled<M: MessageDescriptor + Send + Sync + 'static>(&mut self, message: M) {
             let mut inner = self.inner.lock().unwrap();
-            let entry = inner.messages.entry(M::name()).or_insert(Vec::new());
-            entry.push(Arc::new(message));
+            inner.add_handled(message);
         }
     }
 
@@ -1098,6 +1145,7 @@ mod tests {
 
     macro_rules! impl_handler {
         ($msg:ty, $ty: ty) => {
+            #[subscribe(auto)]
             impl Handler<$msg> for $ty {
                 type Response = ();
 
@@ -1115,7 +1163,6 @@ mod tests {
     impl_handler!(PeerResponding, MemoryDirectoryHandler);
     impl_handler!(PeerSubscriptionsForTypeUpdated, MemoryDirectoryHandler);
     impl_handler!(PingPeerCommand, MemoryDirectoryHandler);
-    impl_handler!(RegisterPeerResponse, MemoryDirectoryHandler);
 
     impl DirectoryReader for MemoryDirectory {
         fn get(&self, _peer_id: &PeerId) -> Option<Peer> {
@@ -1144,6 +1191,11 @@ mod tests {
         fn subscribe(&self) -> Self::EventStream {
             let inner = self.inner.lock().unwrap();
             inner.subscribe().into()
+        }
+
+        fn handle_registration(&self, response: RegisterPeerResponse) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.add_handled(response);
         }
 
         fn handler(&self) -> Box<Self::Handler> {
@@ -1282,6 +1334,7 @@ mod tests {
         }
     }
 
+    #[subscribe(auto)]
     impl Handler<BrewCoffeeCommand> for BrewCoffeeCommandHandler {
         type Response = ();
 
@@ -1290,6 +1343,7 @@ mod tests {
         }
     }
 
+    #[subscribe(manual)]
     impl Handler<BrewCoffeeCommand> for BrokenBrewCoffeeCommandHandler {
         type Response = std::result::Result<(), (i32, &'static str)>;
 
@@ -1301,7 +1355,7 @@ mod tests {
 
     #[test]
     fn start_when_bus_is_not_configured_returns_error() {
-        let mut fixture = Fixture::new_default();
+        let fixture = Fixture::new_default();
 
         // Attempt to start bus without configuring it first
         let res = fixture.bus.start();
@@ -1437,6 +1491,38 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn start_bus_will_register_and_subscribe_automatically_to_directory() {
+        let (handler, _) = BrewCoffeeCommandHandler::new();
+
+        // Create fixture with dispatch
+        let mut fixture = Fixture::new_dispatch(Fixture::configuration(), |dispatcher| {
+            dispatcher
+                .add(registry::for_handler(handler, |handler| {
+                    handler.handles::<BrewCoffeeCommand>();
+                }))
+                .unwrap();
+        });
+
+        // Configure and start the bus
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().is_ok(), true);
+
+        // Make sure a RegisterPeerCommand was sent with a subscription to `BrewCoffeeCommand`
+        let register_command = fixture.transport.get::<RegisterPeerCommand>();
+        let subscriptions = register_command
+            .get(0)
+            .map(|(cmd, _)| &cmd.peer.subscriptions);
+        assert_eq!(subscriptions.is_some(), true);
+        let subscriptions = subscriptions.unwrap();
+
+        // Make sure a subscription to `BrewCoffeeCommand` was made
+        let subscription = subscriptions
+            .iter()
+            .find(|s| s.message_type_id.is::<BrewCoffeeCommand>());
+        assert_eq!(subscription.is_some(), true);
     }
 
     #[test]
