@@ -55,7 +55,8 @@ where
                         // Safety:
                         //   1. `handler` is of type `Box<H>
                         //   2. `H` has an explicit bound on `Handler<M>`
-                        let res = unsafe { handler.downcast_mut_unchecked::<H>() }.handle(message);
+                        let res =
+                            unsafe { &mut *(handler as *mut dyn Any as *mut H) }.handle(message);
                         dispatch.set_kind(M::kind());
                         dispatch.set_response(handler_type, res.into_response());
                     }
@@ -65,7 +66,7 @@ where
                         // Safety:
                         //   1. `handler` is of type `Box<H>
                         //   2. `H` has an explicit bound on `Handler<M>`
-                        let res = unsafe { handler.downcast_mut_unchecked::<H>() }
+                        let res = unsafe { &mut *(handler as *mut dyn Any as *mut H) }
                             .handle(message.clone());
                         dispatch.set_kind(M::kind());
                         dispatch.set_response(handler_type, res.into_response());
@@ -91,7 +92,7 @@ where
                         // Safety:
                         //   1. `handler` is of type `Box<H>
                         //   2. `H` has an explicit bound on `ContextAwareHandler<M>`
-                        let res = unsafe { handler.downcast_mut_unchecked::<H>() }
+                        let res = unsafe { &mut *(handler as *mut dyn Any as *mut H) }
                             .handle(message, dispatch.context.handler_context());
                         dispatch.set_kind(M::kind());
                         dispatch.set_response(handler_type, res.into_response());
@@ -102,7 +103,7 @@ where
                         // Safety:
                         //   1. `handler` is of type `Box<H>
                         //   2. `H` has an explicit bound on `Handler<M>`
-                        let res = unsafe { handler.downcast_mut_unchecked::<H>() }
+                        let res = unsafe { &mut *(handler as *mut dyn Any as *mut H) }
                             .handle(message.clone(), dispatch.context.handler_context());
                         dispatch.set_kind(M::kind());
                         dispatch.set_response(handler_type, res.into_response());
