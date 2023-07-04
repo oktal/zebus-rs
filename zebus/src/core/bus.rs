@@ -7,6 +7,7 @@ use std::{
 use async_trait::async_trait;
 use dyn_clone::clone_box;
 use itertools::Itertools;
+use tokio::runtime::Handle;
 use tokio::{
     runtime::Runtime,
     sync::{mpsc, oneshot},
@@ -1384,15 +1385,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn send_command_when_bus_is_not_started_returns_error() {
+    #[tokio::test]
+    async fn send_command_when_bus_is_not_started_returns_error() {
         let mut fixture = Fixture::new_default();
 
         // Configure bus first
         assert_eq!(fixture.configure().is_ok(), true);
 
         // Attempt to send a command without starting the bus
-        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture
+            .bus
+            .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
+            .await;
 
         // Assert that send failed with InvalidOperation
         assert!(matches!(res, Err(Error::InvalidOperation)));
@@ -1583,8 +1587,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn send_command_returns_error_if_no_candidate_peer() {
+    #[tokio::test]
+    async fn send_command_returns_error_if_no_candidate_peer() {
         let mut fixture = Fixture::new_default();
 
         // Configure and start the bus
@@ -1592,14 +1596,17 @@ mod tests {
         assert_eq!(fixture.start_with_registration().is_ok(), true);
 
         // Attempt to send a command with empty directory
-        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture
+            .bus
+            .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
+            .await;
 
         // Assert that send failed with NoPeer
         assert!(matches!(res, Err(Error::Send(SendError::NoPeer))));
     }
 
-    #[test]
-    fn send_command_returns_error_if_multiple_peers_handle_command() {
+    #[tokio::test]
+    async fn send_command_returns_error_if_multiple_peers_handle_command() {
         let mut fixture = Fixture::new_default();
 
         // Configure and start the bus
@@ -1615,14 +1622,17 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(Peer::test());
 
         // Attempt to send a command to multiple peers
-        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture
+            .bus
+            .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
+            .await;
 
         // Assert that send failed with MultiplePeers
         assert!(matches!(res, Err(Error::Send(SendError::MultiplePeers(_)))));
     }
 
-    #[test]
-    fn send_command_returns_error_if_transient_and_peer_not_responding() {
+    #[tokio::test]
+    async fn send_command_returns_error_if_transient_and_peer_not_responding() {
         let mut fixture = Fixture::new_default();
 
         // Configure and start the bus
@@ -1635,7 +1645,10 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(Peer::test().set_not_responding());
 
         // Attempt to send a command to multiple peers
-        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture
+            .bus
+            .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
+            .await;
 
         // Assert that send failed with PeerNotResponding
         assert!(matches!(
@@ -1644,8 +1657,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn send_command_will_dispatch_locally_if_multiple_peers_handle_command_with_self() {
+    #[tokio::test]
+    async fn send_command_will_dispatch_locally_if_multiple_peers_handle_command_with_self() {
         // Create fixture with dispatch
         let configuration = Fixture::configuration();
 
@@ -1672,7 +1685,10 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(Peer::test());
 
         // Send command
-        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture
+            .bus
+            .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
+            .await;
 
         // Assert that command was successfully sent
         assert_eq!(res.is_ok(), true);
@@ -1686,8 +1702,8 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
     }
 
-    #[test]
-    fn dispatch_command_locally_with_error_response() {
+    #[tokio::test]
+    async fn dispatch_command_locally_with_error_response() {
         // Create fixture with dispatch
         let configuration = Fixture::configuration();
 
@@ -1711,7 +1727,10 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
 
         // Send command
-        let res = fixture.bus.send(&BrewCoffeeCommand { id: 0xBADC0FFEE });
+        let res = fixture
+            .bus
+            .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
+            .await;
 
         // Make sure command was successfully sent
         assert_eq!(res.is_ok(), true);

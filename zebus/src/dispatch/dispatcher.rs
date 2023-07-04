@@ -332,6 +332,7 @@ impl Dispatcher for MessageDispatcher {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use std::sync::Arc;
 
     use super::*;
@@ -348,6 +349,8 @@ mod tests {
     use zebus_core::binding_key;
 
     struct TestBus;
+
+    #[async_trait]
     impl Bus for TestBus {
         fn configure(&self, _peer_id: PeerId, _environment: String) -> bus::Result<()> {
             Err(bus::Error::InvalidOperation)
@@ -361,11 +364,11 @@ mod tests {
             Err(bus::Error::InvalidOperation)
         }
 
-        fn send(&self, _command: &dyn Command) -> bus::Result<crate::bus::CommandFuture> {
+        async fn send(&self, _command: &dyn Command) -> bus::Result<crate::bus::CommandFuture> {
             Err(bus::Error::InvalidOperation)
         }
 
-        fn send_to(
+        async fn send_to(
             &self,
             _command: &dyn Command,
             _peer: Peer,
