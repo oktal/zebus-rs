@@ -1,5 +1,4 @@
 use thiserror::Error;
-use tokio::io::ReadBuf;
 
 use super::ZmqSocketOptions;
 
@@ -7,14 +6,16 @@ use super::ZmqSocketOptions;
 use super::poller::ZmqPoller;
 
 #[cfg(unix)]
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, ReadBuf};
 
-use crate::PeerId;
+#[cfg(unix)]
 use std::{
-    io::{self, Read},
     pin::Pin,
     task::{Context, Poll},
 };
+
+use crate::PeerId;
+use std::io::{self, Read};
 
 /// Inbound socket error
 #[derive(Debug, Error)]

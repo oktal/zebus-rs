@@ -1,5 +1,4 @@
 use prost::Message;
-use std::io::Read;
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -9,7 +8,6 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    io::AsyncReadExt,
     runtime::Runtime,
     sync::{broadcast, mpsc},
 };
@@ -23,6 +21,12 @@ use crate::{
     },
     Peer, PeerId,
 };
+
+#[cfg(windows)]
+use std::io::Read;
+
+#[cfg(unix)]
+use tokio::io::AsyncReadExt;
 
 use super::{inbound, outbound::ZmqOutboundSocket};
 use super::{inbound::ZmqInboundSocket, outbound};
