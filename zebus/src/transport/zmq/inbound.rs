@@ -1,7 +1,14 @@
 use thiserror::Error;
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::ReadBuf;
 
-use super::{poller::ZmqPoller, ZmqSocketOptions};
+use super::ZmqSocketOptions;
+
+#[cfg(unix)]
+use super::poller::ZmqPoller;
+
+#[cfg(unix)]
+use tokio::io::AsyncRead;
+
 use crate::PeerId;
 use std::{
     io::{self, Read},
@@ -43,6 +50,7 @@ enum Inner {
         socket: zmq::Socket,
     },
 
+    #[cfg(unix)]
     Polled {
         context: zmq::Context,
         peer_id: PeerId,
@@ -115,6 +123,7 @@ impl ZmqInboundSocket {
         res
     }
 
+    #[cfg(unix)]
     pub(super) fn enable_polling(&mut self) -> Result<()> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Bound {
@@ -170,6 +179,7 @@ impl ZmqInboundSocket {
                     Ok(()),
                 )
             }
+            #[cfg(unix)]
             Some(Inner::Polled {
                 context,
                 peer_id,
@@ -219,6 +229,7 @@ impl Read for ZmqInboundSocket {
             Some(Inner::Bound { ref socket, .. }) => Ok(socket
                 .recv_into(buf, 0)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?),
+            #[cfg(unix)]
             Some(Inner::Polled { ref poller, .. }) => Ok(poller
                 .recv(buf, 0)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?),
@@ -229,6 +240,7 @@ impl Read for ZmqInboundSocket {
     }
 }
 
+#[cfg(unix)]
 impl AsyncRead for ZmqInboundSocket {
     fn poll_read(
         self: Pin<&mut Self>,
