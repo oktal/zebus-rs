@@ -7,7 +7,7 @@ edition = "2021"
 anyhow = "1.0.65"
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "1.0" }
+syn = { version = "1.0", features = ["full"] }
 zebus-core = { version = "0.1.0", path = "../zebus-core" }
 
 [lib]

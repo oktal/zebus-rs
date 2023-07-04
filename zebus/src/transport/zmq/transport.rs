@@ -8,7 +8,6 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    io::AsyncReadExt,
     runtime::Runtime,
     sync::{broadcast, mpsc},
 };
@@ -22,6 +21,12 @@ use crate::{
     },
     Peer, PeerId,
 };
+
+#[cfg(windows)]
+use std::io::Read;
+
+#[cfg(unix)]
+use tokio::io::AsyncReadExt;
 
 use super::{inbound, outbound::ZmqOutboundSocket};
 use super::{inbound::ZmqInboundSocket, outbound};
@@ -168,6 +173,7 @@ impl InboundWorker {
         });
     }
 
+    #[cfg(unix)]
     async fn run(&mut self) {
         self.inbound_socket.enable_polling().unwrap();
 
@@ -186,6 +192,27 @@ impl InboundWorker {
                     };
                 }
             }
+        }
+    }
+
+    #[cfg(windows)]
+    async fn run(&mut self) {
+        loop {
+            if self.shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+
+            let mut rcv_buf = [0u8; 4096];
+
+            // TODO(oktal): Handle error properly
+            if let Ok(size) = self.inbound_socket.read(&mut rcv_buf[..]) {
+                match TransportMessage::decode(&rcv_buf[..size]) {
+                    Ok(message) => {
+                        let _ = self.rcv_tx.send(message);
+                    }
+                    Err(e) => eprintln!("Failed to decode: {e}. bytes {rcv_buf:?}"),
+                };
+            };
         }
     }
 }
