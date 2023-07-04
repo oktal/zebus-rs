@@ -9,7 +9,6 @@ use dyn_clone::clone_box;
 use itertools::Itertools;
 use tokio::runtime::Handle;
 use tokio::{
-    runtime::Runtime,
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
@@ -37,7 +36,6 @@ use crate::{
 };
 
 struct Core<T: Transport, D: Directory> {
-    _runtime: Arc<Runtime>,
     _configuration: BusConfiguration,
     self_peer: Peer,
     environment: String,
@@ -52,7 +50,6 @@ struct Core<T: Transport, D: Directory> {
 
 enum State<T: Transport, D: Directory> {
     Init {
-        runtime: Arc<Runtime>,
         configuration: BusConfiguration,
         transport: T,
         directory: Arc<D>,
@@ -60,7 +57,6 @@ enum State<T: Transport, D: Directory> {
     },
 
     Configured {
-        runtime: Arc<Runtime>,
         configuration: BusConfiguration,
         transport: T,
         dispatcher: MessageDispatcher,
@@ -69,6 +65,8 @@ enum State<T: Transport, D: Directory> {
         peer_id: PeerId,
         environment: String,
     },
+
+    Starting {},
 
     Started {
         core: Arc<Core<T, D>>,
@@ -458,11 +456,11 @@ impl<T: Transport, D: Directory> crate::Bus for Core<T, D> {
         Err(Error::InvalidOperation)
     }
 
-    fn start(&self) -> Result<()> {
+    async fn start(&self) -> Result<()> {
         Err(Error::InvalidOperation)
     }
 
-    fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         Err(Error::InvalidOperation)
     }
 
@@ -481,7 +479,6 @@ struct Bus<T: Transport, D: Directory> {
 
 impl<T: Transport, D: Directory> Bus<T, D> {
     fn new(
-        runtime: Arc<Runtime>,
         configuration: BusConfiguration,
         transport: T,
         directory: Arc<D>,
@@ -489,7 +486,6 @@ impl<T: Transport, D: Directory> Bus<T, D> {
     ) -> Self {
         Self {
             inner: Mutex::new(Some(State::Init {
-                runtime,
                 configuration,
                 transport,
                 directory,
@@ -505,7 +501,6 @@ impl<T: Transport, D: Directory> Bus<T, D> {
 
         let (inner, res) = match state.take() {
             Some(State::Init {
-                runtime,
                 configuration,
                 mut transport,
                 directory,
@@ -519,17 +514,11 @@ impl<T: Transport, D: Directory> Bus<T, D> {
 
                 // Configure transport
                 transport
-                    .configure(
-                        peer_id.clone(),
-                        environment.clone(),
-                        directory_rx,
-                        Arc::clone(&runtime),
-                    )
+                    .configure(peer_id.clone(), environment.clone(), directory_rx)
                     .map_err(|e| Error::Transport(e.into()))?;
 
                 (
                     Some(State::Configured {
-                        runtime,
                         configuration,
                         transport,
                         dispatcher,
@@ -547,126 +536,126 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         res
     }
 
-    fn start(&self) -> Result<()> {
-        let mut state = self.inner.lock().unwrap();
-
-        let (inner, res) = match state.take() {
-            Some(State::Configured {
-                runtime,
-                configuration,
-                mut transport,
-                mut dispatcher,
-                peer_id,
-                directory,
-                environment,
-            }) => {
-                // Start transport
-                transport.start().map_err(|e| Error::Transport(e.into()))?;
-
-                // Setup peer
-                let endpoint = transport
-                    .inbound_endpoint()
-                    .map_err(|e| Error::Transport(e.into()))?;
-
-                let self_peer = Peer {
-                    id: peer_id.clone(),
-                    endpoint: endpoint.to_string(),
-                    is_up: true,
-                    is_responding: true,
-                };
-
-                // Setup peer directory client handler
-                let directory_handler = directory.handler();
-                dispatcher
-                    .add(dispatch::registry::for_handler(directory_handler, |h| {
-                        h.handles::<PeerStarted>()
-                            .handles::<PeerStopped>()
-                            .handles::<PeerDecommissioned>()
-                            .handles::<PeerNotResponding>()
-                            .handles::<PeerResponding>()
-                            .handles::<PingPeerCommand>()
-                            .handles::<PeerSubscriptionsForTypeUpdated>();
-                    }))
-                    .map_err(Error::Dispatch)?;
-
-                // Retrieve the list of subscriptions that should be sent at startup
-                let startup_subscriptions = get_startup_subscriptions(&dispatcher)?;
-
-                // Register to directory
-                let registration = runtime.block_on(async {
-                    register(
-                        &mut transport,
-                        &self_peer,
-                        startup_subscriptions,
-                        &environment,
-                        &configuration,
-                    )
-                    .await
-                })?;
-
-                // Handle peer directory response
-                if let Ok(response) = registration.result {
-                    directory.handle_registration(response);
-                }
-
-                // Start the dispatcher
-                dispatcher.start().map_err(Error::Dispatch)?;
-
-                // Create transport reception stream
-                let rcv_rx = transport
-                    .subscribe()
-                    .map_err(|e| Error::Transport(e.into()))?;
-
-                // Create sender
-                let (snd_tx, snd_ctx) = SenderContext::new(transport);
-
-                // Create receiver
-                let (rcv_ctx, dispatch_tx, pending_commands) = ReceiverContext::<T, D>::new(
-                    rcv_rx,
-                    snd_tx.clone(),
-                    self_peer.clone(),
-                    environment.clone(),
-                    directory.clone(),
-                    dispatcher,
-                );
-
-                // Create Core
-                let core = Arc::new(Core::<T, D> {
-                    _runtime: Arc::clone(&runtime),
-                    _configuration: configuration,
-                    self_peer,
-                    environment,
-                    directory,
-                    pending_commands,
-                    snd_tx,
-                    dispatch_tx,
-                    _transport: PhantomData,
-                });
-
-                // Start sender
-                let tx_handle = runtime.spawn(sender(snd_ctx));
-
-                // Start receiver
-                let rx_handle = runtime.spawn(receiver(rcv_ctx, core.clone()));
-
-                // Transition to started state
-                (
-                    Some(State::Started {
-                        core,
-                        rx_handle,
-                        tx_handle,
-                    }),
-                    Ok(()),
-                )
-            }
-            x => (x, Err(Error::InvalidOperation)),
+    async fn start(&self) -> Result<()> {
+        let state = {
+            let mut state_lock = self.inner.lock().unwrap();
+            let state = state_lock.take();
+            *state_lock = Some(State::Starting {}); // TODO restore valid state on error
+            state
         };
 
-        *state = inner;
-        res
+        if let Some(State::Configured {
+            configuration,
+            mut transport,
+            mut dispatcher,
+            peer_id,
+            directory,
+            environment,
+        }) = state
+        {
+            // Start transport
+            transport.start().map_err(|e| Error::Transport(e.into()))?;
+
+            // Setup peer
+            let endpoint = transport
+                .inbound_endpoint()
+                .map_err(|e| Error::Transport(e.into()))?;
+
+            let self_peer = Peer {
+                id: peer_id.clone(),
+                endpoint: endpoint.to_string(),
+                is_up: true,
+                is_responding: true,
+            };
+
+            // Setup peer directory client handler
+            let directory_handler = directory.handler();
+            dispatcher
+                .add(dispatch::registry::for_handler(directory_handler, |h| {
+                    h.handles::<PeerStarted>()
+                        .handles::<PeerStopped>()
+                        .handles::<PeerDecommissioned>()
+                        .handles::<PeerNotResponding>()
+                        .handles::<PeerResponding>()
+                        .handles::<PingPeerCommand>()
+                        .handles::<PeerSubscriptionsForTypeUpdated>();
+                }))
+                .map_err(Error::Dispatch)?;
+
+            // Retrieve the list of subscriptions that should be sent at startup
+            let startup_subscriptions = get_startup_subscriptions(&dispatcher)?;
+
+            // Register to directory
+            let registration = register(
+                &mut transport,
+                &self_peer,
+                startup_subscriptions,
+                &environment,
+                &configuration,
+            )
+            .await?;
+
+            // Handle peer directory response
+            if let Ok(response) = registration.result {
+                directory.handle_registration(response);
+            }
+
+            // Start the dispatcher
+            dispatcher.start().map_err(Error::Dispatch)?;
+
+            // Create transport reception stream
+            let rcv_rx = transport
+                .subscribe()
+                .map_err(|e| Error::Transport(e.into()))?;
+
+            // Create sender
+            let (snd_tx, snd_ctx) = SenderContext::new(transport);
+
+            // Create receiver
+            let (rcv_ctx, dispatch_tx, pending_commands) = ReceiverContext::<T, D>::new(
+                rcv_rx,
+                snd_tx.clone(),
+                self_peer.clone(),
+                environment.clone(),
+                directory.clone(),
+                dispatcher,
+            );
+
+            // Create Core
+            let core = Arc::new(Core::<T, D> {
+                _configuration: configuration,
+                self_peer,
+                environment,
+                directory,
+                pending_commands,
+                snd_tx,
+                dispatch_tx,
+                _transport: PhantomData,
+            });
+
+            // Start sender
+            let tx_handle = Handle::current().spawn(sender(snd_ctx));
+
+            // Start receiver
+            let rx_handle = Handle::current().spawn(receiver(rcv_ctx, core.clone()));
+
+            // Transition to started state
+            let mut state_lock = self.inner.lock().unwrap();
+            *state_lock = Some(State::Started {
+                core,
+                rx_handle,
+                tx_handle,
+            });
+
+            Ok(())
+        } else {
+            let mut state_lock = self.inner.lock().unwrap();
+            *state_lock = state;
+            Err(Error::InvalidOperation)
+        }
     }
 
-    fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         todo!()
     }
 
@@ -695,12 +684,12 @@ impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
         self.configure(peer_id, environment)
     }
 
-    fn start(&self) -> Result<()> {
-        self.start()
+    async fn start(&self) -> Result<()> {
+        self.start().await
     }
 
-    fn stop(&self) -> Result<()> {
-        self.stop()
+    async fn stop(&self) -> Result<()> {
+        self.stop().await
     }
 
     async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
@@ -724,7 +713,6 @@ pub struct BusBuilder<T: Transport> {
     peer_id: Option<PeerId>,
     configuration: Option<BusConfiguration>,
     environment: Option<String>,
-    runtime: Option<Runtime>,
     dispatcher: MessageDispatcher,
 }
 
@@ -735,14 +723,8 @@ impl<T: Transport> BusBuilder<T> {
             peer_id: None,
             configuration: None,
             environment: None,
-            runtime: None,
             dispatcher: MessageDispatcher::new(),
         }
-    }
-
-    pub fn with_runtime(mut self, runtime: Runtime) -> Self {
-        self.runtime = Some(runtime);
-        self
     }
 
     pub fn with_peer_id(mut self, peer_id: PeerId) -> Self {
@@ -803,35 +785,18 @@ impl<T: Transport> BusBuilder<T> {
             self.environment.ok_or(CreateError::MissingConfiguration)?,
         );
 
-        // Create tokio runtime
-        let runtime = self.runtime.unwrap_or(Self::default_runtime());
-
         let dispatcher = self.dispatcher;
 
         // Create peer directory client
         let client = directory::Client::new();
 
         // Create the bus
-        let bus = Bus::new(
-            Arc::new(runtime),
-            configuration,
-            transport,
-            client,
-            dispatcher,
-        );
+        let bus = Bus::new(configuration, transport, client, dispatcher);
 
         // Configure the bus
         bus.configure(peer_id, environment)
             .map_err(CreateError::Configure)?;
         Ok(bus)
-    }
-
-    fn default_runtime() -> Runtime {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap()
     }
 
     fn testing_peer_id() -> PeerId {
@@ -1080,7 +1045,6 @@ mod tests {
             peer_id: PeerId,
             environment: String,
             _directory_rx: directory::EventStream,
-            _runtime: Arc<Runtime>,
         ) -> std::result::Result<(), Self::Err> {
             let mut inner = self.inner.lock().unwrap();
             inner.peer_id = Some(peer_id);
@@ -1212,7 +1176,6 @@ mod tests {
     }
 
     struct Fixture {
-        rt: Arc<Runtime>,
         peer: Peer,
         environment: String,
         transport: MemoryTransport,
@@ -1225,14 +1188,6 @@ mod tests {
             configuration: BusConfiguration,
             dispatch_fn: impl FnOnce(&mut MessageDispatcher),
         ) -> Self {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()
-                .unwrap();
-
-            let rt = Arc::new(runtime);
-
             let peer = Peer::test();
             let transport = MemoryTransport::new(peer.clone());
 
@@ -1242,7 +1197,6 @@ mod tests {
             let mut dispatcher = MessageDispatcher::new();
             dispatch_fn(&mut dispatcher);
             let bus = Bus::new(
-                Arc::clone(&rt),
                 configuration,
                 transport.clone(),
                 directory.clone(),
@@ -1250,7 +1204,6 @@ mod tests {
             );
 
             Self {
-                rt,
                 peer,
                 environment,
                 transport,
@@ -1278,11 +1231,11 @@ mod tests {
                 .configure(self.peer.id.clone(), self.environment.clone())
         }
 
-        fn start(&mut self) -> std::result::Result<(), Error> {
-            self.bus.start()
+        async fn start(&mut self) -> std::result::Result<(), Error> {
+            self.bus.start().await
         }
 
-        fn start_with_registration(&mut self) -> std::result::Result<(), Error> {
+        async fn start_with_registration(&mut self) -> std::result::Result<(), Error> {
             // Queue a RegisterPeerResponse to be sent when receiving a RegisterPeerCommand
             self.transport.queue_message(
                 |m, _peer| m.is::<RegisterPeerCommand>(),
@@ -1303,7 +1256,7 @@ mod tests {
             );
 
             // Start the bus
-            self.bus.start()
+            self.bus.start().await
         }
     }
 
@@ -1359,12 +1312,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn start_when_bus_is_not_configured_returns_error() {
+    #[tokio::test]
+    async fn start_when_bus_is_not_configured_returns_error() {
         let fixture = Fixture::new_default();
 
         // Attempt to start bus without configuring it first
-        let res = fixture.bus.start();
+        let res = fixture.bus.start().await;
 
         // Assert that start failed with InvalidOperation
         assert!(matches!(res, Err(Error::InvalidOperation)));
@@ -1402,7 +1355,7 @@ mod tests {
         assert!(matches!(res, Err(Error::InvalidOperation)));
     }
 
-    fn test_registration_timeout<T: Into<String>>(
+    async fn test_registration_timeout<T: Into<String>>(
         directory_endpoints: impl IntoIterator<Item = T>,
         timeout: Duration,
     ) {
@@ -1421,7 +1374,7 @@ mod tests {
         fixture.configure().expect("Failed to configure bus");
 
         // Start the bus
-        let res = fixture.bus.start();
+        let res = fixture.bus.start().await;
 
         // Make sure a RegisterPeerCommand was sent to every directory
         assert_eq!(
@@ -1444,13 +1397,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn start_bus_will_register_to_directory_timeout() {
-        test_registration_timeout(["tcp://localhost:12500"], Duration::from_millis(50));
+    #[tokio::test]
+    async fn start_bus_will_register_to_directory_timeout() {
+        test_registration_timeout(["tcp://localhost:12500"], Duration::from_millis(50)).await;
     }
 
-    #[test]
-    fn start_bus_will_register_to_multiple_directories_timeout() {
+    #[tokio::test]
+    async fn start_bus_will_register_to_multiple_directories_timeout() {
         test_registration_timeout(
             [
                 "tcp://localhost:12500",
@@ -1458,11 +1411,12 @@ mod tests {
                 "tcp://localhost:14500",
             ],
             Duration::from_millis(50),
-        );
+        )
+        .await;
     }
 
-    #[test]
-    fn start_bus_will_register_to_directory() {
+    #[tokio::test]
+    async fn start_bus_will_register_to_directory() {
         let mut fixture = Fixture::new_default();
 
         // Queue a RegisterPeerResponse to be sent when receiving a RegisterPeerCommand
@@ -1486,7 +1440,7 @@ mod tests {
 
         // Basic assertions
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start().is_ok(), true);
+        assert_eq!(fixture.start().await.is_ok(), true);
         assert_eq!(fixture.transport.is_started(), true);
 
         // Make sure a RegisterPeerCommand was sent
@@ -1502,8 +1456,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn start_bus_will_register_and_subscribe_automatically_to_directory() {
+    #[tokio::test]
+    async fn start_bus_will_register_and_subscribe_automatically_to_directory() {
         let (handler, _) = BrewCoffeeCommandHandler::new();
 
         // Create fixture with dispatch
@@ -1517,7 +1471,7 @@ mod tests {
 
         // Configure and start the bus
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start_with_registration().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
         // Make sure a RegisterPeerCommand was sent with a subscription to `BrewCoffeeCommand`
         let register_command = fixture.transport.get::<RegisterPeerCommand>();
@@ -1534,8 +1488,8 @@ mod tests {
         assert_eq!(subscription.is_some(), true);
     }
 
-    #[test]
-    fn start_bus_will_try_register_to_multiple_directories() {
+    #[tokio::test]
+    async fn start_bus_will_try_register_to_multiple_directories() {
         let directory_1 = "tcp://localhost:12500";
         let directory_2 = "tcp://localhost:13500";
         let directory_3 = "tcp://localhost:14500";
@@ -1571,7 +1525,7 @@ mod tests {
 
         // Basic assertions
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start().is_ok(), true);
+        assert_eq!(fixture.start().await.is_ok(), true);
         assert_eq!(fixture.transport.is_started(), true);
 
         // Make sure a RegisterPeerCommand was sent for every directory
@@ -1593,7 +1547,7 @@ mod tests {
 
         // Configure and start the bus
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start_with_registration().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
         // Attempt to send a command with empty directory
         let res = fixture
@@ -1611,7 +1565,7 @@ mod tests {
 
         // Configure and start the bus
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start_with_registration().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
         // Setup directory with multiple peers for the same command
         fixture
@@ -1637,7 +1591,7 @@ mod tests {
 
         // Configure and start the bus
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start_with_registration().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
         // Setup directory with multiple peers for the same command
         fixture
@@ -1674,7 +1628,7 @@ mod tests {
 
         // Configure and start the bus
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start_with_registration().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
         // Setup directory with self and other peer
         fixture
@@ -1694,8 +1648,7 @@ mod tests {
         assert_eq!(res.is_ok(), true);
 
         // Assert that command has been locally dispatched
-        let result = res.unwrap();
-        let result = fixture.rt.block_on(async move { result.await });
+        let result = res.unwrap().await;
         assert!(matches!(result, Ok(None)));
 
         // Make sure the handler was called
@@ -1719,7 +1672,7 @@ mod tests {
 
         // Configure and start the bus
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start_with_registration().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
         // Setup directory with self
         fixture
@@ -1736,8 +1689,7 @@ mod tests {
         assert_eq!(res.is_ok(), true);
 
         // Make sure command resulted in an error
-        let result = res.unwrap();
-        let result = fixture.rt.block_on(async move { result.await });
+        let result = res.unwrap().await;
 
         // Make sure command failed with the right error
         if let Err(CommandError::Command { code, message }) = result {
@@ -1751,8 +1703,8 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
     }
 
-    #[test]
-    fn dispatch_received_transport_message() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_received_transport_message() {
         // Create fixture with dispatch
         let configuration = Fixture::configuration();
 
@@ -1768,7 +1720,7 @@ mod tests {
 
         // Configure and start the bus
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start_with_registration().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
         // Simulate reception of a message
         let sender = Peer::test();
@@ -1788,8 +1740,8 @@ mod tests {
         assert_eq!(rx.recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
     }
 
-    #[test]
-    fn dispatch_received_transport_message_locally() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_received_transport_message_locally() {
         // Create fixture with dispatch
         let configuration = Fixture::configuration();
 
@@ -1805,7 +1757,7 @@ mod tests {
 
         // Configure and start the bus
         assert_eq!(fixture.configure().is_ok(), true);
-        assert_eq!(fixture.start_with_registration().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
         // Setup directory with self and other peer
         fixture

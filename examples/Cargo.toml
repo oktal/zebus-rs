@@ -11,4 +11,5 @@ name = "start"
 path = "start_bus.rs"
 
 [dependencies]
+tokio = { version = "1.21.2" }
 zebus = { version = "0.1.0", path = "../zebus" }

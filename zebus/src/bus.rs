@@ -263,10 +263,10 @@ pub trait Bus: Send + Sync + 'static {
     fn configure(&self, peer_id: PeerId, environment: String) -> Result<()>;
 
     /// Start the bus
-    fn start(&self) -> Result<()>;
+    async fn start(&self) -> Result<()>;
 
     /// Stop the bus
-    fn stop(&self) -> Result<()>;
+    async fn stop(&self) -> Result<()>;
 
     /// Send a [`Command`] to the handling [`Peer`]
     async fn send(&self, command: &dyn Command) -> Result<CommandFuture>;

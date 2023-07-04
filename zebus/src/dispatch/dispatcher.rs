@@ -356,11 +356,11 @@ mod tests {
             Err(bus::Error::InvalidOperation)
         }
 
-        fn start(&self) -> bus::Result<()> {
+        async fn start(&self) -> bus::Result<()> {
             Err(bus::Error::InvalidOperation)
         }
 
-        fn stop(&self) -> bus::Result<()> {
+        async fn stop(&self) -> bus::Result<()> {
             Err(bus::Error::InvalidOperation)
         }
 

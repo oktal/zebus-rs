@@ -19,8 +19,8 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum RegistrationError {
     /// Transport error
-    #[error("an error occured during a transport operation {0}")]
-    Transport(Box<dyn std::error::Error>),
+    #[error("an error occurred during a transport operation {0}")]
+    Transport(Box<dyn std::error::Error + Send>),
 
     /// Failed to deserialize a [`TransportMessage`]
     #[error("error decoding transport message {0:?} {1}")]
@@ -86,7 +86,7 @@ async fn try_register<T: Transport>(
     // Subscribe to transport messages stream
     let mut rcv_rx = transport
         .subscribe()
-        .map_err(|e| RegistrationError::Transport(e.into()))?;
+        .map_err(|e| RegistrationError::Transport(Box::new(e)))?;
 
     // Send `RegisterPeerCommand`
     transport
@@ -95,7 +95,7 @@ async fn try_register<T: Transport>(
             message.clone(),
             SendContext::default(),
         )
-        .map_err(|e| RegistrationError::Transport(e.into()))?;
+        .map_err(|e| RegistrationError::Transport(Box::new(e)))?;
 
     let mut pending_messages = Vec::new();
 

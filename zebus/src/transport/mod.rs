@@ -12,13 +12,12 @@ use std::{borrow::Cow, sync::Arc};
 pub use message_execution_completed::MessageExecutionCompleted;
 pub use originator_info::OriginatorInfo;
 pub use send_context::SendContext;
-use tokio::runtime::Runtime;
 pub use transport_message::TransportMessage;
 
 /// Transport layer trait
 pub trait Transport: Send + Sync + 'static {
     /// The associated error type which can be returned from the transport layer
-    type Err: std::error::Error + 'static;
+    type Err: std::error::Error + Send + 'static;
 
     /// Type of [`TransportMessage`] [`Stream`]
     /// The stream is used to receive messages from the transport
@@ -30,7 +29,6 @@ pub trait Transport: Send + Sync + 'static {
         peer_id: PeerId,
         environment: String,
         directory_rx: directory::EventStream,
-        runtime: Arc<Runtime>,
     ) -> Result<(), Self::Err>;
 
     /// Create a new subscription to the transport messages stream

@@ -7,10 +7,7 @@ use std::{
     thread::JoinHandle,
 };
 use thiserror::Error;
-use tokio::{
-    runtime::Runtime,
-    sync::{broadcast, mpsc},
-};
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 
 use crate::{
@@ -27,6 +24,7 @@ use std::io::Read;
 
 #[cfg(unix)]
 use tokio::io::AsyncReadExt;
+use tokio::runtime::Handle;
 
 use super::{inbound, outbound::ZmqOutboundSocket};
 use super::{inbound::ZmqInboundSocket, outbound};
@@ -92,7 +90,6 @@ enum Inner {
         peer_id: PeerId,
         environment: String,
         directory_rx: directory::EventStream,
-        runtime: Arc<Runtime>,
     },
     Started {
         configuration: ZmqTransportConfiguration,
@@ -143,7 +140,6 @@ impl InboundWorker {
         inbound_socket: ZmqInboundSocket,
         rcv_tx: broadcast::Sender<TransportMessage>,
         shutdown_tx: broadcast::Sender<()>,
-        runtime: Arc<tokio::runtime::Runtime>,
     ) -> Result<JoinHandle<()>, Error> {
         // Subscribe to shutdown channel
         let shutdown_rx = shutdown_tx.subscribe();
@@ -159,16 +155,16 @@ impl InboundWorker {
         let inbound_thread = std::thread::Builder::new()
             .name(INBOUND_THREAD_NAME.into())
             .spawn(move || {
-                inbound_worker.block_on(runtime);
+                inbound_worker.block_on();
             })
             .map_err(Error::Io)?;
 
         Ok(inbound_thread)
     }
 
-    fn block_on(self, runtime: Arc<Runtime>) {
+    fn block_on(self) {
         let mut this = self;
-        runtime.block_on(async move {
+        Handle::current().block_on(async move {
             this.run().await;
         });
     }
@@ -232,7 +228,6 @@ impl OutboundWorker {
         peer_id: PeerId,
         directory_rx: directory::EventStream,
         shutdown_tx: broadcast::Sender<()>,
-        runtime: Arc<Runtime>,
     ) -> Result<(mpsc::Sender<OuboundSocketAction>, JoinHandle<()>), Error> {
         // Subscribe to shutdown channel
         let shutdown_rx = shutdown_tx.subscribe();
@@ -255,16 +250,16 @@ impl OutboundWorker {
         let outbound_thread = std::thread::Builder::new()
             .name(OUTBOUND_THREAD_NAME.into())
             .spawn(move || {
-                worker.block_on(runtime);
+                worker.block_on();
             })
             .map_err(Error::Io)?;
 
         Ok((actions_tx, outbound_thread))
     }
 
-    fn block_on(self, runtime: Arc<Runtime>) {
+    fn block_on(self) {
         let mut this = self;
-        runtime.block_on(async move {
+        Handle::current().block_on(async move {
             this.run().await;
         });
     }
@@ -398,7 +393,6 @@ impl Transport for ZmqTransport {
         peer_id: PeerId,
         environment: String,
         directory_rx: directory::EventStream,
-        runtime: Arc<Runtime>,
     ) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Unconfigured {
@@ -412,7 +406,6 @@ impl Transport for ZmqTransport {
                     peer_id,
                     environment,
                     directory_rx,
-                    runtime,
                 }),
                 Ok(()),
             ),
@@ -437,7 +430,6 @@ impl Transport for ZmqTransport {
                 peer_id,
                 environment,
                 directory_rx,
-                runtime,
             }) => {
                 // Create zmq context
                 let context = zmq::Context::new();
@@ -465,19 +457,14 @@ impl Transport for ZmqTransport {
                     peer_id.clone(),
                     directory_rx,
                     shutdown_tx.clone(),
-                    Arc::clone(&runtime),
                 )?;
 
                 // Create broadcast channel for transport message reception
                 let (rcv_tx, rcv_rx) = broadcast::channel(128);
 
                 // Start inbound worker
-                let inbound_thread = InboundWorker::start(
-                    inbound_socket,
-                    rcv_tx.clone(),
-                    shutdown_tx.clone(),
-                    Arc::clone(&runtime),
-                )?;
+                let inbound_thread =
+                    InboundWorker::start(inbound_socket, rcv_tx.clone(), shutdown_tx.clone())?;
 
                 (
                     // Transition to Started state
