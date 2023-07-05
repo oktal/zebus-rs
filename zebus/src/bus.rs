@@ -273,6 +273,9 @@ pub trait Bus: Send + Sync + 'static {
 
     /// Send a [`Command`] to a destination [`Peer`]
     async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture>;
+
+    /// Send an [`Event`] to the handling [`Peer`] peers
+    async fn publish(&self, event: &dyn Event) -> Result<()>;
 }
 
 #[cfg(test)]

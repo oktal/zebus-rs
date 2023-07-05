@@ -93,18 +93,19 @@ impl<T: Transport> SenderContext<T> {
     }
 
     async fn send(
-        message: &dyn Message,
+        message: &dyn Command,
         snd_tx: &mpsc::Sender<SendEntry>,
         self_peer: &Peer,
-        environment: String,
-        pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
+        environment: &str,
+        pending_commands: &Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>,
         peers: impl IntoIterator<Item = Peer>,
     ) -> Result<CommandFuture> {
         // Create the reception channel for the result of the command
         let (tx, rx) = oneshot::channel();
 
         // Create the `TransportMessage`
-        let (id, message) = TransportMessage::create(&self_peer, environment.clone(), message);
+        let (id, message) =
+            TransportMessage::create(&self_peer, environment.to_string(), message.up());
 
         // Insert the command in the collection of pending commands
         pending_commands.lock().unwrap().entry(id).or_insert(tx);
@@ -118,6 +119,28 @@ impl<T: Transport> SenderContext<T> {
             .await
             .map_err(|_| Error::Send(SendError::Closed))?;
         Ok(CommandFuture(rx))
+    }
+
+    async fn publish(
+        message: &dyn Event,
+        snd_tx: &mpsc::Sender<SendEntry>,
+        self_peer: &Peer,
+        environment: &str,
+        peers: impl IntoIterator<Item = Peer>,
+    ) -> Result<()> {
+        // Create the `TransportMessage`
+        let (_, message) =
+            TransportMessage::create(&self_peer, environment.to_string(), message.up());
+
+        // Enqueue the message
+        snd_tx
+            .send(SendEntry {
+                message,
+                peers: peers.into_iter().collect(),
+            })
+            .await
+            .map_err(|_| Error::Send(SendError::Closed))?;
+        Ok(())
     }
 
     fn handle_send(&mut self, entry: SendEntry) {
@@ -418,11 +441,11 @@ impl<T: Transport, D: Directory> Core<T, D> {
             } else {
                 // Send the command
                 SenderContext::<T>::send(
-                    command.up(),
+                    command,
                     &self.snd_tx,
                     &self.self_peer,
-                    self.environment.clone(),
-                    self.pending_commands.clone(),
+                    &self.environment,
+                    &self.pending_commands,
                     std::iter::once(dst_peer),
                 )
                 .await
@@ -430,7 +453,7 @@ impl<T: Transport, D: Directory> Core<T, D> {
         }
     }
 
-    async fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
+    async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
         // Attempting to send a non-persistent command to a non-responding peer result in
         // an error
         if !peer.is_responding && command.is_transient() && !command.is_infrastructure() {
@@ -439,14 +462,50 @@ impl<T: Transport, D: Directory> Core<T, D> {
 
         // Send the command
         SenderContext::<T>::send(
-            command.up(),
+            command,
             &self.snd_tx,
             &self.self_peer,
-            self.environment.clone(),
-            self.pending_commands.clone(),
+            &self.environment,
+            &self.pending_commands,
             std::iter::once(peer),
         )
         .await
+    }
+
+    async fn publish(&self, event: &dyn Event) -> Result<()> {
+        // Retrieve the list of peers handling the event from the directory
+        let peers = self.directory.get_peers_handling(event.up());
+
+        let self_dst_peer = peers.iter().find(|&p| p.id == self.self_peer.id);
+        // TODO(oktal): add local dispatch toggling
+        // If we are a receiver of the event, do a local dispatch
+        if self_dst_peer.is_some() {
+            // Create the local dispatch request for the command
+            let request = LocalDispatchRequest::for_event(event);
+
+            // Send the event
+            self.dispatch_tx
+                .send(request)
+                .await
+                .map_err(|_| Error::Send(SendError::Closed))?;
+
+            // TODO: if the message is handled by the current dispatch queue,
+            // we should wait for it to be processed before sending it on the bus
+        }
+
+        let dst_peers = peers.into_iter().filter(|p| p.id != self.self_peer.id);
+
+        // Send the event
+        SenderContext::<T>::publish(
+            event,
+            &self.snd_tx,
+            &self.self_peer,
+            &self.environment,
+            dst_peers,
+        )
+        .await?;
+
+        Ok(())
     }
 }
 
@@ -470,6 +529,10 @@ impl<T: Transport, D: Directory> crate::Bus for Core<T, D> {
 
     async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
         self.send_to(command, peer).await
+    }
+
+    async fn publish(&self, event: &dyn Event) -> Result<()> {
+        self.publish(event).await
     }
 }
 
@@ -668,6 +731,10 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         let core = self.core()?;
         core.send_to(command, peer).await
     }
+    async fn publish(&self, event: &dyn Event) -> Result<()> {
+        let core = self.core()?;
+        core.publish(event).await
+    }
 
     fn core(&self) -> Result<Arc<Core<T, D>>> {
         let inner = self.inner.lock().unwrap();
@@ -698,6 +765,10 @@ impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
 
     async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
         self.send_to(command, peer).await
+    }
+
+    async fn publish(&self, event: &dyn Event) -> Result<()> {
+        self.publish(event).await
     }
 }
 
@@ -1267,6 +1338,13 @@ mod tests {
         id: u64,
     }
 
+    #[derive(prost::Message, crate::Event, Clone, Eq, PartialEq)]
+    #[zebus(namespace = "Abc.Test", transient)]
+    struct CoffeeBrewed {
+        #[prost(fixed64, tag = 1)]
+        id: u64,
+    }
+
     #[derive(Handler)]
     struct BrewCoffeeCommandHandler {
         tx: std::sync::mpsc::Sender<BrewCoffeeCommand>,
@@ -1275,6 +1353,11 @@ mod tests {
     #[derive(Handler)]
     struct BrokenBrewCoffeeCommandHandler {
         tx: std::sync::mpsc::Sender<BrewCoffeeCommand>,
+    }
+
+    #[derive(Handler)]
+    struct CoffeeBrewedHandler {
+        tx: std::sync::mpsc::Sender<CoffeeBrewed>,
     }
 
     const BOILER_TOO_COLD: (i32, &'static str) = (0xBADBAD, "Boiler is too cold to brew coffee");
@@ -1288,6 +1371,13 @@ mod tests {
 
     impl BrewCoffeeCommandHandler {
         fn new() -> (Box<Self>, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            (Box::new(Self { tx }), rx)
+        }
+    }
+
+    impl CoffeeBrewedHandler {
+        fn new() -> (Box<Self>, std::sync::mpsc::Receiver<CoffeeBrewed>) {
             let (tx, rx) = std::sync::mpsc::channel();
             (Box::new(Self { tx }), rx)
         }
@@ -1309,6 +1399,15 @@ mod tests {
         fn handle(&mut self, cmd: BrewCoffeeCommand) -> Self::Response {
             self.tx.send(cmd).unwrap();
             Err(BOILER_TOO_COLD)
+        }
+    }
+
+    #[subscribe(auto)]
+    impl Handler<CoffeeBrewed> for CoffeeBrewedHandler {
+        type Response = ();
+
+        fn handle(&mut self, evt: CoffeeBrewed) -> Self::Response {
+            self.tx.send(evt).unwrap();
         }
     }
 
@@ -1653,6 +1752,66 @@ mod tests {
 
         // Make sure the handler was called
         assert_eq!(rx.try_recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_event_to_subscribers() {
+        // Create fixture with dispatch
+        let configuration = Fixture::configuration();
+
+        let (handler, rx) = CoffeeBrewedHandler::new();
+
+        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
+            dispatcher
+                .add(registry::for_handler(handler, |handler| {
+                    handler.handles::<CoffeeBrewed>();
+                }))
+                .unwrap();
+        });
+
+        // Configure and start the bus
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
+
+        // Setup directory with self and other peer
+        fixture
+            .directory
+            .add_peer_for::<CoffeeBrewed>(fixture.peer.clone());
+
+        let peer_a = Peer::test();
+        let peer_b = Peer::test();
+
+        fixture
+            .directory
+            .add_peer_for::<CoffeeBrewed>(peer_a.clone());
+        fixture
+            .directory
+            .add_peer_for::<CoffeeBrewed>(peer_b.clone());
+
+        // Send event
+        let res = fixture.bus.publish(&CoffeeBrewed { id: 0xBADC0FFEE }).await;
+
+        // Assert that event was successfully sent
+        assert_eq!(res.is_ok(), true);
+
+        // Make sure the handler was called
+        assert_eq!(rx.recv(), Ok(CoffeeBrewed { id: 0xBADC0FFEE }));
+
+        let sent_messages = fixture.transport.get::<CoffeeBrewed>();
+        let sent_messages = sent_messages.iter().exactly_one().unwrap();
+
+        assert_eq!(sent_messages.0.id, 0xBADC0FFEE);
+        assert_eq!(
+            sent_messages
+                .1
+                .iter()
+                .sorted_by_key(|i| i.id.value())
+                .collect::<Vec<_>>(),
+            [peer_a, peer_b]
+                .iter()
+                .sorted_by_key(|i| i.id.value())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

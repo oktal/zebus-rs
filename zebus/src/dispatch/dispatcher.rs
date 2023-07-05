@@ -342,8 +342,8 @@ mod tests {
         dispatch::{registry, DispatchRequest, DispatchResult},
         subscribe,
         transport::TransportMessage,
-        Bus, Command, Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer, PeerId,
-        Response, ResponseMessage,
+        Bus, Command, Event, Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer,
+        PeerId, Response, ResponseMessage,
     };
 
     use zebus_core::binding_key;
@@ -373,6 +373,10 @@ mod tests {
             _command: &dyn Command,
             _peer: Peer,
         ) -> bus::Result<crate::bus::CommandFuture> {
+            Err(bus::Error::InvalidOperation)
+        }
+
+        async fn publish(&self, _event: &dyn Event) -> bus::Result<()> {
             Err(bus::Error::InvalidOperation)
         }
     }
