@@ -1249,7 +1249,7 @@ mod tests {
 
     macro_rules! impl_handler {
         ($msg:ty, $ty: ty) => {
-            #[handler(auto)]
+            #[handler]
             impl Handler<$msg> for $ty {
                 type Response = ();
 
@@ -1450,7 +1450,7 @@ mod tests {
         }
     }
 
-    #[handler(auto)]
+    #[handler]
     impl Handler<BrewCoffeeCommand> for BrewCoffeeCommandHandler {
         type Response = ();
 
@@ -1469,7 +1469,7 @@ mod tests {
         }
     }
 
-    #[handler(auto)]
+    #[handler]
     impl Handler<CoffeeBrewed> for CoffeeBrewedHandler {
         type Response = ();
 

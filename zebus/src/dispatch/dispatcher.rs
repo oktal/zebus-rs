@@ -495,7 +495,7 @@ mod tests {
         fn handle(&mut self, _message: AutoSubscribeCommand) -> Self::Response {}
     }
 
-    #[handler(auto, binding = "october")]
+    #[handler(binding = "october")]
     impl crate::Handler<AutoSubscribeCommandWithRouting> for TestHandler {
         type Response = ();
 

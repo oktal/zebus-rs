@@ -327,7 +327,7 @@ impl Inner {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl Handler<PeerStarted> for Inner {
     type Response = ();
 
@@ -337,7 +337,7 @@ impl Handler<PeerStarted> for Inner {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl Handler<PeerStopped> for Inner {
     type Response = ();
 
@@ -356,7 +356,7 @@ impl Handler<PeerStopped> for Inner {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl Handler<PeerDecommissioned> for Inner {
     type Response = ();
 
@@ -368,7 +368,7 @@ impl Handler<PeerDecommissioned> for Inner {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl Handler<PeerNotResponding> for Inner {
     type Response = ();
 
@@ -383,7 +383,7 @@ impl Handler<PeerNotResponding> for Inner {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl Handler<PeerResponding> for Inner {
     type Response = ();
 
@@ -398,7 +398,7 @@ impl Handler<PeerResponding> for Inner {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl Handler<PeerSubscriptionsForTypeUpdated> for Inner {
     type Response = ();
 
@@ -503,7 +503,7 @@ impl Clone for Client {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl crate::Handler<PeerStarted> for DirectoryHandler {
     type Response = ();
 
@@ -513,7 +513,7 @@ impl crate::Handler<PeerStarted> for DirectoryHandler {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl crate::Handler<PeerStopped> for DirectoryHandler {
     type Response = ();
 
@@ -523,7 +523,7 @@ impl crate::Handler<PeerStopped> for DirectoryHandler {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl crate::Handler<PeerDecommissioned> for DirectoryHandler {
     type Response = ();
 
@@ -532,7 +532,7 @@ impl crate::Handler<PeerDecommissioned> for DirectoryHandler {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl crate::Handler<PeerNotResponding> for DirectoryHandler {
     type Response = ();
 
@@ -542,7 +542,7 @@ impl crate::Handler<PeerNotResponding> for DirectoryHandler {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl crate::Handler<PeerResponding> for DirectoryHandler {
     type Response = ();
 
@@ -552,7 +552,7 @@ impl crate::Handler<PeerResponding> for DirectoryHandler {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl crate::Handler<PingPeerCommand> for DirectoryHandler {
     type Response = ();
 
@@ -561,7 +561,7 @@ impl crate::Handler<PingPeerCommand> for DirectoryHandler {
     }
 }
 
-#[handler(auto)]
+#[handler]
 impl crate::Handler<PeerSubscriptionsForTypeUpdated> for DirectoryHandler {
     type Response = ();
 
