@@ -328,7 +328,7 @@ async fn receiver<T: Transport, D: Directory>(
                         let _dispatched = ctx.dispatch(DispatchRequest::Local(message), bus.clone()).await;
 
                         // Notify that the event has been dispatched
-                        tx.send(());
+                        let _ = tx.send(());
                     }
                 }
             }
