@@ -161,7 +161,10 @@ enum LocalDispatchRequest {
     },
 
     /// An [`Event`] to be dispatched locally
-    Event(Arc<dyn Message>),
+    Event {
+        tx: oneshot::Sender<()>,
+        message: Arc<dyn Message>,
+    },
 }
 
 impl LocalDispatchRequest {
@@ -176,9 +179,14 @@ impl LocalDispatchRequest {
     }
 
     /// Create a [`LocalDispatchRequest`] for a [`Event`] message
-    fn for_event(event: &dyn Event) -> Self {
+    fn for_event(event: &dyn Event) -> (Self, oneshot::Receiver<()>) {
+        // Create a singleshot channel so that the caller can await for the result of
+        // the dispatch execution
+        let (tx, rx) = oneshot::channel();
         let message = Arc::from(clone_box(event.up()));
-        Self::Event(message)
+
+        let request = Self::Event { tx, message };
+        (request, rx)
     }
 }
 
@@ -315,9 +323,12 @@ async fn receiver<T: Transport, D: Directory>(
                             let _ = tx.send(command_result);
                         }
                     },
-                    LocalDispatchRequest::Event(message) => {
+                    LocalDispatchRequest::Event { tx, message } => {
                         // Dispatch event locally
                         let _dispatched = ctx.dispatch(DispatchRequest::Local(message), bus.clone()).await;
+
+                        // Notify that the event has been dispatched
+                        tx.send(());
                     }
                 }
             }
@@ -481,7 +492,7 @@ impl<T: Transport, D: Directory> Core<T, D> {
         // If we are a receiver of the event, do a local dispatch
         if self_dst_peer.is_some() {
             // Create the local dispatch request for the command
-            let request = LocalDispatchRequest::for_event(event);
+            let (request, rx) = LocalDispatchRequest::for_event(event);
 
             // Send the event
             self.dispatch_tx
@@ -489,8 +500,8 @@ impl<T: Transport, D: Directory> Core<T, D> {
                 .await
                 .map_err(|_| Error::Send(SendError::Closed))?;
 
-            // TODO: if the message is handled by the current dispatch queue,
-            // we should wait for it to be processed before sending it on the bus
+            // Wait for the event to be handled prior to sending it over the bus
+            rx.await.map_err(|_| Error::Send(SendError::Closed))?;
         }
 
         let dst_peers = peers.into_iter().filter(|p| p.id != self.self_peer.id);
@@ -891,9 +902,9 @@ mod tests {
             DirectoryReader,
         },
         dispatch::registry,
-        subscribe, Handler, MessageDescriptor,
+        subscribe, Handler, MessageDescriptor, MessageType,
     };
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, Notify};
 
     /// Inner [`MemoryTransport`] state
     struct MemoryTransportInner {
@@ -913,6 +924,9 @@ mod tests {
         /// Messages that are sent through the transport will be stored in this queue along with
         /// the recipient peers
         tx_queue: Vec<(TransportMessage, Vec<Peer>)>,
+
+        /// Waiting transmission queue
+        tx_wait_queue: HashMap<MessageType, Arc<Notify>>,
 
         /// Reception queue
         /// Messages that should be "sent" back as a response to a transport message will be stored
@@ -995,10 +1009,22 @@ mod tests {
             }
         }
 
+        /// Add a list of [`peers`] that should handle the message of type [`M`]
+        fn add_peers_for<M: MessageDescriptor>(
+            &self,
+            peers: impl IntoIterator<Item = Peer>,
+        ) -> &Self {
+            for peer in peers {
+                self.add_peer_for::<M>(peer);
+            }
+            self
+        }
+
         /// Add a peer that should hande the `Message`
-        fn add_peer_for<M: MessageDescriptor>(&self, peer: Peer) {
+        fn add_peer_for<M: MessageDescriptor>(&self, peer: Peer) -> &Self {
             let mut inner = self.inner.lock().unwrap();
             inner.add_peer_for::<M>(peer);
+            self
         }
     }
 
@@ -1031,6 +1057,7 @@ mod tests {
                     started: false,
                     rcv_tx: None,
                     tx_queue: Vec::new(),
+                    tx_wait_queue: HashMap::new(),
                     rx_queue: Vec::new(),
                 })),
             }
@@ -1070,6 +1097,35 @@ mod tests {
             let (_id, transport) = TransportMessage::create(sender, environment, &message);
             rcv_tx.send(transport).ok()?;
             Some(())
+        }
+
+        /// Wait for [`count`] messages of type `M` to be sent through the transport
+        async fn wait_for<M: MessageDescriptor + prost::Message + Default>(
+            &self,
+            count: usize,
+        ) -> Vec<(M, Vec<Peer>)> {
+            loop {
+                // First attempt to retrieve messages from the tx_queue
+                let tx_messages = self.get::<M>();
+
+                // If there is enough messages already in the tx_queue, return right away
+                if tx_messages.len() >= count {
+                    return tx_messages;
+                }
+
+                // We need to wait for more messages to be sent through the transport
+                let notify = {
+                    let mut inner = self.inner.lock().unwrap();
+
+                    inner
+                        .tx_wait_queue
+                        .entry(MessageType::of::<M>())
+                        .or_insert(Arc::new(Notify::new()))
+                        .clone()
+                };
+
+                notify.notified().await;
+            }
         }
 
         /// Get the list of messages that have been sent through the transport
@@ -1179,7 +1235,14 @@ mod tests {
                 }
             }
 
+            let msg_type = MessageType::from(message.message_type_id.clone());
             inner.tx_queue.push((message, peers));
+
+            // Notify any waiter that some messages have been sent
+            if let Some(notify) = inner.tx_wait_queue.get(&msg_type) {
+                notify.notify_waiters();
+            }
+
             Ok(())
         }
     }
@@ -1328,6 +1391,10 @@ mod tests {
 
             // Start the bus
             self.bus.start().await
+        }
+
+        fn create_test_peers(n: usize) -> Vec<Peer> {
+            (0..n).map(|_| Peer::test()).collect()
         }
     }
 
@@ -1754,8 +1821,48 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(BrewCoffeeCommand { id: 0xBADC0FFEE }));
     }
 
+    #[tokio::test]
+    async fn publish_event_will_send_transport_message_to_recipient_peers() {
+        let mut fixture = Fixture::new_default();
+
+        // Configure and start the bus
+        assert_eq!(fixture.configure().is_ok(), true);
+        assert_eq!(fixture.start_with_registration().await.is_ok(), true);
+
+        // Setup directory with recipient peers
+        let peers = Fixture::create_test_peers(3);
+        fixture
+            .directory
+            .add_peers_for::<CoffeeBrewed>(peers.clone());
+
+        // Publish event
+        let res = fixture.bus.publish(&CoffeeBrewed { id: 0xBADC0FFEE }).await;
+
+        // Assert that event was successfully published
+        assert_eq!(res.is_ok(), true);
+
+        // Wait for the event to be sent through the bus
+        let sent_messages = fixture.transport.wait_for::<CoffeeBrewed>(1).await;
+        let (sent_message, sent_peers) = sent_messages.iter().exactly_one().unwrap();
+
+        // Make sure the right message was sent
+        assert_eq!(sent_message.id, 0xBADC0FFEE);
+
+        // Make sure that the event was sent to all the recipient peers
+        assert_eq!(
+            sent_peers
+                .iter()
+                .sorted_by_key(|i| i.id.value())
+                .collect::<Vec<_>>(),
+            peers
+                .iter()
+                .sorted_by_key(|i| i.id.value())
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn send_event_to_subscribers() {
+    async fn publish_event_will_dispatch_locally_and_send_to_recipient_peers_with_self() {
         // Create fixture with dispatch
         let configuration = Fixture::configuration();
 
@@ -1778,36 +1885,34 @@ mod tests {
             .directory
             .add_peer_for::<CoffeeBrewed>(fixture.peer.clone());
 
-        let peer_a = Peer::test();
-        let peer_b = Peer::test();
-
+        let peers = Fixture::create_test_peers(3);
         fixture
             .directory
-            .add_peer_for::<CoffeeBrewed>(peer_a.clone());
-        fixture
-            .directory
-            .add_peer_for::<CoffeeBrewed>(peer_b.clone());
+            .add_peers_for::<CoffeeBrewed>(peers.clone());
 
-        // Send event
+        // Publish event
         let res = fixture.bus.publish(&CoffeeBrewed { id: 0xBADC0FFEE }).await;
 
-        // Assert that event was successfully sent
+        // Assert that event was successfully published
         assert_eq!(res.is_ok(), true);
 
         // Make sure the handler was called
         assert_eq!(rx.recv(), Ok(CoffeeBrewed { id: 0xBADC0FFEE }));
 
-        let sent_messages = fixture.transport.get::<CoffeeBrewed>();
-        let sent_messages = sent_messages.iter().exactly_one().unwrap();
+        // Wait for the event to be sent through the bus
+        let sent_messages = fixture.transport.wait_for::<CoffeeBrewed>(1).await;
+        let (sent_message, sent_peers) = sent_messages.iter().exactly_one().unwrap();
 
-        assert_eq!(sent_messages.0.id, 0xBADC0FFEE);
+        // Make sure the right message was sent
+        assert_eq!(sent_message.id, 0xBADC0FFEE);
+
+        // Make sure that the event was sent to all the recipient peers
         assert_eq!(
-            sent_messages
-                .1
+            sent_peers
                 .iter()
                 .sorted_by_key(|i| i.id.value())
                 .collect::<Vec<_>>(),
-            [peer_a, peer_b]
+            peers
                 .iter()
                 .sorted_by_key(|i| i.id.value())
                 .collect::<Vec<_>>()
