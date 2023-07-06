@@ -15,6 +15,7 @@ pub(crate) mod registration;
 pub(crate) use registration::{Registration, RegistrationError};
 
 pub use descriptor::PeerDescriptor;
+use zebus_core::HandlerDescriptor;
 
 use self::{
     commands::{PingPeerCommand, RegisterPeerResponse},
@@ -49,12 +50,19 @@ pub(crate) trait Directory: DirectoryReader {
     /// Type of [`Handler`] that will be used to handle commands and events related to the
     /// directory
     type Handler: Handler<PeerStarted>
+        + HandlerDescriptor<PeerStarted>
         + Handler<PeerStopped>
+        + HandlerDescriptor<PeerStopped>
         + Handler<PeerDecommissioned>
+        + HandlerDescriptor<PeerDecommissioned>
         + Handler<PeerNotResponding>
+        + HandlerDescriptor<PeerNotResponding>
         + Handler<PeerResponding>
+        + HandlerDescriptor<PeerResponding>
         + Handler<PeerSubscriptionsForTypeUpdated>
+        + HandlerDescriptor<PeerSubscriptionsForTypeUpdated>
         + Handler<PingPeerCommand>
+        + HandlerDescriptor<PingPeerCommand>
         + DispatchHandler
         + Send
         + 'static;

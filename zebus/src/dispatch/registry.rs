@@ -43,7 +43,7 @@ where
 
     pub fn handles<M>(&mut self) -> &mut Self
     where
-        H: Handler<M> + 'static,
+        H: Handler<M> + HandlerDescriptor<M> + 'static,
         M: MessageDescriptor + prost::Message + Clone + Default + 'static,
     {
         let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
@@ -80,7 +80,7 @@ where
 
     pub fn context_aware_handles<M>(&mut self) -> &mut Self
     where
-        H: ContextAwareHandler<M> + 'static,
+        H: ContextAwareHandler<M> + HandlerDescriptor<M> + 'static,
         M: MessageDescriptor + prost::Message + Clone + Default + 'static,
     {
         let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
