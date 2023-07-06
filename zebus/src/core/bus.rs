@@ -902,7 +902,7 @@ mod tests {
             DirectoryReader,
         },
         dispatch::registry,
-        subscribe, Handler, MessageDescriptor, MessageType,
+        handler, Handler, MessageDescriptor, MessageType,
     };
     use tokio::sync::{broadcast, Notify};
 
@@ -1249,7 +1249,7 @@ mod tests {
 
     macro_rules! impl_handler {
         ($msg:ty, $ty: ty) => {
-            #[subscribe(auto)]
+            #[handler(auto)]
             impl Handler<$msg> for $ty {
                 type Response = ();
 
@@ -1450,7 +1450,7 @@ mod tests {
         }
     }
 
-    #[subscribe(auto)]
+    #[handler(auto)]
     impl Handler<BrewCoffeeCommand> for BrewCoffeeCommandHandler {
         type Response = ();
 
@@ -1459,7 +1459,7 @@ mod tests {
         }
     }
 
-    #[subscribe(manual)]
+    #[handler(manual)]
     impl Handler<BrewCoffeeCommand> for BrokenBrewCoffeeCommandHandler {
         type Response = std::result::Result<(), (i32, &'static str)>;
 
@@ -1469,7 +1469,7 @@ mod tests {
         }
     }
 
-    #[subscribe(auto)]
+    #[handler(auto)]
     impl Handler<CoffeeBrewed> for CoffeeBrewedHandler {
         type Response = ();
 

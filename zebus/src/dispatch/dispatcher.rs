@@ -340,7 +340,7 @@ mod tests {
         bus::{self, CommandResult},
         core::{HandlerDescriptor, MessagePayload},
         dispatch::{registry, DispatchRequest, DispatchResult},
-        subscribe,
+        handler,
         transport::TransportMessage,
         Bus, Command, Event, Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer,
         PeerId, Response, ResponseMessage,
@@ -488,21 +488,21 @@ mod tests {
     #[derive(crate::Handler)]
     struct TestHandler {}
 
-    #[subscribe(auto)]
+    #[handler(auto)]
     impl crate::Handler<AutoSubscribeCommand> for TestHandler {
         type Response = ();
 
         fn handle(&mut self, _message: AutoSubscribeCommand) -> Self::Response {}
     }
 
-    #[subscribe(auto, binding = "october")]
+    #[handler(auto, binding = "october")]
     impl crate::Handler<AutoSubscribeCommandWithRouting> for TestHandler {
         type Response = ();
 
         fn handle(&mut self, _message: AutoSubscribeCommandWithRouting) -> Self::Response {}
     }
 
-    #[subscribe(manual)]
+    #[handler(manual)]
     impl crate::Handler<ManualSubscribeCommand> for TestHandler {
         type Response = ();
 
@@ -542,14 +542,14 @@ mod tests {
     #[derive(crate::Handler)]
     struct ParseCommandResponseErrorHandler;
 
-    #[subscribe(manual)]
+    #[handler(manual)]
     impl Handler<ParseCommand> for ParseCommandHandler {
         type Response = ();
 
         fn handle(&mut self, _message: ParseCommand) {}
     }
 
-    #[subscribe(manual)]
+    #[handler(manual)]
     impl Handler<ParseCommand> for ParseCommandResponseErrorHandler {
         type Response = Result<ResponseMessage<ParseResponse>, HandlerError<ParseError>>;
 

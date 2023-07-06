@@ -96,12 +96,12 @@
 //! }
 //! ```
 //!
-//! # [`subscribe`] attribute macro
+//! # [`handler`] attribute macro
 //!
-//! This macro can be applied on `impl Handler<T> for Handler` impl blocks to specifiy the
-//! subscription policy at startup for a given message type
+//! This macro can be applied on `impl Handler<T> for Handler` impl blocks to specify the
+//! subscription policy at startup for a given message type, and other options for the handler.
 //!
-//! This macro will implement the [`zebus_core::HandlerDescriptor`] trait
+//! This macro will implement the [`zebus_core::HandlerDescriptor`] trait.
 //!
 
 use proc_macro::TokenStream;
@@ -111,21 +111,21 @@ pub(crate) mod attrs;
 mod derive;
 
 #[proc_macro_derive(Command, attributes(zebus))]
-pub fn command(input: TokenStream) -> TokenStream {
+pub fn derive_command(input: TokenStream) -> TokenStream {
     derive::command(input).unwrap_or_else(|e| e.into_compile_error().into())
 }
 
 #[proc_macro_derive(Event, attributes(zebus))]
-pub fn event(input: TokenStream) -> TokenStream {
+pub fn derive_event(input: TokenStream) -> TokenStream {
     derive::event(input).unwrap_or_else(|e| e.into_compile_error().into())
 }
 
 #[proc_macro_derive(Handler, attributes(zebus))]
-pub fn handler(input: TokenStream) -> TokenStream {
+pub fn derive_handler(input: TokenStream) -> TokenStream {
     derive::handler(input).unwrap_or_else(|e| e.into_compile_error().into())
 }
 
 #[proc_macro_attribute]
-pub fn subscribe(attr: TokenStream, item: TokenStream) -> TokenStream {
-    attribute::subscribe(attr, item)
+pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
+    attribute::handler(attr, item)
 }

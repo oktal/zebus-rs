@@ -8,16 +8,16 @@ use zebus_core::{BindingKey, BindingKeyFragment, SubscriptionMode};
 struct SubscriptionModeAttr(SubscriptionMode);
 
 #[derive(Debug)]
-pub struct SubscribeAttrs {
+pub struct HandlerAttrs {
     pub mode: Option<SubscriptionMode>,
     pub bindings: Vec<BindingKey>,
 }
 
-impl TryFrom<Vec<Meta>> for SubscribeAttrs {
+impl TryFrom<Vec<Meta>> for HandlerAttrs {
     type Error = syn::Error;
 
     fn try_from(value: Vec<Meta>) -> Result<Self, Self::Error> {
-        let mut attrs = SubscribeAttrs {
+        let mut attrs = HandlerAttrs {
             mode: None,
             bindings: vec![],
         };
@@ -82,7 +82,7 @@ fn expand(item: ItemImpl, args: AttributeArgs) -> syn::Result<TokenStream> {
         .find(|s| s.ident == "Handler" || s.ident == "ContextAwareHandler")
         .ok_or(syn::Error::new_spanned(
             &item,
-            "#[subscribe] must be applied on a `Handler` trait implementation",
+            "#[handler] must be applied on a `Handler` trait implementation",
         ))?;
 
     let handler_ty = match &handler_segment.arguments {
@@ -93,7 +93,7 @@ fn expand(item: ItemImpl, args: AttributeArgs) -> syn::Result<TokenStream> {
         )),
     }?;
 
-    let attrs = SubscribeAttrs::try_from(attrs)?;
+    let attrs = HandlerAttrs::try_from(attrs)?;
     let mode = match attrs.mode.unwrap_or(SubscriptionMode::Auto) {
         SubscriptionMode::Auto => quote! { ::zebus_core::SubscriptionMode::Auto },
         SubscriptionMode::Manual => quote! { ::zebus_core::SubscriptionMode::Manual },
@@ -144,7 +144,7 @@ fn expand(item: ItemImpl, args: AttributeArgs) -> syn::Result<TokenStream> {
     Ok(expanded.into())
 }
 
-pub(crate) fn subscribe(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub(crate) fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item_impl = parse_macro_input!(item as ItemImpl);
     let attrs = parse_macro_input!(attr as AttributeArgs);
     expand(item_impl, attrs).unwrap_or_else(|e| e.into_compile_error().into())

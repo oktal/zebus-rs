@@ -4,9 +4,9 @@ use tokio::sync::broadcast;
 
 use crate::{
     core::MessagePayload,
+    handler,
     proto::{self, PeerDescriptor},
     routing::tree::PeerSubscriptionTree,
-    subscribe,
     transport::TransportMessage,
     BindingKey, Handler, Message, MessageType, Peer, PeerId,
 };
@@ -327,7 +327,7 @@ impl Inner {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl Handler<PeerStarted> for Inner {
     type Response = ();
 
@@ -337,7 +337,7 @@ impl Handler<PeerStarted> for Inner {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl Handler<PeerStopped> for Inner {
     type Response = ();
 
@@ -356,7 +356,7 @@ impl Handler<PeerStopped> for Inner {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl Handler<PeerDecommissioned> for Inner {
     type Response = ();
 
@@ -368,7 +368,7 @@ impl Handler<PeerDecommissioned> for Inner {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl Handler<PeerNotResponding> for Inner {
     type Response = ();
 
@@ -383,7 +383,7 @@ impl Handler<PeerNotResponding> for Inner {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl Handler<PeerResponding> for Inner {
     type Response = ();
 
@@ -398,7 +398,7 @@ impl Handler<PeerResponding> for Inner {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl Handler<PeerSubscriptionsForTypeUpdated> for Inner {
     type Response = ();
 
@@ -503,7 +503,7 @@ impl Clone for Client {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl crate::Handler<PeerStarted> for DirectoryHandler {
     type Response = ();
 
@@ -513,7 +513,7 @@ impl crate::Handler<PeerStarted> for DirectoryHandler {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl crate::Handler<PeerStopped> for DirectoryHandler {
     type Response = ();
 
@@ -523,7 +523,7 @@ impl crate::Handler<PeerStopped> for DirectoryHandler {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl crate::Handler<PeerDecommissioned> for DirectoryHandler {
     type Response = ();
 
@@ -532,7 +532,7 @@ impl crate::Handler<PeerDecommissioned> for DirectoryHandler {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl crate::Handler<PeerNotResponding> for DirectoryHandler {
     type Response = ();
 
@@ -542,7 +542,7 @@ impl crate::Handler<PeerNotResponding> for DirectoryHandler {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl crate::Handler<PeerResponding> for DirectoryHandler {
     type Response = ();
 
@@ -552,7 +552,7 @@ impl crate::Handler<PeerResponding> for DirectoryHandler {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl crate::Handler<PingPeerCommand> for DirectoryHandler {
     type Response = ();
 
@@ -561,7 +561,7 @@ impl crate::Handler<PingPeerCommand> for DirectoryHandler {
     }
 }
 
-#[subscribe(auto)]
+#[handler(auto)]
 impl crate::Handler<PeerSubscriptionsForTypeUpdated> for DirectoryHandler {
     type Response = ();
 
