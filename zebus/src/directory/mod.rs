@@ -77,5 +77,5 @@ pub(crate) trait Directory: DirectoryReader {
     fn handle_registration(&self, response: RegisterPeerResponse);
 
     /// Create a new instance of a [`Self::Handler`]
-    fn handler(&self) -> Box<Self::Handler>;
+    fn handler(&self) -> Self::Handler;
 }

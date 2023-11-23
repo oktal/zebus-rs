@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+use super::future::DispatchFuture;
+use super::queue::DispatchQueue;
 use super::{
-    future::DispatchFuture, queue::DispatchQueue, registry::Registry, Dispatch, DispatchContext,
-    Dispatcher, MessageDispatch,
+    DispatchJob, DispatchRequest, DispatchService, HandlerInvoker, MessageInvokerDescriptor,
 };
 use crate::MessageTypeDescriptor;
-use crate::{core::SubscriptionMode, BindingKey, DispatchHandler};
 
 /// Errors that can be returned by the [`MessageDispatcher`]
 #[derive(Debug, Error)]
@@ -17,20 +17,12 @@ pub enum Error {
     Queue(super::queue::Error),
 
     /// No dispatcher could be found for a given message
-    #[error("could not find dispatcher for message {0}")]
-    DispatcherNotFound(String),
+    #[error("unknown message {0}")]
+    UnknownMessage(String),
 
-    /// A message handler was already registered with a different [`SubscriptionMode`]
-    #[error("attempted to register message {0} with a different subscription mode")]
-    SubscriptionModeConflict(String),
-
-    /// A message handler was already registered with a different dispatch queue
-    #[error("attempted to register message {message_type} to dispatch queue {dispatch_queue}. Already registered to {previous_dispatch_queue}")]
-    DispatchQueueConflict {
-        message_type: String,
-        dispatch_queue: &'static str,
-        previous_dispatch_queue: &'static str,
-    },
+    /// Responses for handler invocation are missing
+    #[error("missing {0} responses for handler invocation")]
+    Missing(usize),
 
     /// An operation was attempted while the [`MessageDispatcher`] was in an invalid state for the
     /// operation
@@ -38,209 +30,139 @@ pub enum Error {
     InvalidOperation,
 }
 
-/// Represents the type of dispatch to use for a given [`TransportMessage`]
-/// Messages that have been marked with a special `infrastructure` attribute will
-/// be dispatched synchronously
-///
-/// Other types of messages will be dispatched asynchronously through a named
-/// [`DispatchQueue`]
-enum DispatchFlavor {
-    /// A synchronous dispatcher that will call the message handler directly from the context of
-    /// the calling thread
-    Sync(Vec<Box<dyn Dispatch + Send>>),
+/// Descriptor for a specific type of message
+struct MessageTypeInvokerDescriptor {
+    /// Descriptor of the message
+    message: MessageTypeDescriptor,
 
-    /// An asynchronous dispatcher that will call the message handler from the context of a
-    /// [`DispatchQueue`]
-    Async(DispatchQueue),
+    /// List of invoker descriptors for this message
+    invokers: Vec<MessageInvokerDescriptor>,
 }
 
-impl DispatchFlavor {
-    fn add<H>(&mut self, registry: Box<Registry<H>>) -> Result<(), Error>
-    where
-        H: DispatchHandler + Send + 'static,
-    {
-        match self {
-            DispatchFlavor::Sync(dispatch) => Ok(dispatch.push(registry)),
-            DispatchFlavor::Async(queue) => queue.add(registry).map_err(Error::Queue),
-        }
-    }
-
-    fn start(&mut self) -> Result<(), Error> {
-        if let Self::Async(queue) = self {
-            queue.start().map_err(Error::Queue)?;
-        }
-
-        Ok(())
-    }
-
-    fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
-        match self {
-            Self::Sync(sync) => {
-                sync.dispatch(&message_dispatch);
-                message_dispatch.set_completed();
-                Ok(())
-            }
-            Self::Async(queue) => queue.send(message_dispatch).map_err(Error::Queue),
+impl MessageTypeInvokerDescriptor {
+    fn new(message: MessageTypeDescriptor) -> Self {
+        Self {
+            message,
+            invokers: vec![],
         }
     }
 }
 
-/// Dispatch information for a [`Message`]
-struct MessageDispatchInfo {
-    /// The descriptor of the message to dispatch
-    descriptor: MessageTypeDescriptor,
+struct InvokerDispatcher {
+    /// Dispatch queues indexed by their name
+    dispatch_queues: HashMap<&'static str, DispatchQueue>,
 
-    /// Startup subscription mode
-    subscription_mode: SubscriptionMode,
+    /// Descriptors of invokers  for messages indexed by their message type
+    descriptors: HashMap<&'static str, MessageTypeInvokerDescriptor>,
 
-    /// Startup subscription bindings
-    bindings: Vec<BindingKey>,
+    /// List of invokers
+    invokers: Vec<Box<dyn HandlerInvoker>>,
 }
 
-/// A collection of indexed dispatchers by [`MessageTypeId`]
-struct DispatchMap {
-    /// Maps a named dispatch queue to the associated dispatcher
-    message_dispatchers: HashMap<&'static str, DispatchFlavor>,
-
-    /// Maps a [`MessageTypeId`] to a named dispatch queue
-    message_dispatch_queues: HashMap<String, &'static str>,
-
-    /// Maps a [`MessageTypeId`] to its associated dispatching information
-    dispatch_info: HashMap<String, MessageDispatchInfo>,
-}
-
-impl DispatchMap {
+impl InvokerDispatcher {
     fn new() -> Self {
         Self {
-            message_dispatchers: HashMap::new(),
-            message_dispatch_queues: HashMap::new(),
-            dispatch_info: HashMap::new(),
+            dispatch_queues: HashMap::new(),
+            descriptors: HashMap::new(),
+            invokers: Vec::new(),
         }
     }
 
-    fn add<H>(&mut self, registry: Box<Registry<H>>) -> Result<(), Error>
-    where
-        H: DispatchHandler + Send + 'static,
-    {
-        // A registry might contain mixed handlers of synchronous
-        // (messages with `infrastructure` attribute) and asynchronous
-        // messages.
-        // In such a scenario, that means that some messages, for a same
-        // instance of a `DispatcherHandler` should be dispatched synchronously
-        // while other messages should be dispatched asynchronously through a
-        // `DispatchQueue`.
-        // Since we need to transfer ownership of the underlying instance of the
-        // `DispatchHandler` handler to the `DispatchQueue`, we *ALSO* need to keep
-        // an instance for synchronous dispatching.
-        // We thus "split" the registry in half and regroup the handlers based on their dispatch
-        // type (asynchronous or synchronous).
-        // This will in turn make the instance of handlers share-able between threads
-        let (async_registry, sync_registry) =
-            registry.split_half(|descriptor| descriptor.is_infrastructure);
+    fn add(&mut self, invoker: Box<dyn HandlerInvoker>) -> Result<(), Error> {
+        for descriptor in invoker.descriptors() {
+            let dispatch_queue = descriptor.dispatch_queue;
 
-        if let Some(async_registry) = async_registry {
-            self.add_with(Box::new(async_registry), H::DISPATCH_QUEUE, |name| {
-                DispatchFlavor::Async(DispatchQueue::new(name.to_string()))
-            })?;
+            let dispatch_info = self
+                .descriptors
+                .entry(descriptor.message.full_name)
+                .or_insert(MessageTypeInvokerDescriptor::new(
+                    descriptor.message.clone(),
+                ));
+            dispatch_info.invokers.push(descriptor);
+
+            self.dispatch_queues
+                .entry(dispatch_queue)
+                .or_insert_with(|| DispatchQueue::new(dispatch_queue.to_string()));
         }
 
-        if let Some(sync_registry) = sync_registry {
-            self.add_with(Box::new(sync_registry), "__zebus_internal", |_| {
-                DispatchFlavor::Sync(vec![])
-            })?;
-        }
-
+        self.invokers.push(invoker);
         Ok(())
     }
 
     fn start(&mut self) -> Result<(), Error> {
-        for dispatcher in &mut self.message_dispatchers.values_mut() {
-            dispatcher.start()?;
+        for (_name, dipatch_queue) in &mut self.dispatch_queues {
+            dipatch_queue.start().map_err(Error::Queue)?;
         }
 
         Ok(())
     }
 
-    fn add_with<H>(
-        &mut self,
-        registry: Box<Registry<H>>,
-        dispatch_queue: &'static str,
-        factory: impl FnOnce(&'static str) -> DispatchFlavor,
-    ) -> Result<(), Error>
-    where
-        H: DispatchHandler + Send + 'static,
-    {
-        for (handled_message, subscription_mode, bindings) in registry.handled_messages() {
-            // Attempt to register a message to its dispatch queue and make sure it was not already
-            // registered with an other dispatch queue
-            match self
-                .message_dispatch_queues
-                .entry(handled_message.full_name.clone())
-            {
-                // The message is already registered with an other dispatch queue
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    Err(Error::DispatchQueueConflict {
-                        message_type: handled_message.full_name.clone(),
-                        dispatch_queue,
-                        previous_dispatch_queue: e.get(),
-                    })
-                }
-                // Insert the message
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(dispatch_queue);
-                    Ok(())
-                }
-            }?;
+    fn dispatch(&mut self, request: DispatchRequest) -> DispatchFuture {
+        // Retrieve the descriptor for the message we are about to dispatch and
+        // return an error'd future if we failed to find it
+        let descriptor = match self.descriptors.get(request.message.message_type()) {
+            Some(descriptor) => descriptor,
+            None => {
+                return super::future::err(Error::UnknownMessage(
+                    request.message.message_type().to_string(),
+                ))
+            }
+        };
 
-            // Register the message dispatching information
-            let dispatch_info = self
-                .dispatch_info
-                .entry(handled_message.full_name.clone())
-                .or_insert(MessageDispatchInfo {
-                    descriptor: handled_message.clone(),
-                    subscription_mode,
-                    bindings: vec![],
-                });
+        // Create the dispatch context
+        let (context, rx) = super::context::new(request);
 
-            // Make sure the startup subscription does not conflict with a previous registration
-            if dispatch_info.subscription_mode != subscription_mode {
-                return Err(Error::SubscriptionModeConflict(
-                    handled_message.full_name.clone(),
-                ));
+        // Create the invokers of the handlers for the message
+        let message_invokers = self
+            .invokers
+            .iter()
+            .filter_map(|i| i.create_invoker(context.clone()));
+
+        let mut total_invokers = 0;
+
+        for message_invoker in message_invokers {
+            // Retrieve the descriptor of the message we are about to dispatch
+            let descriptor = message_invoker.descriptor;
+
+            // Create the dispatch job
+            let job = DispatchJob::new(context.clone(), message_invoker.invoker);
+
+            // For an infrastructure message, spawn the job and start the execution of the invoker right away
+            if descriptor.message.is_infrastructure {
+                tokio::spawn(job.invoke());
+            } else {
+                // Retrieve the dispatch queue for the message
+                let queue = self
+                    .dispatch_queues
+                    .get(descriptor.dispatch_queue)
+                    .expect("unconfigured dispatch queue");
+
+                // Attempt to enqueue the job and return an error'd future if we failed
+                if let Err(e) = queue.enqueue(job) {
+                    return super::future::err(Error::Queue(e));
+                }
             }
 
-            // Add the startup bindings to the dispatching information
-            dispatch_info.bindings.extend_from_slice(bindings);
+            total_invokers += 1;
         }
 
-        // Create the dispatcher if it does not exist and add the registry to it
-        self.message_dispatchers
-            .entry(dispatch_queue)
-            .or_insert(factory(dispatch_queue))
-            .add(registry)
-    }
-
-    fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
-        let dispatcher = self
-            .message_dispatch_queues
-            .get_mut(message_dispatch.message_type())
-            .and_then(|dispatch_entry| self.message_dispatchers.get_mut(dispatch_entry));
-
-        dispatcher
-            .ok_or(Error::DispatcherNotFound(
-                message_dispatch.message_type().to_string(),
-            ))
-            .and_then(|e| e.dispatch(message_dispatch))
+        // Create the future that will resolve when all handlers have been called
+        super::future::new(
+            total_invokers,
+            context.request(),
+            descriptor.message.clone(),
+            rx,
+        )
     }
 }
 
 /// Inner state of the dispatcher
 enum Inner {
     /// Initialized state
-    Init(DispatchMap),
+    Init(InvokerDispatcher),
 
     /// Started state
-    Started(DispatchMap),
+    Started(InvokerDispatcher),
 }
 
 /// Dispatcher based on [`MessageTypeId`]
@@ -252,17 +174,14 @@ impl MessageDispatcher {
     /// Create a new empty dispatcher
     pub(crate) fn new() -> Self {
         Self {
-            inner: Some(Inner::Init(DispatchMap::new())),
+            inner: Some(Inner::Init(InvokerDispatcher::new())),
         }
     }
 
     /// Add a [`Registry`] of handlers to the dispatcher
-    pub(crate) fn add<H>(&mut self, registry: Box<Registry<H>>) -> Result<(), Error>
-    where
-        H: DispatchHandler + Send + 'static,
-    {
+    pub(crate) fn add(&mut self, invoker: Box<dyn HandlerInvoker>) -> Result<(), Error> {
         match self.inner.as_mut() {
-            Some(Inner::Init(ref mut dispatch)) => dispatch.add(registry),
+            Some(Inner::Init(ref mut dispatch)) => dispatch.add(invoker),
             _ => Err(Error::InvalidOperation),
         }
     }
@@ -284,66 +203,58 @@ impl MessageDispatcher {
         res
     }
 
-    pub(crate) fn handled_mesages<'a>(
+    fn descriptors<'a>(
         &'a self,
-    ) -> Result<
-        impl Iterator<
-            Item = (
-                &'a MessageTypeDescriptor,
-                SubscriptionMode,
-                &'a [BindingKey],
-            ),
-        >,
-        Error,
-    > {
+    ) -> Result<impl Iterator<Item = &'a MessageInvokerDescriptor>, Error> {
         match self.inner.as_ref() {
             Some(Inner::Init(ref dispatch)) | Some(Inner::Started(ref dispatch)) => Ok(dispatch
-                .dispatch_info
-                .iter()
-                .map(|(_message_type, dispatch_info)| {
-                    (
-                        &dispatch_info.descriptor,
-                        dispatch_info.subscription_mode,
-                        &dispatch_info.bindings[..],
-                    )
-                })),
+                .descriptors
+                .values()
+                .flat_map(|v| v.invokers.iter())),
             _ => Err(Error::InvalidOperation),
         }
     }
 
-    fn dispatch(&mut self, message_dispatch: MessageDispatch) -> Result<(), Error> {
-        let dispatch_map = match self.inner.as_mut() {
-            Some(Inner::Init(map)) | Some(Inner::Started(map)) => Ok(map),
-            _ => Err(Error::InvalidOperation),
-        }?;
+    fn dispatch(&mut self, request: DispatchRequest) -> DispatchFuture {
+        let dispatcher = match self.inner.as_mut() {
+            Some(Inner::Init(dispatcher)) | Some(Inner::Started(dispatcher)) => dispatcher,
+            _ => return super::future::err(Error::InvalidOperation),
+        };
 
-        dispatch_map.dispatch(message_dispatch)
+        dispatcher.dispatch(request)
     }
 }
 
-impl Dispatcher for MessageDispatcher {
-    fn dispatch(&mut self, context: DispatchContext) -> DispatchFuture {
-        let (dispatch, future) = MessageDispatch::new(context);
-        // TODO(oktal): correctly handle underlying result
-        self.dispatch(dispatch).unwrap();
-        future
+impl DispatchService for MessageDispatcher {
+    type Error = Error;
+    type Future = DispatchFuture;
+
+    fn descriptors(&self) -> Result<Vec<MessageInvokerDescriptor>, self::Error> {
+        self.descriptors().map(|it| it.cloned().collect())
+    }
+
+    fn call(&mut self, request: DispatchRequest) -> Self::Future {
+        self.dispatch(request)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::{
         bus::{self, CommandResult},
         core::{HandlerDescriptor, MessagePayload},
-        dispatch::{registry, DispatchRequest, DispatchResult},
+        dispatch::{
+            registry::{self, Registry},
+            DispatchRequest, DispatchResult, Dispatched,
+        },
         handler,
         transport::TransportMessage,
-        Bus, Command, Event, Handler, HandlerError, Message, MessageDescriptor, MessageKind, Peer,
-        PeerId, Response, ResponseMessage,
+        Bus, Command, Context, DispatchHandler, Event, Handler, HandlerError, Message,
+        MessageDescriptor, Peer, PeerId, Response, ResponseMessage, SubscriptionMode,
     };
 
     use zebus_core::binding_key;
@@ -396,7 +307,7 @@ mod tests {
             }
         }
 
-        fn add<H>(&mut self, handler: Box<H>, registry_fn: impl FnOnce(&mut Registry<H>))
+        fn add<H>(&mut self, handler: H, registry_fn: impl FnOnce(&mut Registry<H>))
         where
             H: DispatchHandler + Send + 'static,
         {
@@ -413,34 +324,30 @@ mod tests {
         where
             M: crate::Message + prost::Message + 'static,
         {
-            let dispatched = self.dispatch_local(message)?.await;
+            let dispatched = self.dispatch_local(message).await?;
             Ok(dispatched.try_into().expect("missing CommandResult"))
         }
 
-        fn dispatch<M>(&mut self, message: &M) -> Result<DispatchFuture, Error>
+        async fn dispatch_remote<M>(&mut self, message: &M) -> Result<Dispatched, Error>
         where
             M: crate::Message + prost::Message,
         {
             let (_, message) =
                 TransportMessage::create(&self.peer, self.environment.clone(), message);
-            let request = DispatchRequest::Remote(message);
-            let bus = Arc::new(TestBus);
-            let context = DispatchContext::new(request, bus);
-            let (message_dispatch, future) = MessageDispatch::new(context);
-            self.dispatcher.dispatch(message_dispatch)?;
-            Ok(future)
+            self.dispatch(DispatchRequest::remote(message, Arc::new(TestBus)))
+                .await
         }
 
-        fn dispatch_local<M>(&mut self, message: M) -> Result<DispatchFuture, Error>
+        async fn dispatch_local<M>(&mut self, message: M) -> Result<Dispatched, Error>
         where
             M: Message,
         {
-            let request = DispatchRequest::Local(Arc::new(message));
-            let bus = Arc::new(TestBus);
-            let context = DispatchContext::new(request, bus);
-            let (message_dispatch, future) = MessageDispatch::new(context);
-            self.dispatcher.dispatch(message_dispatch)?;
-            Ok(future)
+            self.dispatch(DispatchRequest::local(Arc::new(message), Arc::new(TestBus)))
+                .await
+        }
+
+        async fn dispatch(&mut self, request: DispatchRequest) -> Result<Dispatched, Error> {
+            self.dispatcher.dispatch(request).await
         }
 
         fn decode_as<M: MessageDescriptor + prost::Message + Default>(
@@ -453,6 +360,76 @@ mod tests {
             }
 
             None
+        }
+    }
+
+    struct TrackerHandler<H> {
+        tracker: Tracker,
+        handler: H,
+    }
+
+    fn track<H>(handler: H) -> (TrackerHandler<H>, Tracker) {
+        let tracker = Tracker::new();
+        (
+            TrackerHandler {
+                tracker: tracker.clone(),
+                handler,
+            },
+            tracker,
+        )
+    }
+
+    impl<H, M> HandlerDescriptor<M> for TrackerHandler<H>
+    where
+        H: HandlerDescriptor<M>,
+    {
+        fn subscription_mode() -> SubscriptionMode {
+            H::subscription_mode()
+        }
+
+        fn bindings() -> Vec<zebus_core::BindingKey> {
+            H::bindings()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<H, M> Handler<M> for TrackerHandler<H>
+    where
+        H: DispatchHandler + Handler<M> + Send,
+        M: Message,
+    {
+        type Response = H::Response;
+
+        async fn handle(&mut self, message: M, ctx: Context<'_>) -> Self::Response {
+            self.tracker.track(&message);
+            self.handler.handle(message, ctx).await
+        }
+    }
+
+    impl<H: DispatchHandler> DispatchHandler for TrackerHandler<H> {
+        const DISPATCH_QUEUE: &'static str = H::DISPATCH_QUEUE;
+    }
+
+    #[derive(Clone)]
+    struct Tracker {
+        triggers: Arc<Mutex<HashMap<&'static str, usize>>>,
+    }
+
+    impl Tracker {
+        fn new() -> Self {
+            Self {
+                triggers: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        fn track(&self, message: &dyn crate::core::Message) {
+            let mut triggers = self.triggers.lock().unwrap();
+            *triggers.entry(message.name()).or_insert(0) += 1;
+        }
+
+        fn count_for<M: MessageDescriptor>(&self) -> usize {
+            let triggers = self.triggers.lock().unwrap();
+            triggers.get(M::name()).cloned().unwrap_or(0usize)
         }
     }
 
@@ -489,24 +466,42 @@ mod tests {
     struct TestHandler {}
 
     #[handler(auto)]
+    #[async_trait]
     impl crate::Handler<AutoSubscribeCommand> for TestHandler {
         type Response = ();
 
-        fn handle(&mut self, _message: AutoSubscribeCommand) -> Self::Response {}
+        async fn handle(
+            &mut self,
+            _message: AutoSubscribeCommand,
+            _ctx: Context<'_>,
+        ) -> Self::Response {
+        }
     }
 
     #[handler(binding = "october")]
+    #[async_trait]
     impl crate::Handler<AutoSubscribeCommandWithRouting> for TestHandler {
         type Response = ();
 
-        fn handle(&mut self, _message: AutoSubscribeCommandWithRouting) -> Self::Response {}
+        async fn handle(
+            &mut self,
+            _message: AutoSubscribeCommandWithRouting,
+            _ctx: Context<'_>,
+        ) -> Self::Response {
+        }
     }
 
     #[handler(manual)]
+    #[async_trait]
     impl crate::Handler<ManualSubscribeCommand> for TestHandler {
         type Response = ();
 
-        fn handle(&mut self, _message: ManualSubscribeCommand) -> Self::Response {}
+        async fn handle(
+            &mut self,
+            _message: ManualSubscribeCommand,
+            _ctx: Context<'_>,
+        ) -> Self::Response {
+        }
     }
 
     #[derive(prost::Message, crate::Command, Clone)]
@@ -537,23 +532,25 @@ mod tests {
     }
 
     #[derive(crate::Handler)]
-    struct ParseCommandHandler;
+    struct ParseCommandHandler {}
 
     #[derive(crate::Handler)]
     struct ParseCommandResponseErrorHandler;
 
     #[handler(manual)]
+    #[async_trait]
     impl Handler<ParseCommand> for ParseCommandHandler {
         type Response = ();
 
-        fn handle(&mut self, _message: ParseCommand) {}
+        async fn handle(&mut self, _message: ParseCommand, _ctx: Context<'_>) {}
     }
 
     #[handler(manual)]
+    #[async_trait]
     impl Handler<ParseCommand> for ParseCommandResponseErrorHandler {
         type Response = Result<ResponseMessage<ParseResponse>, HandlerError<ParseError>>;
 
-        fn handle(&mut self, message: ParseCommand) -> Self::Response {
+        async fn handle(&mut self, message: ParseCommand, _ctx: Context<'_>) -> Self::Response {
             let mut chars = message.value.chars();
             if let Some(first) = chars.next() {
                 if first == '-' {
@@ -566,6 +563,64 @@ mod tests {
             }
             .into())
         }
+    }
+
+    #[derive(prost::Message, crate::Command, Clone)]
+    #[zebus(namespace = "Abc.Test", infrastructure)]
+    struct PingCommand {
+        #[prost(uint64, required, tag = 1)]
+        seq: u64,
+    }
+
+    #[derive(prost::Message, crate::Command, Clone)]
+    #[zebus(namespace = "Abc.Test")]
+    struct PongResponse {
+        #[prost(uint64, required, tag = 1)]
+        seq: u64,
+    }
+
+    #[derive(crate::Handler)]
+    struct PingCommandHandler {}
+
+    #[handler]
+    #[async_trait]
+    impl Handler<PingCommand> for PingCommandHandler {
+        type Response = ResponseMessage<PongResponse>;
+
+        async fn handle(&mut self, message: PingCommand, _ctx: Context<'_>) -> Self::Response {
+            PongResponse { seq: message.seq }.into()
+        }
+    }
+
+    #[derive(prost::Message, crate::Event, Clone)]
+    #[zebus(namespace = "Abc.Test")]
+    struct TestSucceeded {
+        #[prost(double, required, tag = 1)]
+        execution_time_secs: f64,
+    }
+
+    #[derive(crate::Handler)]
+    #[zebus(dispatch_queue = "PersisenceQueue")]
+    struct TestPersistenceHandler;
+
+    #[derive(crate::Handler)]
+    #[zebus(dispatch_queue = "PersisenceQueue")]
+    struct TestOutputDisplayHandler;
+
+    #[handler]
+    #[async_trait]
+    impl Handler<TestSucceeded> for TestPersistenceHandler {
+        type Response = ();
+
+        async fn handle(&mut self, _message: TestSucceeded, _ctx: Context<'_>) -> Self::Response {}
+    }
+
+    #[handler]
+    #[async_trait]
+    impl Handler<TestSucceeded> for TestOutputDisplayHandler {
+        type Response = ();
+
+        async fn handle(&mut self, _message: TestSucceeded, _ctx: Context<'_>) -> Self::Response {}
     }
 
     #[test]
@@ -611,7 +666,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_message_to_handler_with_no_response() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandHandler), |h| {
+        let (handler, tracker) = track(ParseCommandHandler {});
+        fixture.add(handler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -621,17 +677,19 @@ mod tests {
             value: "987612".to_string(),
         };
         let dispatched = fixture
-            .dispatch(&command)
-            .expect("failed to dispatch command")
-            .await;
-        assert_eq!(dispatched.kind, MessageKind::Command);
+            .dispatch_remote(&command)
+            .await
+            .expect("failed to dispatch command");
+
+        assert!(dispatched.descriptor.is::<ParseCommand>());
         assert!(matches!(dispatched.result, Ok(None)));
+        assert_eq!(tracker.count_for::<ParseCommand>(), 1);
     }
 
     #[tokio::test]
     async fn dispatch_message_to_handler_with_response() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+        fixture.add(ParseCommandResponseErrorHandler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -641,18 +699,19 @@ mod tests {
             value: "987612".to_string(),
         };
         let dispatched = fixture
-            .dispatch(&command)
-            .expect("failed to dispatch command")
-            .await;
+            .dispatch_remote(&command)
+            .await
+            .expect("failed to dispatch command");
+
         let response = Fixture::decode_as::<ParseResponse>(&dispatched.result);
-        assert_eq!(dispatched.kind, MessageKind::Command);
+        assert!(dispatched.descriptor.is::<ParseCommand>());
         assert_eq!(response, Some(ParseResponse { value: 987612 }));
     }
 
     #[tokio::test]
     async fn dispatch_message_to_handler_with_user_error() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+        fixture.add(ParseCommandResponseErrorHandler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -662,23 +721,23 @@ mod tests {
             value: "-43".to_string(),
         };
         let dispatched = fixture
-            .dispatch(&command)
-            .expect("failed to dispatch command")
-            .await;
+            .dispatch_remote(&command)
+            .await
+            .expect("failed to dispatch command");
 
-        let expected_error = Response::Error(1, format!("{}", ParseError::Negative));
+        let expected_error = format!("{}", ParseError::Negative);
 
+        assert!(dispatched.descriptor.is::<ParseCommand>());
         assert!(matches!(
-            dispatched.result.ok().flatten(),
-            Some(expected_error)
+            dispatched.result,
+            Ok(Some(Response::Error(1, expected_error)))
         ));
-        assert_eq!(dispatched.kind, MessageKind::Command);
     }
 
     #[tokio::test]
     async fn dispatch_message_to_handler_with_standard_error() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+        fixture.add(ParseCommandResponseErrorHandler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -688,20 +747,21 @@ mod tests {
             value: "NotANumber".to_string(),
         };
         let dispatched = fixture
-            .dispatch(&command)
-            .expect("failed to dispatch command")
-            .await;
+            .dispatch_remote(&command)
+            .await
+            .expect("failed to dispatch command");
 
         let err = dispatched.result.unwrap_err();
 
         assert_eq!(err.count(), 1);
-        assert_eq!(dispatched.kind, MessageKind::Command);
+        assert!(dispatched.descriptor.is::<ParseCommand>());
     }
 
     #[tokio::test]
     async fn dispatch_local_message_to_handler_with_no_response() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandHandler), |h| {
+        let (handler, tracker) = track(ParseCommandHandler {});
+        fixture.add(handler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -712,16 +772,18 @@ mod tests {
         };
         let dispatched = fixture
             .dispatch_local(command)
-            .expect("failed to dispatch command")
-            .await;
-        assert_eq!(dispatched.kind, MessageKind::Command);
+            .await
+            .expect("failed to dispatch command");
+
+        assert!(dispatched.descriptor.is::<ParseCommand>());
         assert!(matches!(dispatched.result, Ok(None)));
+        assert_eq!(tracker.count_for::<ParseCommand>(), 1);
     }
 
     #[tokio::test]
     async fn dispatch_local_message_to_handler_with_response() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+        fixture.add(ParseCommandResponseErrorHandler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -732,17 +794,19 @@ mod tests {
         };
         let dispatched = fixture
             .dispatch_local(command)
-            .expect("failed to dispatch command")
-            .await;
+            .await
+            .expect("failed to dispatch command");
+
         let response = Fixture::decode_as::<ParseResponse>(&dispatched.result);
-        assert_eq!(dispatched.kind, MessageKind::Command);
+        assert!(dispatched.descriptor.is::<ParseCommand>());
         assert_eq!(response, Some(ParseResponse { value: 987612 }));
     }
 
     #[tokio::test]
     async fn dispatch_local_command_with_success_result() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandHandler), |h| {
+        let (handler, tracker) = track(ParseCommandHandler {});
+        fixture.add(handler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -751,14 +815,20 @@ mod tests {
         let command = ParseCommand {
             value: "987612".to_string(),
         };
-        let result = fixture.send(command).await.unwrap();
-        assert!(matches!(result, Ok(None)));
+        let dispatched = fixture
+            .dispatch_local(command)
+            .await
+            .expect("failed to dispatch command");
+
+        assert!(dispatched.descriptor.is::<ParseCommand>());
+        assert!(matches!(dispatched.result, Ok(None)));
+        assert_eq!(tracker.count_for::<ParseCommand>(), 1);
     }
 
     #[tokio::test]
     async fn dispatch_local_command_with_success_result_and_response() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+        fixture.add(ParseCommandResponseErrorHandler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -775,7 +845,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_local_command_with_error_result() {
         let mut fixture = Fixture::new();
-        fixture.add(Box::new(ParseCommandResponseErrorHandler), |h| {
+        fixture.add(ParseCommandResponseErrorHandler, |h| {
             h.handles::<ParseCommand>();
         });
 
@@ -786,5 +856,52 @@ mod tests {
         };
         let result = fixture.send(command).await.unwrap();
         assert_eq!(result.is_err(), true);
+    }
+
+    #[tokio::test]
+    async fn dispatch_infrastructure_message() {
+        let mut fixture = Fixture::new();
+        let (handler, tracker) = track(PingCommandHandler {});
+        fixture.add(handler, |h| {
+            h.handles::<PingCommand>();
+        });
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let dispatched = fixture
+            .dispatch_remote(&PingCommand { seq: 0xABC })
+            .await
+            .expect("failed to dispatch command");
+
+        assert!(dispatched.descriptor.is::<PingCommand>());
+        let response = Fixture::decode_as::<PongResponse>(&dispatched.result);
+        assert!(matches!(response, Some(PongResponse { seq: 0xABC })));
+        assert_eq!(tracker.count_for::<PingCommand>(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_to_multiple_handlers_in_multiple_dispatch_queues() {
+        let mut fixture = Fixture::new();
+        let (persistent_handler, persistence_tracker) = track(TestPersistenceHandler {});
+        fixture.add(persistent_handler, |h| {
+            h.handles::<TestSucceeded>();
+        });
+
+        let (output_handler, output_tracker) = track(TestOutputDisplayHandler {});
+        fixture.add(output_handler, |h| {
+            h.handles::<TestSucceeded>();
+        });
+
+        assert_eq!(fixture.start().is_ok(), true);
+
+        let dispatched = fixture
+            .dispatch_remote(&TestSucceeded {
+                execution_time_secs: 0.5,
+            })
+            .await
+            .expect("failed to dispatch event");
+
+        assert!(dispatched.descriptor.is::<TestSucceeded>());
+        assert_eq!(persistence_tracker.count_for::<TestSucceeded>(), 1);
+        assert_eq!(output_tracker.count_for::<TestSucceeded>(), 1);
     }
 }

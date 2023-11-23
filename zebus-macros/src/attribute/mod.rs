@@ -33,7 +33,7 @@ fn expand(item: ItemImpl, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
     let handler_segment = trait_path
         .segments
         .iter()
-        .find(|s| s.ident == "Handler" || s.ident == "ContextAwareHandler")
+        .find(|s| s.ident == "Handler")
         .ok_or(syn::Error::new_spanned(
             &item,
             "#[handler] must be applied on a `Handler` trait implementation",

@@ -1,188 +1,102 @@
+use futures_util::FutureExt;
 use std::{
-    any::{type_name, Any},
+    any::type_name,
     collections::{hash_map::Entry, HashMap},
+    sync::Arc,
 };
+use tokio::sync::Mutex;
 
-use super::{Dispatch, DispatchRequest, MessageDispatch};
+use super::{
+    invoker::MessageHandlerInvoker, DispatchContext, DispatchMessage, HandlerFuture,
+    HandlerInvoker, HandlerResponse, MessageInvokerDescriptor,
+};
 use crate::{
-    core::{
-        ContextAwareHandler, Handler, HandlerDescriptor, IntoResponse, MessagePayload,
-        SubscriptionMode,
-    },
-    sync::LockCell,
-    BindingKey, DispatchHandler, MessageDescriptor, MessageTypeDescriptor,
+    core::{Handler, HandlerDescriptor, IntoResponse, MessagePayload},
+    DispatchHandler, MessageDescriptor,
 };
 
-type InvokerFn = dyn Fn(&MessageDispatch, &mut (dyn Any + 'static)) + Send;
+type InvokerFn<H> = dyn Fn(DispatchContext, Arc<Mutex<H>>) -> HandlerFuture + Send + Sync;
 
-pub struct MessageInvoker {
-    descriptor: MessageTypeDescriptor,
-    subscription_mode: SubscriptionMode,
-    bindings: Vec<BindingKey>,
-    invoker: Box<InvokerFn>,
+struct MessageInvoker<H> {
+    descriptor: MessageInvokerDescriptor,
+    invoker: Box<InvokerFn<H>>,
 }
 
+impl<H> MessageInvoker<H> {
+    fn create(&self, ctx: DispatchContext, handler: Arc<Mutex<H>>) -> HandlerFuture {
+        (self.invoker)(ctx, handler)
+    }
+}
+
+/// A registry of [`Handler`] handlers
 pub struct Registry<H>
 where
     H: DispatchHandler + Send,
 {
-    handler: LockCell<Box<H>>,
-    invokers: HashMap<&'static str, MessageInvoker>,
+    handler: Arc<Mutex<H>>,
+    invokers: HashMap<&'static str, MessageInvoker<H>>,
 }
 
 impl<H> Registry<H>
 where
     H: DispatchHandler + Send,
 {
-    fn new(handler: Box<H>) -> Self {
+    fn new(handler: H) -> Self {
         Self {
-            handler: LockCell::new(handler),
+            handler: Arc::new(Mutex::new(handler)),
             invokers: HashMap::new(),
         }
     }
 
+    /// Declares a handler for a specific type of message [`M`]
     pub fn handles<M>(&mut self) -> &mut Self
     where
         H: Handler<M> + HandlerDescriptor<M> + 'static,
         M: MessageDescriptor + prost::Message + Clone + Default + 'static,
     {
-        let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
-            let handler_type = std::any::type_name::<H>();
-            match &dispatch.context.request {
-                DispatchRequest::Remote(message) => {
-                    if let Some(Ok(message)) = message.decode_as::<M>() {
-                        // Safety:
-                        //   1. `handler` is of type `Box<H>
-                        //   2. `H` has an explicit bound on `Handler<M>`
-                        let res =
-                            unsafe { &mut *(handler as *mut dyn Any as *mut H) }.handle(message);
-                        dispatch.set_kind(M::kind());
-                        dispatch.set_response(handler_type, res.into_response());
-                    }
-                }
-                DispatchRequest::Local(message) => {
-                    if let Some(message) = message.downcast_ref::<M>() {
-                        // Safety:
-                        //   1. `handler` is of type `Box<H>
-                        //   2. `H` has an explicit bound on `Handler<M>`
-                        let res = unsafe { &mut *(handler as *mut dyn Any as *mut H) }
-                            .handle(message.clone());
-                        dispatch.set_kind(M::kind());
-                        dispatch.set_response(handler_type, res.into_response());
-                    }
-                }
-            }
-        };
-
-        self.add::<M>(|| Box::new(invoker));
+        self.add::<M>(Box::new(|req, handler| {
+            Self::invoker_for::<M>(req, handler)
+        }));
         self
     }
 
-    pub fn context_aware_handles<M>(&mut self) -> &mut Self
+    fn invoker_for<M>(ctx: DispatchContext, handler: Arc<Mutex<H>>) -> HandlerFuture
     where
-        H: ContextAwareHandler<M> + HandlerDescriptor<M> + 'static,
+        H: Handler<M> + HandlerDescriptor<M> + 'static,
         M: MessageDescriptor + prost::Message + Clone + Default + 'static,
     {
-        let invoker = |dispatch: &MessageDispatch, handler: &mut dyn Any| {
-            let handler_type = std::any::type_name::<H>();
-            match &dispatch.context.request {
-                DispatchRequest::Remote(message) => {
+        async move {
+            let response = match ctx.message() {
+                DispatchMessage::Remote(message) => {
                     if let Some(Ok(message)) = message.decode_as::<M>() {
-                        // Safety:
-                        //   1. `handler` is of type `Box<H>
-                        //   2. `H` has an explicit bound on `ContextAwareHandler<M>`
-                        let res = unsafe { &mut *(handler as *mut dyn Any as *mut H) }
-                            .handle(message, dispatch.context.handler_context());
-                        dispatch.set_kind(M::kind());
-                        dispatch.set_response(handler_type, res.into_response());
+                        let mut handler = handler.lock().await;
+                        handler
+                            .handle(message, ctx.handler_context())
+                            .await
+                            .into_response()
+                    } else {
+                        None
                     }
                 }
-                DispatchRequest::Local(message) => {
+                DispatchMessage::Local(message) => {
                     if let Some(message) = message.downcast_ref::<M>() {
-                        // Safety:
-                        //   1. `handler` is of type `Box<H>
-                        //   2. `H` has an explicit bound on `Handler<M>`
-                        let res = unsafe { &mut *(handler as *mut dyn Any as *mut H) }
-                            .handle(message.clone(), dispatch.context.handler_context());
-                        dispatch.set_kind(M::kind());
-                        dispatch.set_response(handler_type, res.into_response());
+                        let mut handler = handler.lock().await;
+                        handler
+                            .handle(message.clone(), ctx.handler_context())
+                            .await
+                            .into_response()
+                    } else {
+                        None
                     }
                 }
-            }
-        };
+            };
 
-        self.add::<M>(|| Box::new(invoker));
-        self
-    }
-
-    pub(crate) fn split_half(
-        self,
-        pred: impl Fn(&MessageTypeDescriptor) -> bool,
-    ) -> (Option<Self>, Option<Self>) {
-        let mut first = HashMap::new();
-        let mut second = HashMap::new();
-
-        for (k, v) in self.invokers {
-            if pred(&v.descriptor) {
-                second.insert(k, v);
-            } else {
-                first.insert(k, v);
-            }
+            HandlerResponse::for_handler::<H>(response)
         }
-
-        match (first.is_empty(), second.is_empty()) {
-            (true, true) => (
-                Some(Self {
-                    handler: self.handler,
-                    invokers: HashMap::new(),
-                }),
-                None,
-            ),
-            (false, true) => (
-                Some(Self {
-                    handler: self.handler,
-                    invokers: first,
-                }),
-                None,
-            ),
-            (true, false) => (
-                None,
-                Some(Self {
-                    handler: self.handler,
-                    invokers: second,
-                }),
-            ),
-            (false, false) => {
-                let [handler0, handler1] = self.handler.into_shared::<2>();
-                (
-                    Some(Self {
-                        handler: handler0,
-                        invokers: first,
-                    }),
-                    Some(Self {
-                        handler: handler1,
-                        invokers: second,
-                    }),
-                )
-            }
-        }
+        .boxed()
     }
 
-    pub(crate) fn handled_messages<'a>(
-        &'a self,
-    ) -> impl Iterator<
-        Item = (
-            &'a MessageTypeDescriptor,
-            SubscriptionMode,
-            &'a [BindingKey],
-        ),
-    > + 'a {
-        self.invokers
-            .values()
-            .map(|v| (&v.descriptor, v.subscription_mode, &v.bindings[..]))
-    }
-
-    fn add<M>(&mut self, invoker_fn: impl FnOnce() -> Box<InvokerFn>)
+    fn add<M>(&mut self, invoker_fn: Box<InvokerFn<H>>)
     where
         M: MessageDescriptor + 'static,
         H: HandlerDescriptor<M>,
@@ -191,10 +105,8 @@ where
         match self.invokers.entry(M::name()) {
             Entry::Occupied(_) => None,
             Entry::Vacant(e) => Some(e.insert(MessageInvoker {
-                descriptor: MessageTypeDescriptor::of::<M>(),
-                subscription_mode: H::subscription_mode(),
-                bindings: H::bindings().into_iter().map(Into::into).collect(),
-                invoker: Box::new(invoker_fn()),
+                descriptor: MessageInvokerDescriptor::of::<H, M>(),
+                invoker: invoker_fn,
             })),
         }
         .expect(&format!(
@@ -204,24 +116,31 @@ where
     }
 }
 
-impl<H> Dispatch for Registry<H>
+impl<H> HandlerInvoker for Registry<H>
 where
     H: DispatchHandler + Send + 'static,
 {
-    fn dispatch(&mut self, dispatch: &MessageDispatch) {
-        let message_type = dispatch.message_type();
-        if let Some(entry) = self.invokers.get_mut(message_type) {
-            self.handler.apply_mut(|h| {
-                (entry.invoker)(dispatch, h.as_mut() as &mut dyn Any);
-            });
-        }
+    fn descriptors(&self) -> Vec<MessageInvokerDescriptor> {
+        self.invokers
+            .values()
+            .map(|i| i.descriptor.clone())
+            .collect()
+    }
+
+    fn create_invoker(&self, ctx: DispatchContext) -> Option<MessageHandlerInvoker<'_>> {
+        self.invokers
+            .get(ctx.message_type())
+            .map(|invoker| MessageHandlerInvoker {
+                descriptor: &invoker.descriptor,
+                invoker: invoker.create(ctx, Arc::clone(&self.handler)),
+            })
     }
 }
 
 pub(crate) fn for_handler<H>(
-    handler: Box<H>,
+    handler: H,
     registry_fn: impl FnOnce(&mut Registry<H>),
-) -> Box<Registry<H>>
+) -> Box<dyn HandlerInvoker>
 where
     H: DispatchHandler + Send + 'static,
 {

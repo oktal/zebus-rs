@@ -1,27 +1,33 @@
+mod context;
 mod dispatcher;
 mod future;
+mod invoker;
 mod queue;
 pub(crate) mod registry;
 
 use std::{fmt::Display, sync::Arc};
 
 use crate::bus::{CommandError, CommandResult};
-use crate::core::{self, RawMessage};
+use crate::core::RawMessage;
 use crate::core::{response::HANDLER_ERROR_CODE, Response};
 use crate::lotus::MessageProcessingFailed;
+use crate::message_type_descriptor::MessageTypeDescriptor;
 use crate::proto::IntoProtobuf;
 use crate::{
     transport::{MessageExecutionCompleted, TransportMessage},
     MessageKind, Peer,
 };
-use crate::{Bus, Message};
+use crate::{Bus, Message, MessageDescriptor};
+pub(crate) use context::DispatchContext;
 pub(crate) use dispatcher::{Error, MessageDispatcher};
+use futures_core::Future;
+pub(crate) use invoker::{
+    HandlerFuture, HandlerInvoker, HandlerResponse, MessageInvokerDescriptor,
+};
 
-use self::future::DispatchFuture;
-
-/// A dispatch request
+/// A message to dispatch
 #[derive(Debug, Clone)]
-pub(crate) enum DispatchRequest {
+pub(crate) enum DispatchMessage {
     /// Dispatch a [`TransportMessage`] from a remote peer
     Remote(TransportMessage),
 
@@ -29,62 +35,12 @@ pub(crate) enum DispatchRequest {
     Local(Arc<dyn Message>),
 }
 
-#[derive(Clone)]
-pub(crate) struct DispatchContext {
-    request: DispatchRequest,
-    bus: Arc<dyn Bus>,
-}
-
-impl DispatchContext {
-    pub(crate) fn new(request: DispatchRequest, bus: Arc<dyn Bus>) -> Self {
-        Self { request, bus }
-    }
-
-    pub(crate) fn handler_context(&self) -> core::Context<'_> {
-        core::Context {
-            bus: self.bus.as_ref(),
-        }
-    }
-}
-
-impl DispatchRequest {
+impl DispatchMessage {
     fn message_type(&self) -> &str {
         match self {
-            DispatchRequest::Remote(message) => message.message_type_id.full_name.as_str(),
-            DispatchRequest::Local(message) => message.name(),
+            DispatchMessage::Remote(message) => message.message_type_id.full_name.as_str(),
+            DispatchMessage::Local(message) => message.name(),
         }
-    }
-}
-
-/// A [`DispatchRequest`] to be dispatched
-pub(crate) struct MessageDispatch {
-    context: DispatchContext,
-    future: DispatchFuture,
-}
-
-impl MessageDispatch {
-    pub(self) fn new(context: DispatchContext) -> (Self, DispatchFuture) {
-        let future = DispatchFuture::new(context.request.clone());
-
-        let dispatch = Self { context, future };
-        let future = dispatch.future.clone();
-        (dispatch, future)
-    }
-
-    pub(self) fn message_type(&self) -> &str {
-        self.context.request.message_type()
-    }
-
-    pub(self) fn set_kind(&self, kind: MessageKind) {
-        self.future.set_kind(kind);
-    }
-
-    pub(self) fn set_response(&self, handler_type: &'static str, response: Option<Response>) {
-        self.future.set_response(handler_type, response);
-    }
-
-    pub(self) fn set_completed(self) {
-        self.future.set_completed();
     }
 }
 
@@ -137,13 +93,12 @@ pub(crate) struct DispatchOutput {
 pub(crate) type DispatchResult = Result<Option<Response>, DispatchError>;
 
 /// Final representation of a [`TransportMessage`] that has been dispatched
-#[derive(Debug)]
 pub(crate) struct Dispatched {
     /// The initial [`DispatchRequest`]
-    request: DispatchRequest,
+    request: Arc<DispatchRequest>,
 
-    /// [`MessageKind`] kind of message that has been dispatched
-    kind: MessageKind,
+    /// [`MessageTypeDescriptor`] descriptor of the message that has been dispatched
+    descriptor: MessageTypeDescriptor,
 
     /// Result of the dispatch
     result: DispatchResult,
@@ -158,18 +113,22 @@ impl Dispatched {
         }
     }
 
+    pub(crate) fn is<M: MessageDescriptor + 'static>(&self) -> bool {
+        self.descriptor.is::<M>()
+    }
+
     /// Returns `true` if a [`Command`] has been dispatched
     pub(crate) fn is_command(&self) -> bool {
-        self.is(MessageKind::Command)
+        self.is_kind(MessageKind::Command)
     }
 
     /// Returns `true` if an [`Event`] has been dispatched
     pub(crate) fn is_event(&self) -> bool {
-        self.is(MessageKind::Event)
+        self.is_kind(MessageKind::Event)
     }
 
-    pub(crate) fn is(&self, kind: MessageKind) -> bool {
-        matches!(self.kind, kind)
+    pub(crate) fn is_kind(&self, kind: MessageKind) -> bool {
+        matches!(self.descriptor.kind, kind)
     }
 }
 
@@ -207,7 +166,7 @@ impl Into<DispatchOutput> for Dispatched {
     fn into(self) -> DispatchOutput {
         let is_command = self.is_command();
 
-        if let DispatchRequest::Remote(message) = self.request {
+        if let DispatchMessage::Remote(ref message) = self.request.message {
             let originator = message.originator.clone();
             let command_id = message.id.clone();
 
@@ -225,7 +184,7 @@ impl Into<DispatchOutput> for Dispatched {
                 let failing_handlers = dispatch_error.0.iter().map(|e| e.0.to_string()).collect();
 
                 Some(MessageProcessingFailed {
-                    transport_message: message,
+                    transport_message: message.clone(),
                     // TODO(oktal): serialize message to JSON
                     message_json: String::new(),
                     exception_message: dispatch_error.to_string(),
@@ -270,18 +229,60 @@ impl Into<DispatchOutput> for Dispatched {
     }
 }
 
-pub(crate) trait Dispatcher {
-    fn dispatch(&mut self, context: DispatchContext) -> DispatchFuture;
+/// A type that encapsulates a request to dispatch a [`DispatchMessage`]
+pub(crate) struct DispatchRequest {
+    message: DispatchMessage,
+    bus: Arc<dyn Bus>,
 }
 
-pub(crate) trait Dispatch {
-    fn dispatch(&mut self, dispatch: &MessageDispatch);
-}
-
-impl Dispatch for Vec<Box<dyn Dispatch + Send>> {
-    fn dispatch(&mut self, dispatch: &MessageDispatch) {
-        for d in self {
-            d.dispatch(dispatch);
+impl DispatchRequest {
+    /// Create a [`DispatchRequest`] for a [`TransportMessage`] received from a remote peer
+    pub(crate) fn remote(message: TransportMessage, bus: Arc<dyn Bus>) -> Self {
+        Self {
+            message: DispatchMessage::Remote(message),
+            bus,
         }
     }
+
+    /// Create a [`DispatchRequest`] for a local [`Message`]
+    pub(crate) fn local(message: Arc<dyn Message>, bus: Arc<dyn Bus>) -> Self {
+        Self {
+            message: DispatchMessage::Local(message),
+            bus,
+        }
+    }
+}
+
+struct DispatchJob {
+    ctx: DispatchContext,
+    invoker: HandlerFuture,
+}
+
+impl DispatchJob {
+    fn new(ctx: DispatchContext, invoker: HandlerFuture) -> Self {
+        Self { ctx, invoker }
+    }
+
+    async fn invoke(self) {
+        self.ctx.send(self.invoker.await).await
+    }
+}
+
+/// Trait for a service able to dispatch a [`DispatchRequest`]
+pub(crate) trait DispatchService {
+    /// Associated error type of the service
+    type Error;
+
+    /// Type of [`Future`] returned by the service when called.
+    /// The [`Future`] must resolve to a a [`Result`] where the `Ok` part
+    /// is a [`Dispatched`] type representing the result of the dispatch
+    /// and the `Err` type represents a `Self::Error` error that happened
+    /// before or during dispatch
+    type Future: Future<Output = Result<Dispatched, Self::Error>>;
+
+    /// A list of [`MessageInvokerDescriptor`] that the service can dispatch
+    fn descriptors(&self) -> Result<Vec<MessageInvokerDescriptor>, Self::Error>;
+
+    /// Dispatch a [`DispatchRequest`]
+    fn call(&mut self, request: DispatchRequest) -> Self::Future;
 }

@@ -43,6 +43,12 @@ impl From<MessageTypeDescriptor> for MessageTypeId {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MessageType(String);
 
+impl AsRef<str> for MessageType {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 impl MessageType {
     pub fn of<M: MessageDescriptor>() -> Self {
         Self(M::name().to_string())
@@ -69,25 +75,19 @@ impl From<String> for MessageType {
 
 impl From<MessageTypeId> for MessageType {
     fn from(id: MessageTypeId) -> Self {
-        Self(id.descriptor.full_name)
+        Self(id.descriptor.full_name.to_string())
     }
 }
 
 impl From<MessageTypeDescriptor> for MessageType {
     fn from(descriptor: MessageTypeDescriptor) -> Self {
-        Self(descriptor.full_name)
+        Self(descriptor.full_name.to_string())
     }
 }
 
 impl From<proto::MessageTypeId> for MessageType {
     fn from(id: proto::MessageTypeId) -> Self {
         Self(id.full_name)
-    }
-}
-
-impl AsRef<str> for MessageType {
-    fn as_ref(&self) -> &str {
-        self.0.as_str()
     }
 }
 
@@ -130,7 +130,7 @@ impl MessageTypeId {
 
     pub(crate) fn into_protobuf(self) -> proto::MessageTypeId {
         proto::MessageTypeId {
-            full_name: self.descriptor.full_name,
+            full_name: self.descriptor.full_name.to_string(),
         }
     }
 }
@@ -140,7 +140,7 @@ impl IntoProtobuf for MessageTypeId {
 
     fn into_protobuf(self) -> Self::Output {
         proto::MessageTypeId {
-            full_name: self.descriptor.full_name.clone(),
+            full_name: self.descriptor.full_name.to_string(),
         }
     }
 }

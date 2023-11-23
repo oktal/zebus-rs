@@ -4,8 +4,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use super::{Dispatch, MessageDispatch};
 use thiserror::Error;
+
+use super::DispatchJob;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -25,52 +26,48 @@ pub enum Error {
 enum Inner {
     Init {
         name: String,
-        dispatchers: Vec<Box<dyn Dispatch + Send>>,
     },
 
     Started {
         name: String,
-        dispatch_tx: mpsc::Sender<MessageDispatch>,
+        tx: mpsc::Sender<DispatchJob>,
         handle: JoinHandle<()>,
     },
 }
 
 struct Worker {
-    dispatch_rx: mpsc::Receiver<MessageDispatch>,
-    dispatchers: Vec<Box<dyn Dispatch + Send>>,
+    rx: mpsc::Receiver<DispatchJob>,
 }
 
 impl Worker {
-    fn start(
-        name: &str,
-        dispatchers: Vec<Box<dyn Dispatch + Send>>,
-    ) -> Result<(std::sync::mpsc::Sender<MessageDispatch>, JoinHandle<()>), Error> {
+    fn start(name: &str) -> Result<(std::sync::mpsc::Sender<DispatchJob>, JoinHandle<()>), Error> {
         // Create channel for message dispatching
         let (tx, rx) = mpsc::channel();
 
-        // Create worker
-        let mut worker = Worker {
-            dispatch_rx: rx,
-            dispatchers,
-        };
+        // Create tokio runtime
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(Error::Io)?;
+
+        // Create Worker
+        let mut worker = Worker { rx };
 
         // Spawn worker thread
         let thread_name = format!("dispatch-{name}");
         let handle = thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                // TODO(oktal): Bubble up the error to the JoinHandle
-                worker.run();
+                rt.block_on(async move { worker.run().await });
             })
             .map_err(Error::Io)?;
 
         Ok((tx, handle))
     }
 
-    fn run(&mut self) {
-        while let Ok(dispatch) = self.dispatch_rx.recv() {
-            self.dispatchers.dispatch(&dispatch);
-            dispatch.set_completed();
+    async fn run(&mut self) {
+        while let Ok(job) = self.rx.recv() {
+            job.invoke().await;
         }
     }
 }
@@ -83,10 +80,7 @@ impl DispatchQueue {
     /// Create a new named `name` dispatch queue
     pub(super) fn new(name: String) -> Self {
         Self {
-            inner: Some(Inner::Init {
-                name,
-                dispatchers: vec![],
-            }),
+            inner: Some(Inner::Init { name }),
         }
     }
 
@@ -98,34 +92,14 @@ impl DispatchQueue {
         }
     }
 
-    pub(super) fn add(&mut self, dispatcher: Box<dyn Dispatch + Send>) -> Result<(), Error> {
-        match self.inner.as_mut() {
-            Some(Inner::Init {
-                ref mut dispatchers,
-                ..
-            }) => {
-                dispatchers.push(dispatcher);
-                Ok(())
-            }
-            _ => Err(Error::InvalidOperation),
-        }
-    }
-
     pub(super) fn start(&mut self) -> Result<(), Error> {
         let (inner, res) = match self.inner.take() {
-            Some(Inner::Init { name, dispatchers }) => {
+            Some(Inner::Init { name }) => {
                 // Start worker
-                let (dispatch_tx, handle) = Worker::start(&name, dispatchers)?;
+                let (tx, handle) = Worker::start(&name)?;
 
                 // Transition to Started state
-                (
-                    Some(Inner::Started {
-                        name,
-                        dispatch_tx,
-                        handle,
-                    }),
-                    Ok(()),
-                )
+                (Some(Inner::Started { name, tx, handle }), Ok(()))
             }
             x => (x, Err(Error::InvalidOperation)),
         };
@@ -134,11 +108,9 @@ impl DispatchQueue {
         res
     }
 
-    pub(super) fn send(&mut self, dispatch: MessageDispatch) -> Result<(), Error> {
+    pub(super) fn enqueue(&self, job: DispatchJob) -> Result<(), Error> {
         match self.inner {
-            Some(Inner::Started {
-                ref dispatch_tx, ..
-            }) => dispatch_tx.send(dispatch).map_err(|_e| Error::SendError),
+            Some(Inner::Started { ref tx, .. }) => tx.send(job).map_err(|_e| Error::SendError),
             _ => Err(Error::InvalidOperation),
         }
     }

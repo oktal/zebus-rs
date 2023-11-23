@@ -1,3 +1,5 @@
+use zebus_core::MessageKind;
+
 use crate::{
     message_type_id::proto, proto::IntoProtobuf, Message, MessageDescriptor, MessageFlags,
 };
@@ -6,7 +8,10 @@ use std::any::TypeId;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageTypeDescriptor {
     /// Fully-qualified name of the message
-    pub(crate) full_name: String,
+    pub(crate) full_name: &'static str,
+
+    /// The [`MessageKind`] of the message
+    pub(crate) kind: MessageKind,
 
     /// Rust type representation of the message
     pub(crate) r#type: TypeId,
@@ -19,12 +24,19 @@ pub struct MessageTypeDescriptor {
     // TODO(oktal): Handle routing fields info
 }
 
+impl AsRef<str> for MessageTypeDescriptor {
+    fn as_ref(&self) -> &str {
+        self.full_name.as_ref()
+    }
+}
+
 impl MessageTypeDescriptor {
     pub(crate) fn of<M: MessageDescriptor + 'static>() -> Self {
         let flags = M::flags();
 
         Self {
-            full_name: M::name().to_string(),
+            full_name: M::name(),
+            kind: M::kind(),
             r#type: TypeId::of::<M>(),
             is_persistent: !flags.contains(MessageFlags::TRANSIENT),
             is_infrastructure: flags.contains(MessageFlags::INFRASTRUCTURE),
@@ -35,17 +47,16 @@ impl MessageTypeDescriptor {
         let flags = message.flags();
 
         Self {
-            full_name: message.name().to_string(),
+            full_name: message.name(),
+            kind: message.kind(),
             r#type: message.type_id(),
             is_persistent: !flags.contains(MessageFlags::TRANSIENT),
             is_infrastructure: flags.contains(MessageFlags::INFRASTRUCTURE),
         }
     }
-}
 
-impl AsRef<str> for MessageTypeDescriptor {
-    fn as_ref(&self) -> &str {
-        self.full_name.as_str()
+    pub(crate) fn is<M: MessageDescriptor + 'static>(&self) -> bool {
+        self.r#type == TypeId::of::<M>() && self.kind == M::kind()
     }
 }
 
@@ -54,7 +65,7 @@ impl IntoProtobuf for MessageTypeDescriptor {
 
     fn into_protobuf(self) -> Self::Output {
         proto::MessageTypeId {
-            full_name: self.full_name,
+            full_name: self.full_name.to_string(),
         }
     }
 }

@@ -3,7 +3,6 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     io::{self, Write},
-    sync::Arc,
     thread::JoinHandle,
 };
 use thiserror::Error;

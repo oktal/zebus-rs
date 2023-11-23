@@ -7,7 +7,6 @@ use std::{
 use async_trait::async_trait;
 use dyn_clone::clone_box;
 use itertools::Itertools;
-use tokio::runtime::Handle;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -26,8 +25,7 @@ use crate::{
         Registration,
     },
     dispatch::{
-        self, DispatchContext, DispatchOutput, DispatchRequest, Dispatched, Dispatcher,
-        MessageDispatcher,
+        self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, MessageDispatcher,
     },
     proto::FromProtobuf,
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
@@ -80,16 +78,22 @@ struct SendEntry {
     peers: Vec<Peer>,
 }
 
-struct SenderContext<T: Transport> {
+struct Sender<T: Transport> {
     transport: T,
     rx: mpsc::Receiver<SendEntry>,
 }
 
-impl<T: Transport> SenderContext<T> {
+impl<T: Transport> Sender<T> {
     fn new(transport: T) -> (mpsc::Sender<SendEntry>, Self) {
         // TODO(oktal): hardcoded limit
         let (tx, rx) = mpsc::channel(128);
         (tx, Self { transport, rx })
+    }
+
+    async fn run(mut self) {
+        while let Some(entry) = self.rx.recv().await {
+            self.handle_send(entry);
+        }
     }
 
     async fn send(
@@ -190,7 +194,7 @@ impl LocalDispatchRequest {
     }
 }
 
-struct ReceiverContext<T: Transport, D: Directory> {
+struct Receiver<T: Transport, D: Directory> {
     rcv_rx: T::MessageStream,
     dispatch_rx: mpsc::Receiver<LocalDispatchRequest>,
     tx: mpsc::Sender<SendEntry>,
@@ -201,7 +205,7 @@ struct ReceiverContext<T: Transport, D: Directory> {
     dispatcher: MessageDispatcher,
 }
 
-impl<T: Transport, D: Directory> ReceiverContext<T, D> {
+impl<T: Transport, D: Directory> Receiver<T, D> {
     fn new(
         transport_rx: T::MessageStream,
         tx: mpsc::Sender<SendEntry>,
@@ -233,10 +237,95 @@ impl<T: Transport, D: Directory> ReceiverContext<T, D> {
         )
     }
 
-    async fn dispatch(&mut self, request: DispatchRequest, bus: Arc<dyn crate::Bus>) -> Dispatched {
-        self.dispatcher
-            .dispatch(DispatchContext::new(request, bus))
-            .await
+    async fn run(mut self, bus: Arc<dyn crate::Bus>) {
+        loop {
+            tokio::select! {
+
+                // Handle inbound TransportMessage
+                Some(message) = self.rcv_rx.next() => {
+                    // Handle MessageExecutionCompleted
+                    if let Some(message_execution_completed) = message.decode_as::<MessageExecutionCompleted>()
+                    {
+                        // TODO(oktal): do not silently ignore error
+                        if let Ok(message_execution_completed) = message_execution_completed {
+                            // Get the orignal command MessageId
+                            let command_id =
+                                MessageId::from_protobuf(message_execution_completed.command_id.clone());
+
+                            // Retrieve the pending command associated with the MessageExecutionCompleted
+                            // TODO(oktal): do not silently ignore when failing to find the pending command
+                            let mut pending_commands = self.pending_commands.lock().unwrap();
+                            if let Some(pending_command_tx) = pending_commands.remove(&command_id.value()) {
+                                // Resolve the command with the execution result
+                                let _ = pending_command_tx.send(message_execution_completed.into());
+                            }
+                        }
+                    }
+                    // Handle message
+                    else {
+                        // Dispatch message
+                        match self.dispatch(DispatchRequest::remote(message, bus.clone())).await {
+                            Ok(dispatched) => {
+                                // Retrieve the output of the dispatch
+                                let output: DispatchOutput = dispatched.into();
+
+                                // If the message that has been dispatched is a Command, send back the
+                                // MessageExecutionCompleted
+                                if let Some(completed) = output.completed {
+                                    self.send_to(
+                                        &completed,
+                                        vec![output.originator.expect("missing originator")],
+                                    )
+                                    .await;
+                                }
+
+                                // Publish [`MessageProcessingFailed`] if some handlers failed
+                                if let Some(failed) = output.failed {
+                                    self.send(&failed).await;
+                                }
+                            },
+                            Err(e) => {
+                                println!("Failed to dispatch: {e}");
+                            }
+                        }
+
+                    }
+                    },
+
+                    // Handle local message dispatch request
+                    Some(request) = self.dispatch_rx.recv() => {
+                        // TODO(oktal): send `MessageProcessingFailed` if dispatch failed ?
+                        match request {
+                            LocalDispatchRequest::Command { tx, message } => {
+                                // Dispatch command locally
+                                let dispatched = self.dispatch(DispatchRequest::local(message, bus.clone())).await.unwrap();
+
+                                // Retrieve the `CommandResult`
+                                let command_result: Option<CommandResult> = dispatched.try_into().ok();
+
+                            // Resolve command future
+                            if let Some(command_result) = command_result {
+                                let _ = tx.send(command_result);
+                            }
+                        },
+                        LocalDispatchRequest::Event { tx, message } => {
+                            // Dispatch event locally
+                            let _dispatched = self.dispatch(DispatchRequest::local(message, bus.clone())).await.unwrap();
+
+                            // Notify that the event has been dispatched
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn dispatch(
+        &mut self,
+        request: DispatchRequest,
+    ) -> std::result::Result<Dispatched, dispatch::Error> {
+        self.dispatcher.call(request).await
     }
 
     async fn send(&mut self, message: &dyn Message) {
@@ -251,95 +340,6 @@ impl<T: Transport, D: Directory> ReceiverContext<T, D> {
             TransportMessage::create(&self.self_peer, self.environment.clone(), message);
 
         let _ = self.tx.send(SendEntry { message, peers }).await;
-    }
-}
-
-/// Reception loop for [`TransportMesssage`] messages
-async fn receiver<T: Transport, D: Directory>(
-    mut ctx: ReceiverContext<T, D>,
-    bus: Arc<dyn crate::Bus>,
-) {
-    loop {
-        tokio::select! {
-
-            // Handle inbound TransportMessage
-            Some(message) = ctx.rcv_rx.next() => {
-                // Handle MessageExecutionCompleted
-                if let Some(message_execution_completed) = message.decode_as::<MessageExecutionCompleted>()
-                {
-                    // TODO(oktal): do not silently ignore error
-                    if let Ok(message_execution_completed) = message_execution_completed {
-                        // Get the orignal command MessageId
-                        let command_id =
-                            MessageId::from_protobuf(message_execution_completed.command_id.clone());
-
-                        // Retrieve the pending command associated with the MessageExecutionCompleted
-                        // TODO(oktal): do not silently ignore when failing to find the pending command
-                        let mut pending_commands = ctx.pending_commands.lock().unwrap();
-                        if let Some(pending_command_tx) = pending_commands.remove(&command_id.value()) {
-                            // Resolve the command with the execution result
-                            let _ = pending_command_tx.send(message_execution_completed.into());
-                        }
-                    }
-                }
-                // Handle message
-                else {
-                    // Dispatch message
-                    let dispatched = ctx.dispatch(DispatchRequest::Remote(message), bus.clone()).await;
-
-                    // Retrieve the output of the dispatch
-                    let output: DispatchOutput = dispatched.into();
-
-                    // If the message that has been dispatched is a Command, send back the
-                    // MessageExecutionCompleted
-                    if let Some(completed) = output.completed {
-                        ctx.send_to(
-                            &completed,
-                            vec![output.originator.expect("missing originator")],
-                        )
-                        .await;
-                    }
-
-                    // Publish [`MessageProcessingFailed`] if some handlers failed
-                    if let Some(failed) = output.failed {
-                        ctx.send(&failed).await;
-                    }
-                }
-            },
-
-            // Handle local message dispatch request
-            Some(request) = ctx.dispatch_rx.recv() => {
-                // TODO(oktal): send `MessageProcessingFailed` if dispatch failed ?
-                match request {
-                    LocalDispatchRequest::Command { tx, message } => {
-                        // Dispatch command locally
-                        let dispatched = ctx.dispatch(DispatchRequest::Local(message), bus.clone()).await;
-
-                        // Retrieve the `CommandResult`
-                        let command_result: Option<CommandResult> = dispatched.try_into().ok();
-
-                        // Resolve command future
-                        if let Some(command_result) = command_result {
-                            let _ = tx.send(command_result);
-                        }
-                    },
-                    LocalDispatchRequest::Event { tx, message } => {
-                        // Dispatch event locally
-                        let _dispatched = ctx.dispatch(DispatchRequest::Local(message), bus.clone()).await;
-
-                        // Notify that the event has been dispatched
-                        let _ = tx.send(());
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Sender loop for [`TransportMessage`] messages
-async fn sender<T: Transport>(mut ctx: SenderContext<T>) {
-    while let Some(entry) = ctx.rx.recv().await {
-        ctx.handle_send(entry);
     }
 }
 
@@ -389,25 +389,27 @@ async fn register<T: Transport>(
 }
 
 /// Load the list of subscriptions to send at registration from a [`MessageDispatcher`]
-fn get_startup_subscriptions(dispatcher: &MessageDispatcher) -> Result<Vec<Subscription>> {
-    let handled_messages = dispatcher.handled_mesages().map_err(Error::Dispatch)?;
-
+fn get_startup_subscriptions<D: DispatchService>(
+    dispatcher: &D,
+) -> std::result::Result<Vec<Subscription>, D::Error> {
+    let descriptors = dispatcher.descriptors()?;
     let mut subscriptions = vec![];
-    for (message_type, subscription_mode, bindings) in handled_messages {
+    for descriptor in descriptors {
         // If we are in `Auto` subscription mode, add the subscription to the list of startup
         // subscriptions
-        if subscription_mode == SubscriptionMode::Auto {
+        if descriptor.subscription_mode == SubscriptionMode::Auto {
             // If we have bindings for the subscription, create a subscription for every binding
-            if bindings.len() > 0 {
+            if descriptor.bindings.len() > 0 {
                 subscriptions.extend(
-                    bindings
+                    descriptor
+                        .bindings
                         .iter()
-                        .map(|b| Subscription::new(message_type.clone(), b.clone())),
+                        .map(|b| Subscription::new(descriptor.message.clone(), b.clone())),
                 );
             } else {
                 // Create a subscription with an empty default (*) binding
                 subscriptions.push(Subscription::new(
-                    message_type.clone(),
+                    descriptor.message.clone(),
                     BindingKey::default(),
                 ));
             }
@@ -451,7 +453,7 @@ impl<T: Transport, D: Directory> Core<T, D> {
                 Err(Error::Send(SendError::PeerNotResponding(dst_peer)))
             } else {
                 // Send the command
-                SenderContext::<T>::send(
+                Sender::<T>::send(
                     command,
                     &self.snd_tx,
                     &self.self_peer,
@@ -472,7 +474,7 @@ impl<T: Transport, D: Directory> Core<T, D> {
         }
 
         // Send the command
-        SenderContext::<T>::send(
+        Sender::<T>::send(
             command,
             &self.snd_tx,
             &self.self_peer,
@@ -507,7 +509,7 @@ impl<T: Transport, D: Directory> Core<T, D> {
         let dst_peers = peers.into_iter().filter(|p| p.id != self.self_peer.id);
 
         // Send the event
-        SenderContext::<T>::publish(
+        Sender::<T>::publish(
             event,
             &self.snd_tx,
             &self.self_peer,
@@ -657,7 +659,8 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 .map_err(Error::Dispatch)?;
 
             // Retrieve the list of subscriptions that should be sent at startup
-            let startup_subscriptions = get_startup_subscriptions(&dispatcher)?;
+            let startup_subscriptions =
+                get_startup_subscriptions(&dispatcher).map_err(Error::Dispatch)?;
 
             // Register to directory
             let registration = register(
@@ -683,10 +686,10 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 .map_err(|e| Error::Transport(e.into()))?;
 
             // Create sender
-            let (snd_tx, snd_ctx) = SenderContext::new(transport);
+            let (snd_tx, sender) = Sender::new(transport);
 
             // Create receiver
-            let (rcv_ctx, dispatch_tx, pending_commands) = ReceiverContext::<T, D>::new(
+            let (receiver, dispatch_tx, pending_commands) = Receiver::<T, D>::new(
                 rcv_rx,
                 snd_tx.clone(),
                 self_peer.clone(),
@@ -708,10 +711,10 @@ impl<T: Transport, D: Directory> Bus<T, D> {
             });
 
             // Start sender
-            let tx_handle = Handle::current().spawn(sender(snd_ctx));
+            let tx_handle = tokio::spawn(sender.run());
 
             // Start receiver
-            let rx_handle = Handle::current().spawn(receiver(rcv_ctx, core.clone()));
+            let rx_handle = tokio::spawn(receiver.run(core.clone()));
 
             // Transition to started state
             let mut state_lock = self.inner.lock().unwrap();
@@ -847,7 +850,7 @@ impl<T: Transport> BusBuilder<T> {
 
     pub fn with_handler<H>(
         mut self,
-        handler: Box<H>,
+        handler: H,
         registry_fn: impl FnOnce(&mut dispatch::registry::Registry<H>),
     ) -> Self
     where
@@ -902,7 +905,7 @@ mod tests {
             DirectoryReader,
         },
         dispatch::registry,
-        handler, Handler, MessageDescriptor, MessageType,
+        handler, Context, Handler, MessageDescriptor, MessageType,
     };
     use tokio::sync::{broadcast, Notify};
 
@@ -1250,10 +1253,11 @@ mod tests {
     macro_rules! impl_handler {
         ($msg:ty, $ty: ty) => {
             #[handler]
+            #[async_trait::async_trait]
             impl Handler<$msg> for $ty {
                 type Response = ();
 
-                fn handle(&mut self, message: $msg) -> Self::Response {
+                async fn handle(&mut self, message: $msg, _ctx: Context<'_>) -> Self::Response {
                     self.add_handled(message);
                 }
             }
@@ -1302,10 +1306,10 @@ mod tests {
             inner.add_handled(response);
         }
 
-        fn handler(&self) -> Box<Self::Handler> {
-            Box::new(MemoryDirectoryHandler {
+        fn handler(&self) -> Self::Handler {
+            MemoryDirectoryHandler {
                 inner: Arc::clone(&self.inner),
-            })
+            }
         }
     }
 
@@ -1430,50 +1434,53 @@ mod tests {
     const BOILER_TOO_COLD: (i32, &'static str) = (0xBADBAD, "Boiler is too cold to brew coffee");
 
     impl BrokenBrewCoffeeCommandHandler {
-        fn new() -> (Box<Self>, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
+        fn new() -> (Self, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
             let (tx, rx) = std::sync::mpsc::channel();
-            (Box::new(Self { tx }), rx)
+            (Self { tx }, rx)
         }
     }
 
     impl BrewCoffeeCommandHandler {
-        fn new() -> (Box<Self>, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
+        fn new() -> (Self, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
             let (tx, rx) = std::sync::mpsc::channel();
-            (Box::new(Self { tx }), rx)
+            (Self { tx }, rx)
         }
     }
 
     impl CoffeeBrewedHandler {
-        fn new() -> (Box<Self>, std::sync::mpsc::Receiver<CoffeeBrewed>) {
+        fn new() -> (Self, std::sync::mpsc::Receiver<CoffeeBrewed>) {
             let (tx, rx) = std::sync::mpsc::channel();
-            (Box::new(Self { tx }), rx)
+            (Self { tx }, rx)
         }
     }
 
     #[handler]
+    #[async_trait::async_trait]
     impl Handler<BrewCoffeeCommand> for BrewCoffeeCommandHandler {
         type Response = ();
 
-        fn handle(&mut self, cmd: BrewCoffeeCommand) -> Self::Response {
+        async fn handle(&mut self, cmd: BrewCoffeeCommand, _ctx: Context<'_>) -> Self::Response {
             self.tx.send(cmd).unwrap();
         }
     }
 
     #[handler(manual)]
+    #[async_trait::async_trait]
     impl Handler<BrewCoffeeCommand> for BrokenBrewCoffeeCommandHandler {
         type Response = std::result::Result<(), (i32, &'static str)>;
 
-        fn handle(&mut self, cmd: BrewCoffeeCommand) -> Self::Response {
+        async fn handle(&mut self, cmd: BrewCoffeeCommand, _ctx: Context<'_>) -> Self::Response {
             self.tx.send(cmd).unwrap();
             Err(BOILER_TOO_COLD)
         }
     }
 
     #[handler]
+    #[async_trait::async_trait]
     impl Handler<CoffeeBrewed> for CoffeeBrewedHandler {
         type Response = ();
 
-        fn handle(&mut self, evt: CoffeeBrewed) -> Self::Response {
+        async fn handle(&mut self, evt: CoffeeBrewed, ctx: Context<'_>) -> Self::Response {
             self.tx.send(evt).unwrap();
         }
     }

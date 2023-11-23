@@ -278,6 +278,43 @@ pub trait Bus: Send + Sync + 'static {
     async fn publish(&self, event: &dyn Event) -> Result<()>;
 }
 
+/// A [`crate::Bus`] that does nothing
+pub(crate) struct NoopBus;
+
+impl NoopBus {
+    /// Create a new [`NoopBus`]
+    pub(crate) fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Bus for NoopBus {
+    fn configure(&self, _peer_id: PeerId, _environment: String) -> Result<()> {
+        Err(Error::InvalidOperation)
+    }
+
+    async fn start(&self) -> Result<()> {
+        Err(Error::InvalidOperation)
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Err(Error::InvalidOperation)
+    }
+
+    async fn send(&self, _command: &dyn Command) -> Result<CommandFuture> {
+        Err(Error::InvalidOperation)
+    }
+
+    async fn send_to(&self, _command: &dyn Command, _peer: Peer) -> Result<CommandFuture> {
+        Err(Error::InvalidOperation)
+    }
+
+    async fn publish(&self, _event: &dyn Event) -> Result<()> {
+        Err(Error::InvalidOperation)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

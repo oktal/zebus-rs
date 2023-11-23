@@ -20,8 +20,8 @@ pub use bus::{Bus, Command, CommandError, Event, Message, MessageExt, SendError}
 pub use bus_configuration::BusConfiguration;
 
 pub use crate::core::{
-    BusBuilder, Context, ContextAwareHandler, CreateError, Error, Handler, HandlerError,
-    IntoResponse, Response, ResponseMessage,
+    BusBuilder, Context, CreateError, Error, Handler, HandlerError, IntoResponse, Response,
+    ResponseMessage,
 };
 
 pub use message_id::MessageId;
@@ -34,7 +34,7 @@ use message_type_id::{MessageType, MessageTypeId};
 
 pub use zebus_core::{
     BindingKeyFragment, DispatchHandler, MessageBinding, MessageDescriptor, MessageFlags,
-    MessageKind, Upcast, DEFAULT_DISPATCH_QUEUE,
+    MessageKind, SubscriptionMode, Upcast, DEFAULT_DISPATCH_QUEUE,
 };
 pub use zebus_macros::{handler, Command, Event, Handler};
 
