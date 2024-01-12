@@ -1,4 +1,5 @@
 //! Utilities and combinators for [`Stream`]
+#![allow(dead_code)]
 use std::{
     pin::Pin,
     task::{Context, Poll},
@@ -82,7 +83,7 @@ pub(crate) struct TakeExact<St> {
 }
 
 impl<St> TakeExact<St> {
-    fn new(stream: St, n: usize) -> Self {
+    pub(crate) fn new(stream: St, n: usize) -> Self {
         Self { stream, n, cur: 0 }
     }
 }

@@ -27,9 +27,8 @@ enum Inner {
     },
 
     Started {
-        name: String,
         tx: mpsc::Sender<super::Task>,
-        handle: JoinHandle<()>,
+        _handle: JoinHandle<()>,
     },
 }
 
@@ -82,22 +81,14 @@ impl DispatchQueue {
         }
     }
 
-    /// Get the name of this dispatch queue
-    pub(super) fn name(&self) -> Result<&str, Error> {
-        match self.inner.as_ref() {
-            Some(Inner::Init { name, .. }) | Some(Inner::Started { name, .. }) => Ok(&name),
-            _ => Err(Error::InvalidOperation),
-        }
-    }
-
     pub(super) fn start(&mut self) -> Result<(), Error> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Init { name }) => {
                 // Start worker
-                let (tx, handle) = Worker::start(&name)?;
+                let (tx, _handle) = Worker::start(&name)?;
 
                 // Transition to Started state
-                (Some(Inner::Started { name, tx, handle }), Ok(()))
+                (Some(Inner::Started { tx, _handle }), Ok(()))
             }
             x => (x, Err(Error::InvalidOperation)),
         };

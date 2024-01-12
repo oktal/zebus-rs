@@ -584,7 +584,7 @@ mod tests {
             let descriptor = Self::create_descriptor();
 
             Self {
-                bus: Arc::new(NoopBus::new()),
+                bus: Arc::new(NoopBus),
                 client,
                 service: Box::new(handler),
                 descriptor,

@@ -113,6 +113,7 @@ impl RegistrationError {
         self.inner.push((peer, error))
     }
 
+    #[cfg(test)]
     pub(crate) fn find(
         &self,
         predicate: impl Fn(&directory::RegistrationError) -> bool,
@@ -287,13 +288,6 @@ pub trait Bus: Send + Sync + 'static {
 
 /// A [`crate::Bus`] that does nothing
 pub(crate) struct NoopBus;
-
-impl NoopBus {
-    /// Create a new [`NoopBus`]
-    pub(crate) fn new() -> Self {
-        Self
-    }
-}
 
 #[async_trait]
 impl Bus for NoopBus {

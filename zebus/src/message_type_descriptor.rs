@@ -1,8 +1,7 @@
-use zebus_core::{MessageKind, MessageTypeDescriptor};
+use zebus_core::MessageTypeDescriptor;
 
-use crate::{
-    message_type_id::proto, proto::IntoProtobuf, Message, MessageDescriptor, MessageFlags,
-};
+use crate::{message_type_id::proto, proto::IntoProtobuf};
+
 impl IntoProtobuf for MessageTypeDescriptor {
     type Output = proto::MessageTypeId;
 

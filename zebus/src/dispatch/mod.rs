@@ -55,10 +55,6 @@ impl DispatchError {
         self.0.push((handler_type, error));
     }
 
-    pub(crate) fn count(&self) -> usize {
-        self.0.len()
-    }
-
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -105,15 +101,8 @@ pub(crate) struct Dispatched {
     result: DispatchResult,
 }
 
+#[allow(dead_code)]
 impl Dispatched {
-    /// Returns `true` if the [`Dispatched`] contains an error
-    pub(self) fn is_error(&self) -> bool {
-        match self.result.as_ref() {
-            Ok(output) => output.as_ref().map(|o| o.is_error()).unwrap_or(false),
-            Err(_) => true,
-        }
-    }
-
     pub(crate) fn is<M: MessageDescriptor + 'static>(&self) -> bool {
         self.descriptor.is::<M>()
     }

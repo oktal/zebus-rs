@@ -33,6 +33,7 @@ impl PeerId {
         Self { value }
     }
 
+    #[cfg(test)]
     pub(crate) fn test() -> Self {
         let id = uuid::Uuid::new_v4();
         Self::new(format!("Peer.Test.{id}"))

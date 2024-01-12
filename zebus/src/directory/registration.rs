@@ -31,7 +31,7 @@ pub enum RegistrationError {
     InvalidResponse(MessageExecutionCompleted, prost::DecodeError),
 
     /// An unexpected message was received as a response
-    #[error("received unexpected from directory {0:?}")]
+    #[error("received unexpected message from directory during registration {0:?}")]
     UnexpectedMessage(TransportMessage),
 
     #[error("timeout after {0:?}")]

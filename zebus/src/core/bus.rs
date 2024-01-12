@@ -7,10 +7,7 @@ use std::{
 use async_trait::async_trait;
 use dyn_clone::clone_box;
 use itertools::Itertools;
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tower_service::Service;
 

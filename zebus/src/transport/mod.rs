@@ -7,7 +7,7 @@ pub mod zmq;
 
 use crate::{directory, Peer, PeerId};
 use futures_core::Stream;
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow};
 
 pub use message_execution_completed::MessageExecutionCompleted;
 pub use originator_info::OriginatorInfo;

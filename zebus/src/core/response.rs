@@ -47,11 +47,6 @@ pub enum Response {
 }
 
 impl Response {
-    /// Returns `true` if the [`Response`] contains an error
-    pub(crate) fn is_error(&self) -> bool {
-        matches!(self, Self::Error { .. })
-    }
-
     pub(crate) fn into_message(self, command_id: proto::MessageId) -> MessageExecutionCompleted {
         match self {
             Response::Message(message) => {

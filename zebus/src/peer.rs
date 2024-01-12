@@ -18,6 +18,7 @@ pub struct Peer {
 }
 
 impl Peer {
+    #[cfg(test)]
     pub(crate) fn test() -> Self {
         Self {
             id: PeerId::test(),
@@ -27,6 +28,7 @@ impl Peer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn set_not_responding(mut self) -> Self {
         self.is_responding = false;
         self

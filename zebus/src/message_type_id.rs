@@ -1,5 +1,3 @@
-use zebus_core::MessageFlags;
-
 use crate::{proto::IntoProtobuf, Message, MessageDescriptor, MessageTypeDescriptor};
 use std::any::TypeId;
 

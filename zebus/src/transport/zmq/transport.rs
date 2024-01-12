@@ -101,7 +101,7 @@ enum Inner {
         inbound_endpoint: String,
         inbound_thread: JoinHandle<()>,
 
-        outbound_thread: JoinHandle<()>,
+        outbound_thread: JoinHandle<Result<(), Error>>,
         actions_tx: mpsc::Sender<OuboundSocketAction>,
         rcv_tx: broadcast::Sender<TransportMessage>,
 
@@ -227,7 +227,13 @@ impl OutboundWorker {
         peer_id: PeerId,
         directory_rx: directory::EventStream,
         shutdown_tx: broadcast::Sender<()>,
-    ) -> Result<(mpsc::Sender<OuboundSocketAction>, JoinHandle<()>), Error> {
+    ) -> Result<
+        (
+            mpsc::Sender<OuboundSocketAction>,
+            JoinHandle<Result<(), Error>>,
+        ),
+        Error,
+    > {
         // Subscribe to shutdown channel
         let shutdown_rx = shutdown_tx.subscribe();
 
@@ -248,19 +254,15 @@ impl OutboundWorker {
         // Spawn outbound thread
         let outbound_thread = std::thread::Builder::new()
             .name(OUTBOUND_THREAD_NAME.into())
-            .spawn(move || {
-                worker.block_on();
-            })
+            .spawn(move || worker.block_on())
             .map_err(Error::Io)?;
 
         Ok((actions_tx, outbound_thread))
     }
 
-    fn block_on(self) {
+    fn block_on(self) -> Result<(), Error> {
         let mut this = self;
-        Handle::current().block_on(async move {
-            this.run().await;
-        });
+        Handle::current().block_on(async move { this.run().await })
     }
 
     async fn run(&mut self) -> Result<(), Error> {
@@ -273,7 +275,7 @@ impl OutboundWorker {
                     self.handle_action(action, &mut encode_buf)?;
                 },
                 Some(event) = self.directory_rx.next()=> {
-                    self.handle_event(event);
+                    self.handle_event(event)?;
                 },
             }
         }
@@ -459,7 +461,7 @@ impl Transport for ZmqTransport {
                 )?;
 
                 // Create broadcast channel for transport message reception
-                let (rcv_tx, rcv_rx) = broadcast::channel(128);
+                let (rcv_tx, _rcv_rx) = broadcast::channel(128);
 
                 // Start inbound worker
                 let inbound_thread =
