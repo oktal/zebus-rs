@@ -3,15 +3,15 @@ mod dispatcher;
 mod future;
 mod invoker;
 mod queue;
-pub(crate) mod registry;
+pub mod router;
 
+use std::convert::Infallible;
 use std::{fmt::Display, sync::Arc};
 
 use crate::bus::{CommandError, CommandResult};
 use crate::core::RawMessage;
 use crate::core::{response::HANDLER_ERROR_CODE, Response};
 use crate::lotus::MessageProcessingFailed;
-use crate::message_type_descriptor::MessageTypeDescriptor;
 use crate::proto::IntoProtobuf;
 use crate::{
     transport::{MessageExecutionCompleted, TransportMessage},
@@ -20,10 +20,11 @@ use crate::{
 use crate::{Bus, Message, MessageDescriptor};
 pub(crate) use context::DispatchContext;
 pub(crate) use dispatcher::{Error, MessageDispatcher};
-use futures_core::Future;
-pub(crate) use invoker::{
-    HandlerFuture, HandlerInvoker, HandlerResponse, MessageInvokerDescriptor,
-};
+use futures_core::future::BoxFuture;
+pub use invoker::InvokerService;
+pub(crate) use invoker::{HandlerResponse, MessageInvokerDescriptor};
+use tower_service::Service;
+use zebus_core::MessageTypeDescriptor;
 
 /// A message to dispatch
 #[derive(Debug, Clone)]
@@ -128,7 +129,7 @@ impl Dispatched {
     }
 
     pub(crate) fn is_kind(&self, kind: MessageKind) -> bool {
-        matches!(self.descriptor.kind, kind)
+        self.descriptor.kind == kind
     }
 }
 
@@ -230,7 +231,7 @@ impl Into<DispatchOutput> for Dispatched {
 }
 
 /// A type that encapsulates a request to dispatch a [`DispatchMessage`]
-pub(crate) struct DispatchRequest {
+pub struct DispatchRequest {
     message: DispatchMessage,
     bus: Arc<dyn Bus>,
 }
@@ -251,38 +252,41 @@ impl DispatchRequest {
             bus,
         }
     }
-}
 
-struct DispatchJob {
-    ctx: DispatchContext,
-    invoker: HandlerFuture,
-}
-
-impl DispatchJob {
-    fn new(ctx: DispatchContext, invoker: HandlerFuture) -> Self {
-        Self { ctx, invoker }
+    pub(crate) fn message(&self) -> &DispatchMessage {
+        &self.message
     }
 
+    pub(crate) fn bus(&self) -> Arc<dyn Bus> {
+        Arc::clone(&self.bus)
+    }
+}
+
+/// A task to dispatch
+struct Task {
+    ctx: DispatchContext,
+    future: BoxFuture<'static, Result<Option<Response>, Infallible>>,
+
+    message: MessageTypeDescriptor,
+    dispatch_queue: &'static str,
+    handler_type: &'static str,
+}
+
+impl Task {
     async fn invoke(self) {
-        self.ctx.send(self.invoker.await).await
+        let response = self
+            .future
+            .await
+            .expect("handler invocation is infaillible");
+
+        self.ctx
+            .send(HandlerResponse::new(self.handler_type, response))
+            .await
     }
 }
 
 /// Trait for a service able to dispatch a [`DispatchRequest`]
-pub(crate) trait DispatchService {
-    /// Associated error type of the service
-    type Error;
-
-    /// Type of [`Future`] returned by the service when called.
-    /// The [`Future`] must resolve to a a [`Result`] where the `Ok` part
-    /// is a [`Dispatched`] type representing the result of the dispatch
-    /// and the `Err` type represents a `Self::Error` error that happened
-    /// before or during dispatch
-    type Future: Future<Output = Result<Dispatched, Self::Error>>;
-
+pub(crate) trait DispatchService: Service<DispatchRequest> {
     /// A list of [`MessageInvokerDescriptor`] that the service can dispatch
     fn descriptors(&self) -> Result<Vec<MessageInvokerDescriptor>, Self::Error>;
-
-    /// Dispatch a [`DispatchRequest`]
-    fn call(&mut self, request: DispatchRequest) -> Self::Future;
 }

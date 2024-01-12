@@ -2,14 +2,14 @@
 use itertools::Itertools;
 use tokio::sync::broadcast;
 
-use crate::core::InternalHandler;
+use crate::dispatch::router::{RouteHandler, Router};
+use crate::inject;
 use crate::{
     core::MessagePayload,
-    handler,
     proto::{self, PeerDescriptor},
     routing::tree::PeerSubscriptionTree,
     transport::TransportMessage,
-    BindingKey, Context, Handler, Message, MessageType, Peer, PeerId,
+    BindingKey, Message, MessageType, Peer, PeerId,
 };
 use std::{
     collections::{hash_map, HashMap, HashSet},
@@ -79,7 +79,7 @@ struct SubscriptionEntry {
 #[derive(Debug, Default)]
 struct PeerEntry {
     peer: Peer,
-    is_persistent: bool,
+    _is_persistent: bool,
     timestamp_utc: chrono::DateTime<chrono::Utc>,
     has_debugger_attached: bool,
     subscriptions: HashMap<MessageType, SubscriptionEntry>,
@@ -94,7 +94,7 @@ impl PeerEntry {
 
         Self {
             peer: descriptor.peer,
-            is_persistent: descriptor.is_persistent,
+            _is_persistent: descriptor.is_persistent,
             timestamp_utc,
             has_debugger_attached: descriptor.has_debugger_attached.unwrap_or(false),
             subscriptions: HashMap::new(),
@@ -202,13 +202,13 @@ impl PeerUpdate<'_> {
 }
 
 #[derive(Debug)]
-struct Inner {
+pub struct DirectoryState {
     subscriptions: SubscriptionIndex,
     peers: HashMap<PeerId, PeerEntry>,
     events_tx: broadcast::Sender<PeerEvent>,
 }
 
-impl Inner {
+impl DirectoryState {
     fn new() -> Self {
         let (events_tx, _) = broadcast::channel(128);
 
@@ -216,6 +216,69 @@ impl Inner {
             subscriptions: SubscriptionIndex::new(),
             peers: HashMap::new(),
             events_tx,
+        }
+    }
+
+    fn peer_started(&mut self, message: PeerStarted) {
+        self.add_or_update(message.descriptor)
+            .raise(PeerEvent::Started);
+    }
+
+    fn peer_stopped(&mut self, message: PeerStopped) {
+        let timestamp_utc = chrono::Utc::now();
+
+        let update = self.update_with(&message.id, Some(timestamp_utc), |e| {
+            e.timestamp_utc = timestamp_utc;
+            e.peer.is_up = false;
+            e.peer.is_responding = false;
+        });
+
+        if let Some(update) = update {
+            update.raise(PeerEvent::Stopped);
+        }
+    }
+
+    fn peer_decommissioned(&mut self, message: PeerDecommissioned) {
+        let update = self.remove(&message.id);
+        if let Some(update) = update {
+            update.raise(PeerEvent::Decomissionned);
+        }
+    }
+
+    fn peer_not_responding(&mut self, message: PeerNotResponding) {
+        let update = self.update_with(&message.id, None, |e| {
+            e.peer.is_responding = false;
+        });
+
+        if let Some(update) = update {
+            update.raise(PeerEvent::Updated);
+        }
+    }
+
+    fn peer_responding(&mut self, message: PeerResponding) {
+        let update = self.update_with(&message.id, None, |e| {
+            e.peer.is_responding = true;
+        });
+
+        if let Some(update) = update {
+            update.raise(PeerEvent::Updated);
+        }
+    }
+
+    fn peer_subscriptions_for_type_updated(&mut self, message: PeerSubscriptionsForTypeUpdated) {
+        let timestamp_utc = message
+            .timestamp_utc
+            .try_into()
+            .ok()
+            .unwrap_or(chrono::Utc::now());
+        let update = self.set_subscriptions_for(
+            &message.peer_id,
+            message.subscriptions,
+            Some(timestamp_utc),
+        );
+
+        if let Some(update) = update {
+            update.raise(PeerEvent::Updated);
         }
     }
 
@@ -328,88 +391,8 @@ impl Inner {
     }
 }
 
-impl InternalHandler<PeerStarted> for Inner {
-    fn handle(&mut self, message: PeerStarted) {
-        self.add_or_update(message.descriptor)
-            .raise(PeerEvent::Started);
-    }
-}
-
-impl InternalHandler<PeerStopped> for Inner {
-    fn handle(&mut self, message: PeerStopped) {
-        let timestamp_utc = chrono::Utc::now();
-
-        let update = self.update_with(&message.id, Some(timestamp_utc), |e| {
-            e.timestamp_utc = timestamp_utc;
-            e.peer.is_up = false;
-            e.peer.is_responding = false;
-        });
-
-        if let Some(update) = update {
-            update.raise(PeerEvent::Stopped);
-        }
-    }
-}
-
-impl InternalHandler<PeerDecommissioned> for Inner {
-    fn handle(&mut self, message: PeerDecommissioned) {
-        let update = self.remove(&message.id);
-        if let Some(update) = update {
-            update.raise(PeerEvent::Decomissionned);
-        }
-    }
-}
-
-impl InternalHandler<PeerNotResponding> for Inner {
-    fn handle(&mut self, message: PeerNotResponding) {
-        let update = self.update_with(&message.id, None, |e| {
-            e.peer.is_responding = false;
-        });
-
-        if let Some(update) = update {
-            update.raise(PeerEvent::Updated);
-        }
-    }
-}
-
-impl InternalHandler<PeerResponding> for Inner {
-    fn handle(&mut self, message: PeerResponding) {
-        let update = self.update_with(&message.id, None, |e| {
-            e.peer.is_responding = true;
-        });
-
-        if let Some(update) = update {
-            update.raise(PeerEvent::Updated);
-        }
-    }
-}
-
-impl InternalHandler<PeerSubscriptionsForTypeUpdated> for Inner {
-    fn handle(&mut self, message: PeerSubscriptionsForTypeUpdated) {
-        let timestamp_utc = message
-            .timestamp_utc
-            .try_into()
-            .ok()
-            .unwrap_or(chrono::Utc::now());
-        let update = self.set_subscriptions_for(
-            &message.peer_id,
-            message.subscriptions,
-            Some(timestamp_utc),
-        );
-
-        if let Some(update) = update {
-            update.raise(PeerEvent::Updated);
-        }
-    }
-}
-
-#[derive(Handler)]
-pub(crate) struct DirectoryHandler {
-    inner: Arc<Mutex<Inner>>,
-}
-
 pub(crate) struct Client {
-    inner: Arc<Mutex<Inner>>,
+    state: Arc<Mutex<DirectoryState>>,
 }
 
 impl Client {
@@ -420,145 +403,131 @@ impl Client {
 
     fn replay_message(&mut self, message: &TransportMessage) -> bool {
         macro_rules! try_replay {
-            ($ty: ty) => {
+            ($ty: ty, $handler: ident) => {
                 if let Some(Ok(event)) = message.decode_as::<$ty>() {
-                    self.inner.lock().unwrap().handle(event);
+                    self.state.lock().unwrap().$handler(event);
                     return true;
                 }
             };
         }
 
-        try_replay!(PeerStarted);
-        try_replay!(PeerStopped);
-        try_replay!(PeerNotResponding);
-        try_replay!(PeerResponding);
-        try_replay!(PeerSubscriptionsForTypeUpdated);
+        try_replay!(PeerStarted, peer_started);
+        try_replay!(PeerStopped, peer_stopped);
+        try_replay!(PeerNotResponding, peer_not_responding);
+        try_replay!(PeerResponding, peer_responding);
+        try_replay!(
+            PeerSubscriptionsForTypeUpdated,
+            peer_subscriptions_for_type_updated
+        );
         false
     }
 }
 
 impl DirectoryReader for Client {
     fn get(&self, peer_id: &PeerId) -> Option<Peer> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.state.lock().unwrap();
         inner.entry(peer_id, None).map(|e| e.peer.clone())
     }
 
     fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.state.lock().unwrap();
         inner.get_peers_handling(message)
     }
 }
 
 impl Directory for Client {
     type EventStream = crate::sync::stream::BroadcastStream<PeerEvent>;
-    type Handler = DirectoryHandler;
+    type Handler = Router<Arc<Mutex<DirectoryState>>>;
 
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            inner: Arc::new(Mutex::new(Inner::new())),
+            state: Arc::new(Mutex::new(DirectoryState::new())),
         })
     }
 
     fn subscribe(&self) -> Self::EventStream {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.state.lock().unwrap();
         inner.subscribe().into()
     }
 
     fn handle_registration(&self, response: RegisterPeerResponse) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.state.lock().unwrap();
         for descriptor in response.peers {
             inner.add_or_update(descriptor).forget();
         }
     }
 
     fn handler(&self) -> Self::Handler {
-        DirectoryHandler {
-            inner: Arc::clone(&self.inner),
-        }
+        Router::with_state(Arc::clone(&self.state))
+            .handles(peer_started.into_handler())
+            .handles(peer_stopped.into_handler())
+            .handles(peer_decommissioned.into_handler())
+            .handles(peer_not_responding.into_handler())
+            .handles(peer_responding.into_handler())
+            .handles(ping_peer.into_handler())
+            .handles(peer_subscriptions_for_type_updated.into_handler())
     }
 }
 
 impl Clone for Client {
     fn clone(&self) -> Self {
         Self {
-            inner: Arc::clone(&self.inner),
+            state: Arc::clone(&self.state),
         }
     }
 }
 
-#[handler]
-#[async_trait::async_trait]
-impl crate::Handler<PeerStarted> for DirectoryHandler {
-    type Response = ();
-
-    async fn handle(&mut self, message: PeerStarted, _ctx: Context<'_>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.handle(message);
-    }
+async fn peer_started(
+    message: PeerStarted,
+    inject::State(state): inject::State<Arc<Mutex<DirectoryState>>>,
+) {
+    state.lock().expect("poisoned mutex").peer_started(message)
 }
 
-#[handler]
-#[async_trait::async_trait]
-impl crate::Handler<PeerStopped> for DirectoryHandler {
-    type Response = ();
-
-    async fn handle(&mut self, message: PeerStopped, _ctx: Context<'_>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.handle(message);
-    }
+async fn peer_stopped(
+    message: PeerStopped,
+    inject::State(state): inject::State<Arc<Mutex<DirectoryState>>>,
+) {
+    state.lock().expect("poisoned mutex").peer_stopped(message)
 }
 
-#[handler]
-#[async_trait::async_trait]
-impl crate::Handler<PeerDecommissioned> for DirectoryHandler {
-    type Response = ();
+async fn peer_decommissioned(_message: PeerDecommissioned) {}
 
-    async fn handle(&mut self, message: PeerDecommissioned, _ctx: Context<'_>) {
-        println!("{message:?}")
-    }
+async fn peer_not_responding(
+    message: PeerNotResponding,
+    inject::State(state): inject::State<Arc<Mutex<DirectoryState>>>,
+) {
+    state
+        .lock()
+        .expect("poisoned mutex")
+        .peer_not_responding(message)
 }
 
-#[handler]
-#[async_trait::async_trait]
-impl crate::Handler<PeerNotResponding> for DirectoryHandler {
-    type Response = ();
-
-    async fn handle(&mut self, message: PeerNotResponding, _ctx: Context<'_>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.handle(message);
-    }
+async fn peer_responding(
+    message: PeerResponding,
+    inject::State(state): inject::State<Arc<Mutex<DirectoryState>>>,
+) {
+    state
+        .lock()
+        .expect("poisoned mutex")
+        .peer_responding(message)
 }
 
-#[handler]
-#[async_trait::async_trait]
-impl crate::Handler<PeerResponding> for DirectoryHandler {
-    type Response = ();
-
-    async fn handle(&mut self, message: PeerResponding, _ctx: Context<'_>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.handle(message);
-    }
+async fn ping_peer(
+    _message: PingPeerCommand,
+    inject::State(_state): inject::State<Arc<Mutex<DirectoryState>>>,
+) {
+    println!("PING");
 }
 
-#[handler]
-#[async_trait::async_trait]
-impl crate::Handler<PingPeerCommand> for DirectoryHandler {
-    type Response = ();
-
-    async fn handle(&mut self, _message: PingPeerCommand, _ctx: Context<'_>) {
-        println!("PING");
-    }
-}
-
-#[handler]
-#[async_trait::async_trait]
-impl crate::Handler<PeerSubscriptionsForTypeUpdated> for DirectoryHandler {
-    type Response = ();
-
-    async fn handle(&mut self, message: PeerSubscriptionsForTypeUpdated, _ctx: Context<'_>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.handle(message);
-    }
+async fn peer_subscriptions_for_type_updated(
+    message: PeerSubscriptionsForTypeUpdated,
+    inject::State(state): inject::State<Arc<Mutex<DirectoryState>>>,
+) {
+    state
+        .lock()
+        .expect("poisoned mutex")
+        .peer_subscriptions_for_type_updated(message)
 }
 
 #[cfg(test)]
@@ -568,6 +537,7 @@ mod tests {
 
     use super::*;
     use crate::bus::NoopBus;
+    use crate::dispatch::InvokerService;
     use crate::proto::{IntoProtobuf, Subscription};
     use crate::{Message, MessageDescriptor, MessageTypeId};
 
@@ -599,9 +569,9 @@ mod tests {
     }
 
     struct Fixture {
-        bus: NoopBus,
+        bus: Arc<NoopBus>,
         client: Arc<Client>,
-        handler: DirectoryHandler,
+        service: Box<dyn InvokerService>,
         descriptor: PeerDescriptor,
         events_rx: crate::sync::stream::BroadcastStream<PeerEvent>,
     }
@@ -614,20 +584,12 @@ mod tests {
             let descriptor = Self::create_descriptor();
 
             Self {
-                bus: NoopBus::new(),
+                bus: Arc::new(NoopBus::new()),
                 client,
-                handler,
+                service: Box::new(handler),
                 descriptor,
                 events_rx,
             }
-        }
-
-        fn with_context<'a, R>(
-            &'a mut self,
-            f: impl FnOnce(Context<'a>, &'a mut DirectoryHandler) -> R,
-        ) -> R {
-            let context = Context::new(&self.bus);
-            f(context, &mut self.handler)
         }
 
         async fn try_recv_n(self, n: usize) -> Vec<Option<PeerEvent>> {
@@ -641,6 +603,10 @@ mod tests {
 
         fn peer(&self) -> Peer {
             self.descriptor.peer.clone()
+        }
+
+        fn bus(&self) -> Arc<NoopBus> {
+            Arc::clone(&self.bus)
         }
 
         fn create_descriptor() -> PeerDescriptor {
@@ -846,9 +812,12 @@ mod tests {
     async fn handle_peer_started() {
         let mut fixture = Fixture::new();
         let descriptor = fixture.descriptor.clone();
+
         fixture
-            .with_context(|ctx, h| h.handle(PeerStarted { descriptor }, ctx))
-            .await;
+            .service
+            .invoke(PeerStarted { descriptor }, fixture.bus())
+            .await
+            .unwrap();
 
         let peer_id = fixture.peer_id();
 
@@ -869,21 +838,23 @@ mod tests {
         let timestamp_utc = chrono::Utc::now();
 
         fixture
-            .with_context(|ctx, h| h.handle(PeerStarted { descriptor }, ctx))
-            .await;
+            .service
+            .invoke(PeerStarted { descriptor }, fixture.bus())
+            .await
+            .unwrap();
 
         fixture
-            .with_context(|ctx, h| {
-                h.handle(
-                    PeerStopped {
-                        id: peer.id.clone(),
-                        endpoint: Some(peer.endpoint.clone()),
-                        timestamp_utc: Some(timestamp_utc.into_protobuf()),
-                    },
-                    ctx,
-                )
-            })
-            .await;
+            .service
+            .invoke(
+                PeerStopped {
+                    id: peer.id.clone(),
+                    endpoint: Some(peer.endpoint.clone()),
+                    timestamp_utc: Some(timestamp_utc.into_protobuf()),
+                },
+                fixture.bus(),
+            )
+            .await
+            .unwrap();
 
         let peer_id = fixture.peer_id();
 
@@ -942,39 +913,39 @@ mod tests {
         };
 
         fixture
-            .with_context(|ctx, h| {
-                h.handle(
-                    PeerStarted {
-                        descriptor: peer_desc_1.clone(),
-                    },
-                    ctx,
-                )
-            })
-            .await;
+            .service
+            .invoke(
+                PeerStarted {
+                    descriptor: peer_desc_1.clone(),
+                },
+                fixture.bus(),
+            )
+            .await
+            .unwrap();
 
         fixture
-            .with_context(|ctx, h| {
-                h.handle(
-                    PeerStopped {
-                        id: peer.id.clone(),
-                        endpoint: Some(peer.endpoint.clone()),
-                        timestamp_utc: None,
-                    },
-                    ctx,
-                )
-            })
-            .await;
+            .service
+            .invoke(
+                PeerStopped {
+                    id: peer.id.clone(),
+                    endpoint: Some(peer.endpoint.clone()),
+                    timestamp_utc: None,
+                },
+                fixture.bus(),
+            )
+            .await
+            .unwrap();
 
         fixture
-            .with_context(|ctx, h| {
-                h.handle(
-                    PeerStarted {
-                        descriptor: peer_desc_2.clone(),
-                    },
-                    ctx,
-                )
-            })
-            .await;
+            .service
+            .invoke(
+                PeerStarted {
+                    descriptor: peer_desc_2.clone(),
+                },
+                fixture.bus(),
+            )
+            .await
+            .unwrap();
 
         let peer_1 = fixture.client.get(&peer.id);
         assert_eq!(
@@ -1020,24 +991,26 @@ mod tests {
         let subscription = Fixture::create_subscription_for::<RoutableCommand>(&[&command_1]);
 
         fixture
-            .with_context(|ctx, h| h.handle(PeerStarted { descriptor }, ctx))
-            .await;
+            .service
+            .invoke(PeerStarted { descriptor }, fixture.bus())
+            .await
+            .unwrap();
 
         let peer_id = fixture.peer_id();
         let now = chrono::Utc::now();
 
         fixture
-            .with_context(|ctx, h| {
-                h.handle(
-                    PeerSubscriptionsForTypeUpdated {
-                        peer_id: peer_id.clone(),
-                        subscriptions: vec![subscription],
-                        timestamp_utc: now.into_protobuf(),
-                    },
-                    ctx,
-                )
-            })
-            .await;
+            .service
+            .invoke(
+                PeerSubscriptionsForTypeUpdated {
+                    peer_id: peer_id.clone(),
+                    subscriptions: vec![subscription],
+                    timestamp_utc: now.into_protobuf(),
+                },
+                fixture.bus(),
+            )
+            .await
+            .unwrap();
 
         let peers_1 = fixture.client.get_peers_handling(&command_1);
         assert_eq!(peers_1, vec![fixture.peer()]);
@@ -1070,37 +1043,39 @@ mod tests {
         let subscription_2 = Fixture::create_subscription_for::<RoutableCommand>(&[&command_2]);
 
         fixture
-            .with_context(|ctx, h| h.handle(PeerStarted { descriptor }, ctx))
-            .await;
+            .service
+            .invoke(PeerStarted { descriptor }, fixture.bus())
+            .await
+            .unwrap();
 
         let peer_id = fixture.peer_id();
         let now = chrono::Utc::now();
 
         fixture
-            .with_context(|ctx, h| {
-                h.handle(
-                    PeerSubscriptionsForTypeUpdated {
-                        peer_id: peer_id.clone(),
-                        subscriptions: vec![subscription_1],
-                        timestamp_utc: now.into_protobuf(),
-                    },
-                    ctx,
-                )
-            })
-            .await;
+            .service
+            .invoke(
+                PeerSubscriptionsForTypeUpdated {
+                    peer_id: peer_id.clone(),
+                    subscriptions: vec![subscription_1],
+                    timestamp_utc: now.into_protobuf(),
+                },
+                fixture.bus(),
+            )
+            .await
+            .unwrap();
 
         fixture
-            .with_context(|ctx, h| {
-                h.handle(
-                    PeerSubscriptionsForTypeUpdated {
-                        peer_id: peer_id.clone(),
-                        subscriptions: vec![subscription_2],
-                        timestamp_utc: (now - Duration::seconds(30)).into_protobuf(),
-                    },
-                    ctx,
-                )
-            })
-            .await;
+            .service
+            .invoke(
+                PeerSubscriptionsForTypeUpdated {
+                    peer_id: peer_id.clone(),
+                    subscriptions: vec![subscription_2],
+                    timestamp_utc: (now - Duration::seconds(30)).into_protobuf(),
+                },
+                fixture.bus(),
+            )
+            .await
+            .unwrap();
 
         let peers_1 = fixture.client.get_peers_handling(&command_1);
         assert_eq!(peers_1, vec![fixture.peer()]);

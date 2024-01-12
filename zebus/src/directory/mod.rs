@@ -15,15 +15,10 @@ pub(crate) mod registration;
 pub(crate) use registration::{Registration, RegistrationError};
 
 pub use descriptor::PeerDescriptor;
-use zebus_core::HandlerDescriptor;
 
-use self::{
-    commands::{PingPeerCommand, RegisterPeerResponse},
-    event::PeerEvent,
-    events::PeerSubscriptionsForTypeUpdated,
-};
+use self::{commands::RegisterPeerResponse, event::PeerEvent};
 
-use crate::{DispatchHandler, Handler, Message, Peer, PeerId};
+use crate::{dispatch::InvokerService, Message, Peer, PeerId};
 
 /// Alias for the [`Directory`] [`PeerEvent`] [`Stream`]
 pub(crate) type EventStream = Pin<Box<dyn Stream<Item = PeerEvent> + Send + Sync + 'static>>;
@@ -49,23 +44,7 @@ pub(crate) trait Directory: DirectoryReader {
 
     /// Type of [`Handler`] that will be used to handle commands and events related to the
     /// directory
-    type Handler: Handler<PeerStarted>
-        + HandlerDescriptor<PeerStarted>
-        + Handler<PeerStopped>
-        + HandlerDescriptor<PeerStopped>
-        + Handler<PeerDecommissioned>
-        + HandlerDescriptor<PeerDecommissioned>
-        + Handler<PeerNotResponding>
-        + HandlerDescriptor<PeerNotResponding>
-        + Handler<PeerResponding>
-        + HandlerDescriptor<PeerResponding>
-        + Handler<PeerSubscriptionsForTypeUpdated>
-        + HandlerDescriptor<PeerSubscriptionsForTypeUpdated>
-        + Handler<PingPeerCommand>
-        + HandlerDescriptor<PingPeerCommand>
-        + DispatchHandler
-        + Send
-        + 'static;
+    type Handler: InvokerService;
 
     /// Create a new instance of the directory
     fn new() -> Arc<Self>;

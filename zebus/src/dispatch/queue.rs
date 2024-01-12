@@ -6,8 +6,6 @@ use std::{
 
 use thiserror::Error;
 
-use super::DispatchJob;
-
 #[derive(Debug, Error)]
 pub enum Error {
     /// IO Error
@@ -30,17 +28,17 @@ enum Inner {
 
     Started {
         name: String,
-        tx: mpsc::Sender<DispatchJob>,
+        tx: mpsc::Sender<super::Task>,
         handle: JoinHandle<()>,
     },
 }
 
 struct Worker {
-    rx: mpsc::Receiver<DispatchJob>,
+    rx: mpsc::Receiver<super::Task>,
 }
 
 impl Worker {
-    fn start(name: &str) -> Result<(std::sync::mpsc::Sender<DispatchJob>, JoinHandle<()>), Error> {
+    fn start(name: &str) -> Result<(std::sync::mpsc::Sender<super::Task>, JoinHandle<()>), Error> {
         // Create channel for message dispatching
         let (tx, rx) = mpsc::channel();
 
@@ -66,8 +64,8 @@ impl Worker {
     }
 
     async fn run(&mut self) {
-        while let Ok(job) = self.rx.recv() {
-            job.invoke().await;
+        while let Ok(task) = self.rx.recv() {
+            task.invoke().await;
         }
     }
 }
@@ -108,9 +106,9 @@ impl DispatchQueue {
         res
     }
 
-    pub(super) fn enqueue(&self, job: DispatchJob) -> Result<(), Error> {
+    pub(super) fn spawn(&self, task: super::Task) -> Result<(), Error> {
         match self.inner {
-            Some(Inner::Started { ref tx, .. }) => tx.send(job).map_err(|_e| Error::SendError),
+            Some(Inner::Started { ref tx, .. }) => tx.send(task).map_err(|_e| Error::SendError),
             _ => Err(Error::InvalidOperation),
         }
     }

@@ -10,6 +10,9 @@ use crate::{
 /// generic [`std::error::Error`]
 pub const HANDLER_ERROR_CODE: i32 = -10;
 
+/// Error code returned when an internal error occured
+pub const INTERNAL_ERROR: i32 = -20;
+
 /// A protobuf [`prost::Message`] message returned by a [`crate::Handler`]
 pub struct ResponseMessage<T>(pub T);
 
@@ -112,6 +115,10 @@ pub enum HandlerError<E: Error> {
     User(E),
 }
 
+pub(crate) struct InternalError<E>(pub(crate) E)
+where
+    E: std::error::Error;
+
 impl<E, Err> From<Err> for HandlerError<E>
 where
     E: Error,
@@ -202,5 +209,14 @@ where
 {
     fn into_response(self) -> Option<Response> {
         Some(Response::Error(self.code(), format!("{}", self)))
+    }
+}
+
+impl<E> IntoResponse for InternalError<E>
+where
+    E: std::error::Error,
+{
+    fn into_response(self) -> Option<Response> {
+        Some(Response::Error(INTERNAL_ERROR, self.0.to_string()))
     }
 }

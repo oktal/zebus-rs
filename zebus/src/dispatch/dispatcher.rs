@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::task::Poll;
 
 use thiserror::Error;
+use tower_service::Service;
+use zebus_core::DEFAULT_DISPATCH_QUEUE;
 
 use super::future::DispatchFuture;
+use super::invoker::{InvokeRequest, InvokerService};
 use super::queue::DispatchQueue;
-use super::{
-    DispatchJob, DispatchRequest, DispatchService, HandlerInvoker, MessageInvokerDescriptor,
-};
+use super::{DispatchRequest, DispatchService, Dispatched, MessageInvokerDescriptor};
 use crate::MessageTypeDescriptor;
 
 /// Errors that can be returned by the [`MessageDispatcher`]
@@ -55,8 +57,8 @@ struct InvokerDispatcher {
     /// Descriptors of invokers  for messages indexed by their message type
     descriptors: HashMap<&'static str, MessageTypeInvokerDescriptor>,
 
-    /// List of invokers
-    invokers: Vec<Box<dyn HandlerInvoker>>,
+    /// List of services that can invoke handlers
+    services: Vec<Box<dyn InvokerService>>,
 }
 
 impl InvokerDispatcher {
@@ -64,13 +66,13 @@ impl InvokerDispatcher {
         Self {
             dispatch_queues: HashMap::new(),
             descriptors: HashMap::new(),
-            invokers: Vec::new(),
+            services: Vec::new(),
         }
     }
 
-    fn add(&mut self, invoker: Box<dyn HandlerInvoker>) -> Result<(), Error> {
+    fn add(&mut self, invoker: Box<dyn InvokerService>) -> Result<(), Error> {
         for descriptor in invoker.descriptors() {
-            let dispatch_queue = descriptor.dispatch_queue;
+            let dispatch_queue = descriptor.dispatch_queue.unwrap_or(DEFAULT_DISPATCH_QUEUE);
 
             let dispatch_info = self
                 .descriptors
@@ -85,7 +87,7 @@ impl InvokerDispatcher {
                 .or_insert_with(|| DispatchQueue::new(dispatch_queue.to_string()));
         }
 
-        self.invokers.push(invoker);
+        self.services.push(invoker);
         Ok(())
     }
 
@@ -112,33 +114,52 @@ impl InvokerDispatcher {
         // Create the dispatch context
         let (context, rx) = super::context::new(request);
 
-        // Create the invokers of the handlers for the message
-        let message_invokers = self
-            .invokers
-            .iter()
-            .filter_map(|i| i.create_invoker(context.clone()));
+        // Create the invoke request
+        let invoke_request = InvokeRequest {
+            dispatch: context.request(),
+        };
+
+        // Iterate through the services and create the tasks to invoke
+        // the handlers for the message of the given request
+        let tasks = self.services.iter_mut().filter_map(|s| {
+            if let Some((message, dispatch_queue, invoker_type)) =
+                match s.poll_invoke(&invoke_request) {
+                    Poll::Ready(Some(descriptor)) => Some((
+                        descriptor.message,
+                        descriptor.dispatch_queue.unwrap_or(DEFAULT_DISPATCH_QUEUE),
+                        descriptor.invoker_type,
+                    )),
+                    _ => None,
+                }
+            {
+                let future = s.call(invoke_request.clone());
+                Some(super::Task {
+                    ctx: context.clone(),
+                    future,
+                    message,
+                    dispatch_queue,
+                    handler_type: invoker_type,
+                })
+            } else {
+                None
+            }
+        });
 
         let mut total_invokers = 0;
 
-        for message_invoker in message_invokers {
-            // Retrieve the descriptor of the message we are about to dispatch
-            let descriptor = message_invoker.descriptor;
-
-            // Create the dispatch job
-            let job = DispatchJob::new(context.clone(), message_invoker.invoker);
-
-            // For an infrastructure message, spawn the job and start the execution of the invoker right away
+        for task in tasks {
+            // For an infrastructure message, spawn the task and start the execution of the invoker right away
             if descriptor.message.is_infrastructure {
-                tokio::spawn(job.invoke());
+                tokio::spawn(task.invoke());
             } else {
                 // Retrieve the dispatch queue for the message
                 let queue = self
                     .dispatch_queues
-                    .get(descriptor.dispatch_queue)
+                    .get(task.dispatch_queue)
                     .expect("unconfigured dispatch queue");
 
-                // Attempt to enqueue the job and return an error'd future if we failed
-                if let Err(e) = queue.enqueue(job) {
+                // Attempt to spawn the task in the dispatch queue and return an error'd future if we failed
+                if let Err(e) = queue.spawn(task) {
                     return super::future::err(Error::Queue(e));
                 }
             }
@@ -179,7 +200,7 @@ impl MessageDispatcher {
     }
 
     /// Add a [`Registry`] of handlers to the dispatcher
-    pub(crate) fn add(&mut self, invoker: Box<dyn HandlerInvoker>) -> Result<(), Error> {
+    pub(crate) fn add(&mut self, invoker: Box<dyn InvokerService>) -> Result<(), Error> {
         match self.inner.as_mut() {
             Some(Inner::Init(ref mut dispatch)) => dispatch.add(invoker),
             _ => Err(Error::InvalidOperation),
@@ -226,15 +247,25 @@ impl MessageDispatcher {
 }
 
 impl DispatchService for MessageDispatcher {
-    type Error = Error;
-    type Future = DispatchFuture;
-
     fn descriptors(&self) -> Result<Vec<MessageInvokerDescriptor>, self::Error> {
         self.descriptors().map(|it| it.cloned().collect())
     }
+}
 
-    fn call(&mut self, request: DispatchRequest) -> Self::Future {
-        self.dispatch(request)
+impl Service<DispatchRequest> for MessageDispatcher {
+    type Response = Dispatched;
+    type Error = Error;
+    type Future = DispatchFuture;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: DispatchRequest) -> Self::Future {
+        self.dispatch(req)
     }
 }
 
@@ -246,18 +277,16 @@ mod tests {
     use super::*;
     use crate::{
         bus::{self, CommandResult},
-        core::{HandlerDescriptor, MessagePayload},
+        core::MessagePayload,
         dispatch::{
-            registry::{self, Registry},
+            router::{RouteHandler, Router},
             DispatchRequest, DispatchResult, Dispatched,
         },
-        handler,
+        inject::{self, State},
         transport::TransportMessage,
-        Bus, Command, Context, DispatchHandler, Event, Handler, HandlerError, Message,
-        MessageDescriptor, Peer, PeerId, Response, ResponseMessage, SubscriptionMode,
+        Bus, Command, Event, HandlerError, Message, MessageDescriptor, Peer, PeerId, Response,
+        ResponseMessage,
     };
-
-    use zebus_core::binding_key;
 
     struct TestBus;
 
@@ -307,12 +336,14 @@ mod tests {
             }
         }
 
-        fn add<H>(&mut self, handler: H, registry_fn: impl FnOnce(&mut Registry<H>))
+        fn add<S, F>(&mut self, state: S, route_fn: F)
         where
-            H: DispatchHandler + Send + 'static,
+            S: Clone + Send + 'static,
+            F: FnOnce(Router<S>) -> Router<S>,
         {
+            let router = route_fn(Router::with_state(state));
             self.dispatcher
-                .add(registry::for_handler(handler, registry_fn))
+                .add(Box::new(router))
                 .expect("failed to add handler");
         }
 
@@ -363,53 +394,7 @@ mod tests {
         }
     }
 
-    struct TrackerHandler<H> {
-        tracker: Tracker,
-        handler: H,
-    }
-
-    fn track<H>(handler: H) -> (TrackerHandler<H>, Tracker) {
-        let tracker = Tracker::new();
-        (
-            TrackerHandler {
-                tracker: tracker.clone(),
-                handler,
-            },
-            tracker,
-        )
-    }
-
-    impl<H, M> HandlerDescriptor<M> for TrackerHandler<H>
-    where
-        H: HandlerDescriptor<M>,
-    {
-        fn subscription_mode() -> SubscriptionMode {
-            H::subscription_mode()
-        }
-
-        fn bindings() -> Vec<zebus_core::BindingKey> {
-            H::bindings()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl<H, M> Handler<M> for TrackerHandler<H>
-    where
-        H: DispatchHandler + Handler<M> + Send,
-        M: Message,
-    {
-        type Response = H::Response;
-
-        async fn handle(&mut self, message: M, ctx: Context<'_>) -> Self::Response {
-            self.tracker.track(&message);
-            self.handler.handle(message, ctx).await
-        }
-    }
-
-    impl<H: DispatchHandler> DispatchHandler for TrackerHandler<H> {
-        const DISPATCH_QUEUE: &'static str = H::DISPATCH_QUEUE;
-    }
-
+    /// Component to track handler invocation
     #[derive(Clone)]
     struct Tracker {
         triggers: Arc<Mutex<HashMap<&'static str, usize>>>,
@@ -430,77 +415,6 @@ mod tests {
         fn count_for<M: MessageDescriptor>(&self) -> usize {
             let triggers = self.triggers.lock().unwrap();
             triggers.get(M::name()).cloned().unwrap_or(0usize)
-        }
-    }
-
-    #[derive(crate::Handler)]
-    #[zebus(dispatch_queue = "CustomQueue")]
-    struct HandlerWithCustomDispatchQueue {}
-
-    #[derive(crate::Handler)]
-    struct HandlerWithDefaultDispatchQueue {}
-
-    #[derive(crate::Command, prost::Message)]
-    #[zebus(namespace = "Abc.Test")]
-    struct AutoSubscribeCommand {
-        #[prost(uint32, tag = 1)]
-        id: u32,
-    }
-
-    #[derive(crate::Command, prost::Message)]
-    #[zebus(namespace = "Abc.Test", routable)]
-    struct AutoSubscribeCommandWithRouting {
-        #[prost(string, tag = 1)]
-        #[zebus(routing_position = 1)]
-        month: String,
-    }
-
-    #[derive(crate::Command, prost::Message)]
-    #[zebus(namespace = "Abc.Test")]
-    struct ManualSubscribeCommand {
-        #[prost(uint32, tag = 1)]
-        id: u32,
-    }
-
-    #[derive(crate::Handler)]
-    struct TestHandler {}
-
-    #[handler(auto)]
-    #[async_trait]
-    impl crate::Handler<AutoSubscribeCommand> for TestHandler {
-        type Response = ();
-
-        async fn handle(
-            &mut self,
-            _message: AutoSubscribeCommand,
-            _ctx: Context<'_>,
-        ) -> Self::Response {
-        }
-    }
-
-    #[handler(binding = "october")]
-    #[async_trait]
-    impl crate::Handler<AutoSubscribeCommandWithRouting> for TestHandler {
-        type Response = ();
-
-        async fn handle(
-            &mut self,
-            _message: AutoSubscribeCommandWithRouting,
-            _ctx: Context<'_>,
-        ) -> Self::Response {
-        }
-    }
-
-    #[handler(manual)]
-    #[async_trait]
-    impl crate::Handler<ManualSubscribeCommand> for TestHandler {
-        type Response = ();
-
-        async fn handle(
-            &mut self,
-            _message: ManualSubscribeCommand,
-            _ctx: Context<'_>,
-        ) -> Self::Response {
         }
     }
 
@@ -531,40 +445,6 @@ mod tests {
         }
     }
 
-    #[derive(crate::Handler)]
-    struct ParseCommandHandler {}
-
-    #[derive(crate::Handler)]
-    struct ParseCommandResponseErrorHandler;
-
-    #[handler(manual)]
-    #[async_trait]
-    impl Handler<ParseCommand> for ParseCommandHandler {
-        type Response = ();
-
-        async fn handle(&mut self, _message: ParseCommand, _ctx: Context<'_>) {}
-    }
-
-    #[handler(manual)]
-    #[async_trait]
-    impl Handler<ParseCommand> for ParseCommandResponseErrorHandler {
-        type Response = Result<ResponseMessage<ParseResponse>, HandlerError<ParseError>>;
-
-        async fn handle(&mut self, message: ParseCommand, _ctx: Context<'_>) -> Self::Response {
-            let mut chars = message.value.chars();
-            if let Some(first) = chars.next() {
-                if first == '-' {
-                    return Err(HandlerError::User(ParseError::Negative));
-                }
-            }
-
-            Ok(ParseResponse {
-                value: message.value.parse::<i64>()?,
-            }
-            .into())
-        }
-    }
-
     #[derive(prost::Message, crate::Command, Clone)]
     #[zebus(namespace = "Abc.Test", infrastructure)]
     struct PingCommand {
@@ -579,19 +459,6 @@ mod tests {
         seq: u64,
     }
 
-    #[derive(crate::Handler)]
-    struct PingCommandHandler {}
-
-    #[handler]
-    #[async_trait]
-    impl Handler<PingCommand> for PingCommandHandler {
-        type Response = ResponseMessage<PongResponse>;
-
-        async fn handle(&mut self, message: PingCommand, _ctx: Context<'_>) -> Self::Response {
-            PongResponse { seq: message.seq }.into()
-        }
-    }
-
     #[derive(prost::Message, crate::Event, Clone)]
     #[zebus(namespace = "Abc.Test")]
     struct TestSucceeded {
@@ -599,76 +466,48 @@ mod tests {
         execution_time_secs: f64,
     }
 
-    #[derive(crate::Handler)]
-    #[zebus(dispatch_queue = "PersisenceQueue")]
-    struct TestPersistenceHandler;
-
-    #[derive(crate::Handler)]
-    #[zebus(dispatch_queue = "PersisenceQueue")]
-    struct TestOutputDisplayHandler;
-
-    #[handler]
-    #[async_trait]
-    impl Handler<TestSucceeded> for TestPersistenceHandler {
-        type Response = ();
-
-        async fn handle(&mut self, _message: TestSucceeded, _ctx: Context<'_>) -> Self::Response {}
+    async fn parse_noop(cmd: ParseCommand, inject::State(tracker): State<Tracker>) {
+        tracker.track(&cmd);
     }
 
-    #[handler]
-    #[async_trait]
-    impl Handler<TestSucceeded> for TestOutputDisplayHandler {
-        type Response = ();
+    async fn parse(
+        cmd: ParseCommand,
+    ) -> Result<ResponseMessage<ParseResponse>, HandlerError<ParseError>> {
+        let mut chars = cmd.value.chars();
+        if let Some(first) = chars.next() {
+            if first == '-' {
+                return Err(HandlerError::User(ParseError::Negative));
+            }
+        }
 
-        async fn handle(&mut self, _message: TestSucceeded, _ctx: Context<'_>) -> Self::Response {}
+        Ok(ParseResponse {
+            value: cmd.value.parse::<i64>()?,
+        }
+        .into())
     }
 
-    #[test]
-    fn custom_dispatch_queue() {
-        assert_eq!(
-            <HandlerWithCustomDispatchQueue as DispatchHandler>::DISPATCH_QUEUE,
-            "CustomQueue"
-        );
+    async fn ping(
+        cmd: PingCommand,
+        inject::State(tracker): State<Tracker>,
+    ) -> ResponseMessage<PongResponse> {
+        tracker.track(&cmd);
+        PongResponse { seq: cmd.seq }.into()
     }
 
-    #[test]
-    fn default_dispatch_queue() {
-        assert_eq!(
-            <HandlerWithDefaultDispatchQueue as DispatchHandler>::DISPATCH_QUEUE,
-            zebus_core::DEFAULT_DISPATCH_QUEUE
-        );
+    async fn test_succeded(msg: TestSucceeded, inject::State(tracker): State<Tracker>) {
+        tracker.track(&msg);
     }
 
-    #[test]
-    fn dispatch_auto_subscribe() {
-        assert_eq!(
-            <TestHandler as HandlerDescriptor<AutoSubscribeCommand>>::subscription_mode(),
-            SubscriptionMode::Auto
-        )
-    }
-
-    #[test]
-    fn dispatch_manual_subscribe() {
-        assert_eq!(
-            <TestHandler as HandlerDescriptor<ManualSubscribeCommand>>::subscription_mode(),
-            SubscriptionMode::Manual
-        )
-    }
-
-    #[test]
-    fn dispatch_subscribe_bindings() {
-        assert_eq!(
-            <TestHandler as HandlerDescriptor<AutoSubscribeCommandWithRouting>>::bindings(),
-            vec![binding_key!["october"]]
-        )
+    async fn display_test_succeeded(msg: TestSucceeded, inject::State(tracker): State<Tracker>) {
+        tracker.track(&msg);
     }
 
     #[tokio::test]
     async fn dispatch_message_to_handler_with_no_response() {
         let mut fixture = Fixture::new();
-        let (handler, tracker) = track(ParseCommandHandler {});
-        fixture.add(handler, |h| {
-            h.handles::<ParseCommand>();
+        let tracker = Tracker::new();
+        fixture.add(tracker.clone(), |router| {
+            router.handles(parse_noop.into_handler())
         });
 
         assert_eq!(fixture.start().is_ok(), true);
@@ -689,9 +528,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_message_to_handler_with_response() {
         let mut fixture = Fixture::new();
-        fixture.add(ParseCommandResponseErrorHandler, |h| {
-            h.handles::<ParseCommand>();
-        });
+        fixture.add((), |router| router.handles(parse.into_handler()));
 
         assert_eq!(fixture.start().is_ok(), true);
 
@@ -709,11 +546,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(unused_variables)]
     async fn dispatch_message_to_handler_with_user_error() {
         let mut fixture = Fixture::new();
-        fixture.add(ParseCommandResponseErrorHandler, |h| {
-            h.handles::<ParseCommand>();
-        });
+        fixture.add((), |router| router.handles(parse.into_handler()));
 
         assert_eq!(fixture.start().is_ok(), true);
 
@@ -737,9 +573,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_message_to_handler_with_standard_error() {
         let mut fixture = Fixture::new();
-        fixture.add(ParseCommandResponseErrorHandler, |h| {
-            h.handles::<ParseCommand>();
-        });
+        fixture.add((), |router| router.handles(parse.into_handler()));
 
         assert_eq!(fixture.start().is_ok(), true);
 
@@ -760,9 +594,9 @@ mod tests {
     #[tokio::test]
     async fn dispatch_local_message_to_handler_with_no_response() {
         let mut fixture = Fixture::new();
-        let (handler, tracker) = track(ParseCommandHandler {});
-        fixture.add(handler, |h| {
-            h.handles::<ParseCommand>();
+        let tracker = Tracker::new();
+        fixture.add(tracker.clone(), |router| {
+            router.handles(parse_noop.into_handler())
         });
 
         assert_eq!(fixture.start().is_ok(), true);
@@ -783,9 +617,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_local_message_to_handler_with_response() {
         let mut fixture = Fixture::new();
-        fixture.add(ParseCommandResponseErrorHandler, |h| {
-            h.handles::<ParseCommand>();
-        });
+        fixture.add((), |router| router.handles(parse.into_handler()));
 
         assert_eq!(fixture.start().is_ok(), true);
 
@@ -805,9 +637,9 @@ mod tests {
     #[tokio::test]
     async fn dispatch_local_command_with_success_result() {
         let mut fixture = Fixture::new();
-        let (handler, tracker) = track(ParseCommandHandler {});
-        fixture.add(handler, |h| {
-            h.handles::<ParseCommand>();
+        let tracker = Tracker::new();
+        fixture.add(tracker.clone(), |router| {
+            router.handles(parse_noop.into_handler())
         });
 
         assert_eq!(fixture.start().is_ok(), true);
@@ -828,9 +660,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_local_command_with_success_result_and_response() {
         let mut fixture = Fixture::new();
-        fixture.add(ParseCommandResponseErrorHandler, |h| {
-            h.handles::<ParseCommand>();
-        });
+        fixture.add((), |router| router.handles(parse.into_handler()));
 
         assert_eq!(fixture.start().is_ok(), true);
 
@@ -845,9 +675,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_local_command_with_error_result() {
         let mut fixture = Fixture::new();
-        fixture.add(ParseCommandResponseErrorHandler, |h| {
-            h.handles::<ParseCommand>();
-        });
+        fixture.add((), |router| router.handles(parse.into_handler()));
 
         assert_eq!(fixture.start().is_ok(), true);
 
@@ -861,9 +689,9 @@ mod tests {
     #[tokio::test]
     async fn dispatch_infrastructure_message() {
         let mut fixture = Fixture::new();
-        let (handler, tracker) = track(PingCommandHandler {});
-        fixture.add(handler, |h| {
-            h.handles::<PingCommand>();
+        let tracker = Tracker::new();
+        fixture.add(tracker.clone(), |router| {
+            router.handles(ping.into_handler())
         });
         assert_eq!(fixture.start().is_ok(), true);
 
@@ -881,14 +709,20 @@ mod tests {
     #[tokio::test]
     async fn dispatch_event_to_multiple_handlers_in_multiple_dispatch_queues() {
         let mut fixture = Fixture::new();
-        let (persistent_handler, persistence_tracker) = track(TestPersistenceHandler {});
-        fixture.add(persistent_handler, |h| {
-            h.handles::<TestSucceeded>();
+        let tracker = Tracker::new();
+        fixture.add(tracker.clone(), |router| {
+            router.handles(
+                test_succeded
+                    .into_handler()
+                    .in_dispatch_queue("TestPersistenceQueue"),
+            )
         });
-
-        let (output_handler, output_tracker) = track(TestOutputDisplayHandler {});
-        fixture.add(output_handler, |h| {
-            h.handles::<TestSucceeded>();
+        fixture.add(tracker.clone(), |router| {
+            router.handles(
+                display_test_succeeded
+                    .into_handler()
+                    .in_dispatch_queue("TestDisplayQueue"),
+            )
         });
 
         assert_eq!(fixture.start().is_ok(), true);
@@ -901,7 +735,6 @@ mod tests {
             .expect("failed to dispatch event");
 
         assert!(dispatched.descriptor.is::<TestSucceeded>());
-        assert_eq!(persistence_tracker.count_for::<TestSucceeded>(), 1);
-        assert_eq!(output_tracker.count_for::<TestSucceeded>(), 1);
+        assert_eq!(tracker.count_for::<TestSucceeded>(), 2);
     }
 }

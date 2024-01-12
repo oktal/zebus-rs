@@ -1,3 +1,5 @@
+use zebus_core::MessageFlags;
+
 use crate::{proto::IntoProtobuf, Message, MessageDescriptor, MessageTypeDescriptor};
 use std::any::TypeId;
 
@@ -101,7 +103,7 @@ impl MessageTypeId {
     }
 
     pub fn of_val(message: &dyn Message) -> Self {
-        Self::from_descriptor(MessageTypeDescriptor::of_val(message))
+        Self::from_descriptor(MessageTypeDescriptor::of_val(message.up()))
     }
 
     pub fn is<M: MessageDescriptor>(&self) -> bool {

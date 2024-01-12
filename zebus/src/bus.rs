@@ -180,7 +180,14 @@ impl<M: prost::Message> EncodableMessage for M {
 
 /// Trait for a message that can be sent through the bus
 pub trait Message:
-    crate::core::Message + EncodableMessage + DynClone + Send + Sync + std::fmt::Debug + 'static
+    crate::core::Message
+    + EncodableMessage
+    + DynClone
+    + Send
+    + Sync
+    + std::fmt::Debug
+    + Upcast<dyn crate::core::Message>
+    + 'static
 {
 }
 

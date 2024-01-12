@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::Context;
-
-use super::{DispatchMessage, DispatchRequest, HandlerResponse};
+use super::{DispatchRequest, HandlerResponse};
 
 #[derive(Clone)]
 pub(crate) struct DispatchContext {
@@ -26,18 +24,6 @@ impl DispatchContext {
 
     pub(super) fn request(&self) -> Arc<DispatchRequest> {
         Arc::clone(&self.request)
-    }
-
-    pub(crate) fn handler_context(&self) -> Context<'_> {
-        Context::new(self.request.bus.as_ref())
-    }
-
-    pub(crate) fn message(&self) -> &DispatchMessage {
-        &self.request.message
-    }
-
-    pub(crate) fn message_type(&self) -> &str {
-        self.message().message_type()
     }
 
     pub(super) async fn send(&self, response: HandlerResponse) {

@@ -1,20 +1,22 @@
-use std::any::type_name;
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::task::Poll;
 
 use futures_core::future::BoxFuture;
+use tower_service::Service;
 
-use crate::core::{HandlerDescriptor, MessageDescriptor};
-use crate::{BindingKey, DispatchHandler, MessageTypeDescriptor, Response, SubscriptionMode};
+use crate::{BindingKey, MessageTypeDescriptor, Response, SubscriptionMode};
 
-use super::DispatchContext;
+use super::DispatchRequest;
 
 /// A descriptor for an invoker for a specific type of message
 #[derive(Debug, Clone)]
-pub(crate) struct MessageInvokerDescriptor {
+pub struct MessageInvokerDescriptor {
     /// The `type_name()` of the invoker
     pub invoker_type: &'static str,
 
     /// Name of the dispatch queue
-    pub dispatch_queue: &'static str,
+    pub dispatch_queue: Option<&'static str>,
 
     /// Descriptor of the message type
     pub message: MessageTypeDescriptor,
@@ -26,37 +28,12 @@ pub(crate) struct MessageInvokerDescriptor {
     pub bindings: Vec<BindingKey>,
 }
 
-/// An invoker for specific message type
-pub(crate) struct MessageHandlerInvoker<'a> {
-    /// Descriptor of the invoker
-    pub descriptor: &'a MessageInvokerDescriptor,
-
-    /// A future that will call the invoker
-    pub invoker: HandlerFuture,
-}
-
-impl MessageInvokerDescriptor {
-    pub(crate) fn of<H, M>() -> Self
-    where
-        M: MessageDescriptor + 'static,
-        H: DispatchHandler + HandlerDescriptor<M>,
-    {
-        Self {
-            invoker_type: type_name::<H>(),
-            dispatch_queue: H::DISPATCH_QUEUE,
-            message: MessageTypeDescriptor::of::<M>(),
-            subscription_mode: H::subscription_mode(),
-            bindings: H::bindings().into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
 /// Represents a [`Response`] for a specific handler type of a specific message
 pub(crate) struct HandlerResponse(&'static str, Option<Response>);
 
 impl HandlerResponse {
-    pub(crate) fn for_handler<H: DispatchHandler>(response: Option<Response>) -> Self {
-        Self(type_name::<H>(), response)
+    pub(crate) fn new(name: &'static str, response: Option<Response>) -> Self {
+        Self(name, response)
     }
 
     pub(super) fn handler_type(&self) -> &'static str {
@@ -68,10 +45,45 @@ impl HandlerResponse {
     }
 }
 
-/// A [`BoxFuture`] that represents a [`HandlerResponse`]
-pub(crate) type HandlerFuture = BoxFuture<'static, HandlerResponse>;
+/// Request to invoke a [`MessageHandlerInvoker`]
+#[derive(Clone)]
+pub struct InvokeRequest {
+    /// Original dispatch request
+    pub(crate) dispatch: Arc<DispatchRequest>,
+}
 
-pub(crate) trait HandlerInvoker: Send + Sync {
+pub trait InvokerService:
+    Service<
+        InvokeRequest,
+        Response = Option<Response>,
+        Error = Infallible,
+        Future = BoxFuture<'static, Result<Option<Response>, Infallible>>,
+    > + Send
+{
     fn descriptors(&self) -> Vec<MessageInvokerDescriptor>;
-    fn create_invoker<'a>(&'a self, ctx: DispatchContext) -> Option<MessageHandlerInvoker<'a>>;
+
+    fn poll_invoke<'a>(&'a self, req: &InvokeRequest)
+        -> Poll<Option<&'a MessageInvokerDescriptor>>;
+}
+
+#[cfg(test)]
+impl dyn InvokerService {
+    pub(crate) fn invoke<M>(
+        &mut self,
+        message: M,
+        bus: Arc<dyn crate::Bus>,
+    ) -> BoxFuture<'static, Result<Option<Response>, Infallible>>
+    where
+        M: crate::Message,
+    {
+        let request = InvokeRequest {
+            dispatch: Arc::new(DispatchRequest::local(Arc::new(message), bus)),
+        };
+
+        if let Poll::Ready(Some(_)) = self.poll_invoke(&request) {
+            self.call(request)
+        } else {
+            Box::pin(async move { Ok(None) })
+        }
+    }
 }

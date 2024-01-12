@@ -1,5 +1,10 @@
 use bitflags::bitflags;
-use std::{any::Any, fmt, marker::PhantomData, str::FromStr};
+use std::{
+    any::{Any, TypeId},
+    fmt,
+    marker::PhantomData,
+    str::FromStr,
+};
 
 mod upcast;
 pub use upcast::{Upcast, UpcastFrom};
@@ -237,19 +242,91 @@ pub enum SubscriptionMode {
     Manual,
 }
 
-/// Descriptor for a [`DispatchHandler`]
-pub trait HandlerDescriptor<T> {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MessageTypeDescriptor {
+    /// Fully-qualified name of the message
+    pub full_name: &'static str,
+
+    /// The [`MessageKind`] of the message
+    pub kind: MessageKind,
+
+    /// Rust type representation of the message
+    pub r#type: TypeId,
+
+    /// Marker flag for a persistent message
+    pub is_persistent: bool,
+
+    /// Market flag for an infrastructure message
+    pub is_infrastructure: bool,
+    // TODO(oktal): Handle routing fields info
+}
+
+impl AsRef<str> for MessageTypeDescriptor {
+    fn as_ref(&self) -> &str {
+        self.full_name.as_ref()
+    }
+}
+
+/// Descriptor of a message
+impl MessageTypeDescriptor {
+    pub fn of<M: MessageDescriptor + 'static>() -> Self {
+        let flags = M::flags();
+
+        Self {
+            full_name: M::name(),
+            kind: M::kind(),
+            r#type: TypeId::of::<M>(),
+            is_persistent: !flags.contains(MessageFlags::TRANSIENT),
+            is_infrastructure: flags.contains(MessageFlags::INFRASTRUCTURE),
+        }
+    }
+
+    pub fn of_val(message: &dyn Message) -> Self {
+        let flags = message.flags();
+
+        Self {
+            full_name: message.name(),
+            kind: message.kind(),
+            r#type: message.type_id(),
+            is_persistent: !flags.contains(MessageFlags::TRANSIENT),
+            is_infrastructure: flags.contains(MessageFlags::INFRASTRUCTURE),
+        }
+    }
+
+    pub fn is<M: MessageDescriptor + 'static>(&self) -> bool {
+        self.r#type == TypeId::of::<M>() && self.kind == M::kind()
+    }
+}
+
+/// Descriptor of a handler
+pub trait HandlerDescriptor<S>
+where
+    S: Clone + Send + 'static,
+{
+    /// Service associated with the handler
+    type Service;
+
+    /// Associated type of the binding key
+    type Binding;
+
+    /// Create the service associated with this handler
+    fn service(self, state: S) -> Self::Service;
+
+    /// Descriptor of the message handled by this handler
+    fn message(&self) -> MessageTypeDescriptor;
+
+    /// Optional name of a dispatch queue
+    fn queue(&self) -> Option<&'static str>;
+
+    /// Name of the handler. The name will usually correspond to the type name of the handler
+    fn name(&self) -> &'static str;
+
     /// The startup subscription mode for the message handler
-    fn subscription_mode() -> SubscriptionMode;
+    fn subscription_mode(&self) -> SubscriptionMode;
 
     /// Get the binding keys for automatic subscription mode on startup for the message handler
-    fn bindings() -> Vec<BindingKey>;
+    fn bindings(&self) -> Vec<Self::Binding>;
 }
 
 /// Name of the default dispatch queue
 pub const DEFAULT_DISPATCH_QUEUE: &'static str = "DefaultQueue";
-
-/// Represents a [`Handler`] that can be called in the context of a dispatch queue
-pub trait DispatchHandler {
-    const DISPATCH_QUEUE: &'static str;
-}

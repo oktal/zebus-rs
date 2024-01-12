@@ -12,6 +12,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
+use tower_service::Service;
 
 use crate::{
     bus::{CommandFuture, CommandResult, Error, RegistrationError, Result, SendError},
@@ -19,13 +20,10 @@ use crate::{
         DEFAULT_MAX_BATCH_SIZE, DEFAULT_REGISTRATION_TIMEOUT, DEFAULT_START_REPLAY_TIMEOUT,
     },
     core::{MessagePayload, SubscriptionMode},
-    directory::{
-        self, commands::PingPeerCommand, events::PeerSubscriptionsForTypeUpdated, Directory,
-        PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
-        Registration,
-    },
+    directory::{self, Directory, Registration},
     dispatch::{
-        self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, MessageDispatcher,
+        self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, InvokerService,
+        MessageDispatcher,
     },
     proto::FromProtobuf,
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
@@ -68,8 +66,6 @@ enum State<T: Transport, D: Directory> {
 
     Started {
         core: Arc<Core<T, D>>,
-        rx_handle: JoinHandle<()>,
-        tx_handle: JoinHandle<()>,
     },
 }
 
@@ -647,15 +643,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
             // Setup peer directory client handler
             let directory_handler = directory.handler();
             dispatcher
-                .add(dispatch::registry::for_handler(directory_handler, |h| {
-                    h.handles::<PeerStarted>()
-                        .handles::<PeerStopped>()
-                        .handles::<PeerDecommissioned>()
-                        .handles::<PeerNotResponding>()
-                        .handles::<PeerResponding>()
-                        .handles::<PingPeerCommand>()
-                        .handles::<PeerSubscriptionsForTypeUpdated>();
-                }))
+                .add(Box::new(directory_handler))
                 .map_err(Error::Dispatch)?;
 
             // Retrieve the list of subscriptions that should be sent at startup
@@ -711,18 +699,14 @@ impl<T: Transport, D: Directory> Bus<T, D> {
             });
 
             // Start sender
-            let tx_handle = tokio::spawn(sender.run());
+            let _tx_handle = tokio::spawn(sender.run());
 
             // Start receiver
-            let rx_handle = tokio::spawn(receiver.run(core.clone()));
+            let _rx_handle = tokio::spawn(receiver.run(core.clone()));
 
             // Transition to started state
             let mut state_lock = self.inner.lock().unwrap();
-            *state_lock = Some(State::Started {
-                core,
-                rx_handle,
-                tx_handle,
-            });
+            *state_lock = Some(State::Started { core });
 
             Ok(())
         } else {
@@ -848,16 +832,11 @@ impl<T: Transport> BusBuilder<T> {
         self.with_configuration(configuration, environment)
     }
 
-    pub fn with_handler<H>(
-        mut self,
-        handler: H,
-        registry_fn: impl FnOnce(&mut dispatch::registry::Registry<H>),
-    ) -> Self
+    pub fn handles<H>(mut self, handler: H) -> Self
     where
-        H: crate::DispatchHandler + Send + 'static,
+        H: InvokerService + 'static,
     {
-        let registry = dispatch::registry::for_handler(handler, registry_fn);
-        self.dispatcher.add(registry).unwrap();
+        self.dispatcher.add(Box::new(handler)).unwrap();
         self
     }
 
@@ -897,6 +876,13 @@ mod tests {
 
     use super::*;
     use crate::bus::CommandError;
+    use crate::directory::commands::PingPeerCommand;
+    use crate::directory::events::PeerSubscriptionsForTypeUpdated;
+    use crate::directory::{
+        PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
+    };
+    use crate::dispatch::router::{RouteHandler, Router};
+    use crate::inject::{self, State};
     use crate::message_type_id::MessageTypeId;
     use crate::{
         directory::{
@@ -904,8 +890,7 @@ mod tests {
             event::PeerEvent,
             DirectoryReader,
         },
-        dispatch::registry,
-        handler, Context, Handler, MessageDescriptor, MessageType,
+        MessageDescriptor, MessageType,
     };
     use tokio::sync::{broadcast, Notify};
 
@@ -954,8 +939,8 @@ mod tests {
         inner: Arc<Mutex<MemoryTransportInner>>,
     }
 
-    /// Inner [`MemoryDirectory`] state
-    struct MemoryDirectoryInner {
+    /// State of the memory directory
+    struct MemoryDirectoryState {
         /// Sender channel for peer events
         events_tx: broadcast::Sender<PeerEvent>,
 
@@ -967,7 +952,7 @@ mod tests {
         peers: HashMap<&'static str, Vec<Peer>>,
     }
 
-    impl MemoryDirectoryInner {
+    impl MemoryDirectoryState {
         fn new() -> Self {
             let (events_tx, _events_rx) = broadcast::channel(128);
             Self {
@@ -995,15 +980,15 @@ mod tests {
     /// A [`Directory`] that stores state in memory and has simplified
     /// logic for test purposes
     struct MemoryDirectory {
-        inner: Arc<Mutex<MemoryDirectoryInner>>,
+        state: Arc<Mutex<MemoryDirectoryState>>,
     }
 
     impl MemoryDirectory {
         /// Get a list of messages handled by the directory
         fn get_handled<M: MessageDescriptor + Send + Sync + 'static>(&self) -> Vec<Arc<M>> {
-            let inner = self.inner.lock().unwrap();
+            let state = self.state.lock().unwrap();
 
-            match inner.messages.get(M::name()) {
+            match state.messages.get(M::name()) {
                 Some(entry) => entry
                     .iter()
                     .filter_map(|m| m.clone().downcast::<M>().ok())
@@ -1025,22 +1010,9 @@ mod tests {
 
         /// Add a peer that should hande the `Message`
         fn add_peer_for<M: MessageDescriptor>(&self, peer: Peer) -> &Self {
-            let mut inner = self.inner.lock().unwrap();
-            inner.add_peer_for::<M>(peer);
+            let mut state = self.state.lock().unwrap();
+            state.add_peer_for::<M>(peer);
             self
-        }
-    }
-
-    #[derive(Handler)]
-    struct MemoryDirectoryHandler {
-        inner: Arc<Mutex<MemoryDirectoryInner>>,
-    }
-
-    impl MemoryDirectoryHandler {
-        /// Ad a `message` to the list of handled messages by the directory
-        fn add_handled<M: MessageDescriptor + Send + Sync + 'static>(&mut self, message: M) {
-            let mut inner = self.inner.lock().unwrap();
-            inner.add_handled(message);
         }
     }
 
@@ -1250,36 +1222,14 @@ mod tests {
         }
     }
 
-    macro_rules! impl_handler {
-        ($msg:ty, $ty: ty) => {
-            #[handler]
-            #[async_trait::async_trait]
-            impl Handler<$msg> for $ty {
-                type Response = ();
-
-                async fn handle(&mut self, message: $msg, _ctx: Context<'_>) -> Self::Response {
-                    self.add_handled(message);
-                }
-            }
-        };
-    }
-
-    impl_handler!(PeerStarted, MemoryDirectoryHandler);
-    impl_handler!(PeerStopped, MemoryDirectoryHandler);
-    impl_handler!(PeerDecommissioned, MemoryDirectoryHandler);
-    impl_handler!(PeerNotResponding, MemoryDirectoryHandler);
-    impl_handler!(PeerResponding, MemoryDirectoryHandler);
-    impl_handler!(PeerSubscriptionsForTypeUpdated, MemoryDirectoryHandler);
-    impl_handler!(PingPeerCommand, MemoryDirectoryHandler);
-
     impl DirectoryReader for MemoryDirectory {
         fn get(&self, _peer_id: &PeerId) -> Option<Peer> {
             None
         }
 
         fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
-            let inner = self.inner.lock().unwrap();
-            if let Some(peers) = inner.peers.get(message.name()) {
+            let state = self.state.lock().unwrap();
+            if let Some(peers) = state.peers.get(message.name()) {
                 peers.clone()
             } else {
                 vec![]
@@ -1287,29 +1237,83 @@ mod tests {
         }
     }
 
+    async fn peer_started(
+        msg: PeerStarted,
+        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
+    ) {
+        state.lock().unwrap().add_handled(msg)
+    }
+
+    async fn peer_stopped(
+        msg: PeerStopped,
+        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
+    ) {
+        state.lock().unwrap().add_handled(msg)
+    }
+
+    async fn peer_decommissioned(
+        msg: PeerDecommissioned,
+        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
+    ) {
+        state.lock().unwrap().add_handled(msg)
+    }
+
+    async fn peer_not_responding(
+        msg: PeerNotResponding,
+        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
+    ) {
+        state.lock().unwrap().add_handled(msg)
+    }
+
+    async fn peer_responding(
+        msg: PeerResponding,
+        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
+    ) {
+        state.lock().unwrap().add_handled(msg)
+    }
+
+    async fn ping_peer(
+        msg: PingPeerCommand,
+        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
+    ) {
+        state.lock().unwrap().add_handled(msg)
+    }
+
+    async fn peer_subscriptions_for_type_updated(
+        msg: PeerSubscriptionsForTypeUpdated,
+        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
+    ) {
+        state.lock().unwrap().add_handled(msg)
+    }
+
     impl Directory for MemoryDirectory {
         type EventStream = crate::sync::stream::BroadcastStream<PeerEvent>;
-        type Handler = MemoryDirectoryHandler;
+        type Handler = Router<Arc<Mutex<MemoryDirectoryState>>>;
 
         fn new() -> Arc<Self> {
             Arc::new(Self {
-                inner: Arc::new(Mutex::new(MemoryDirectoryInner::new())),
+                state: Arc::new(Mutex::new(MemoryDirectoryState::new())),
             })
         }
         fn subscribe(&self) -> Self::EventStream {
-            let inner = self.inner.lock().unwrap();
-            inner.subscribe().into()
+            let state = self.state.lock().unwrap();
+            state.subscribe().into()
         }
 
         fn handle_registration(&self, response: RegisterPeerResponse) {
-            let mut inner = self.inner.lock().unwrap();
-            inner.add_handled(response);
+            let mut state = self.state.lock().unwrap();
+            state.add_handled(response);
         }
 
         fn handler(&self) -> Self::Handler {
-            MemoryDirectoryHandler {
-                inner: Arc::clone(&self.inner),
-            }
+            Router::with_state(Arc::clone(&self.state))
+                .handles(peer_started.into_handler())
+                .handles(peer_stopped.into_handler())
+                .handles(peer_decommissioned.into_handler())
+                .handles(peer_not_responding.into_handler())
+                .handles(peer_responding.into_handler())
+                .handles(ping_peer.into_handler())
+                .handles(peer_subscriptions_for_type_updated.into_handler())
         }
     }
 
@@ -1322,18 +1326,26 @@ mod tests {
     }
 
     impl Fixture {
-        fn new_dispatch(
+        fn with_handler<S>(
             configuration: BusConfiguration,
-            dispatch_fn: impl FnOnce(&mut MessageDispatcher),
-        ) -> Self {
+            state: S,
+            route_fn: impl FnOnce(Router<S>) -> Router<S>,
+        ) -> Self
+        where
+            S: Clone + Send + 'static,
+        {
             let peer = Peer::test();
             let transport = MemoryTransport::new(peer.clone());
 
             let environment = "Test".to_string();
             let directory = MemoryDirectory::new();
 
+            let router = Router::with_state(state);
+
             let mut dispatcher = MessageDispatcher::new();
-            dispatch_fn(&mut dispatcher);
+            dispatcher
+                .add(Box::new(route_fn(router)))
+                .expect("dispatcher in invalid state");
             let bus = Bus::new(
                 configuration,
                 transport.clone(),
@@ -1351,7 +1363,7 @@ mod tests {
         }
 
         fn new(configuration: BusConfiguration) -> Self {
-            Self::new_dispatch(configuration, |_| {})
+            Self::with_handler(configuration, (), |router| router)
         }
 
         fn new_default() -> Self {
@@ -1416,73 +1428,50 @@ mod tests {
         id: u64,
     }
 
-    #[derive(Handler)]
-    struct BrewCoffeeCommandHandler {
-        tx: std::sync::mpsc::Sender<BrewCoffeeCommand>,
+    #[derive(Clone)]
+    struct HandlerState<M>
+    where
+        M: Message,
+    {
+        tx: std::sync::mpsc::Sender<M>,
     }
 
-    #[derive(Handler)]
-    struct BrokenBrewCoffeeCommandHandler {
-        tx: std::sync::mpsc::Sender<BrewCoffeeCommand>,
-    }
-
-    #[derive(Handler)]
-    struct CoffeeBrewedHandler {
-        tx: std::sync::mpsc::Sender<CoffeeBrewed>,
+    impl<M> HandlerState<M>
+    where
+        M: Message,
+    {
+        fn new() -> (Self, std::sync::mpsc::Receiver<M>) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            (Self { tx }, rx)
+        }
+        fn send(&self, message: M) {
+            self.tx.send(message).unwrap();
+        }
     }
 
     const BOILER_TOO_COLD: (i32, &'static str) = (0xBADBAD, "Boiler is too cold to brew coffee");
 
-    impl BrokenBrewCoffeeCommandHandler {
-        fn new() -> (Self, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
-            let (tx, rx) = std::sync::mpsc::channel();
-            (Self { tx }, rx)
-        }
+    async fn brew_coffee(_cmd: BrewCoffeeCommand) {}
+    async fn brew_coffee_state(
+        cmd: BrewCoffeeCommand,
+        inject::State(state): inject::State<HandlerState<BrewCoffeeCommand>>,
+    ) {
+        state.send(cmd);
     }
 
-    impl BrewCoffeeCommandHandler {
-        fn new() -> (Self, std::sync::mpsc::Receiver<BrewCoffeeCommand>) {
-            let (tx, rx) = std::sync::mpsc::channel();
-            (Self { tx }, rx)
-        }
+    async fn brew_coffee_boiler_error(
+        cmd: BrewCoffeeCommand,
+        inject::State(state): inject::State<HandlerState<BrewCoffeeCommand>>,
+    ) -> std::result::Result<(), (i32, &'static str)> {
+        state.send(cmd);
+        Err(BOILER_TOO_COLD)
     }
 
-    impl CoffeeBrewedHandler {
-        fn new() -> (Self, std::sync::mpsc::Receiver<CoffeeBrewed>) {
-            let (tx, rx) = std::sync::mpsc::channel();
-            (Self { tx }, rx)
-        }
-    }
-
-    #[handler]
-    #[async_trait::async_trait]
-    impl Handler<BrewCoffeeCommand> for BrewCoffeeCommandHandler {
-        type Response = ();
-
-        async fn handle(&mut self, cmd: BrewCoffeeCommand, _ctx: Context<'_>) -> Self::Response {
-            self.tx.send(cmd).unwrap();
-        }
-    }
-
-    #[handler(manual)]
-    #[async_trait::async_trait]
-    impl Handler<BrewCoffeeCommand> for BrokenBrewCoffeeCommandHandler {
-        type Response = std::result::Result<(), (i32, &'static str)>;
-
-        async fn handle(&mut self, cmd: BrewCoffeeCommand, _ctx: Context<'_>) -> Self::Response {
-            self.tx.send(cmd).unwrap();
-            Err(BOILER_TOO_COLD)
-        }
-    }
-
-    #[handler]
-    #[async_trait::async_trait]
-    impl Handler<CoffeeBrewed> for CoffeeBrewedHandler {
-        type Response = ();
-
-        async fn handle(&mut self, evt: CoffeeBrewed, ctx: Context<'_>) -> Self::Response {
-            self.tx.send(evt).unwrap();
-        }
+    async fn coffee_brewed(
+        cmd: CoffeeBrewed,
+        inject::State(state): inject::State<HandlerState<CoffeeBrewed>>,
+    ) {
+        state.send(cmd);
     }
 
     #[tokio::test]
@@ -1631,15 +1620,9 @@ mod tests {
 
     #[tokio::test]
     async fn start_bus_will_register_and_subscribe_automatically_to_directory() {
-        let (handler, _) = BrewCoffeeCommandHandler::new();
-
-        // Create fixture with dispatch
-        let mut fixture = Fixture::new_dispatch(Fixture::configuration(), |dispatcher| {
-            dispatcher
-                .add(registry::for_handler(handler, |handler| {
-                    handler.handles::<BrewCoffeeCommand>();
-                }))
-                .unwrap();
+        // Create fixture with handler
+        let mut fixture = Fixture::with_handler(Fixture::configuration(), (), |router| {
+            router.handles(brew_coffee.into_handler())
         });
 
         // Configure and start the bus
@@ -1786,17 +1769,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_command_will_dispatch_locally_if_multiple_peers_handle_command_with_self() {
-        // Create fixture with dispatch
         let configuration = Fixture::configuration();
+        let (state, rx) = HandlerState::new();
 
-        let (handler, rx) = BrewCoffeeCommandHandler::new();
-
-        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
-            dispatcher
-                .add(registry::for_handler(handler, |handler| {
-                    handler.handles::<BrewCoffeeCommand>();
-                }))
-                .unwrap();
+        // Create fixture with dispatch
+        let mut fixture = Fixture::with_handler(configuration, state, |router| {
+            router.handles(brew_coffee_state.into_handler())
         });
 
         // Configure and start the bus
@@ -1872,15 +1850,10 @@ mod tests {
     async fn publish_event_will_dispatch_locally_and_send_to_recipient_peers_with_self() {
         // Create fixture with dispatch
         let configuration = Fixture::configuration();
+        let (state, rx) = HandlerState::new();
 
-        let (handler, rx) = CoffeeBrewedHandler::new();
-
-        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
-            dispatcher
-                .add(registry::for_handler(handler, |handler| {
-                    handler.handles::<CoffeeBrewed>();
-                }))
-                .unwrap();
+        let mut fixture = Fixture::with_handler(configuration, state, |router| {
+            router.handles(coffee_brewed.into_handler())
         });
 
         // Configure and start the bus
@@ -1928,17 +1901,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_command_locally_with_error_response() {
-        // Create fixture with dispatch
         let configuration = Fixture::configuration();
+        let (state, rx) = HandlerState::new();
 
-        let (handler, rx) = BrokenBrewCoffeeCommandHandler::new();
-
-        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
-            dispatcher
-                .add(registry::for_handler(handler, |handler| {
-                    handler.handles::<BrewCoffeeCommand>();
-                }))
-                .unwrap();
+        // Create fixture with handler
+        let mut fixture = Fixture::with_handler(configuration, state, |router| {
+            router.handles(brew_coffee_boiler_error.into_handler())
         });
 
         // Configure and start the bus
@@ -1976,17 +1944,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_received_transport_message() {
-        // Create fixture with dispatch
         let configuration = Fixture::configuration();
+        let (state, rx) = HandlerState::new();
 
-        let (handler, rx) = BrewCoffeeCommandHandler::new();
-
-        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
-            dispatcher
-                .add(registry::for_handler(handler, |handler| {
-                    handler.handles::<BrewCoffeeCommand>();
-                }))
-                .unwrap();
+        // Create fixture with handler
+        let mut fixture = Fixture::with_handler(configuration, state, |router| {
+            router.handles(brew_coffee_state.into_handler())
         });
 
         // Configure and start the bus
@@ -2013,17 +1976,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_received_transport_message_locally() {
-        // Create fixture with dispatch
         let configuration = Fixture::configuration();
+        let (state, rx) = HandlerState::new();
 
-        let (handler, rx) = BrewCoffeeCommandHandler::new();
-
-        let mut fixture = Fixture::new_dispatch(configuration, |dispatcher| {
-            dispatcher
-                .add(registry::for_handler(handler, |handler| {
-                    handler.handles::<BrewCoffeeCommand>();
-                }))
-                .unwrap();
+        // Create fixture with handler
+        let mut fixture = Fixture::with_handler(configuration, state, |router| {
+            router.handles(brew_coffee_state.into_handler())
         });
 
         // Configure and start the bus
