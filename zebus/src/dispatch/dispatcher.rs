@@ -279,13 +279,14 @@ mod tests {
         bus::{self, CommandResult},
         core::MessagePayload,
         dispatch::{
-            router::{RouteHandler, Router},
+            router::{RouteHandler, RouteHandlerDescriptor, Router},
             DispatchRequest, DispatchResult, Dispatched,
         },
+        handler,
         inject::{self, State},
         transport::TransportMessage,
-        Bus, Command, Event, HandlerError, Message, MessageDescriptor, Peer, PeerId, Response,
-        ResponseMessage,
+        Bus, Command, Event, HandlerDescriptor, HandlerError, Message, MessageDescriptor, Peer,
+        PeerId, Response, ResponseMessage, SubscriptionMode,
     };
 
     struct TestBus;
@@ -459,6 +460,10 @@ mod tests {
         seq: u64,
     }
 
+    #[derive(prost::Message, crate::Command, Clone)]
+    #[zebus(namespace = "Abc.Test")]
+    struct TestCommand {}
+
     #[derive(prost::Message, crate::Event, Clone)]
     #[zebus(namespace = "Abc.Test")]
     struct TestSucceeded {
@@ -500,6 +505,40 @@ mod tests {
 
     async fn display_test_succeeded(msg: TestSucceeded, inject::State(tracker): State<Tracker>) {
         tracker.track(&msg);
+    }
+
+    #[test]
+    fn generate_handler_with_subscription_mode() {
+        #[handler(auto)]
+        async fn test_auto(_cmd: TestCommand) {}
+
+        #[handler(manual)]
+        async fn test_manual(_cmd: TestCommand) {}
+
+        assert_eq!(
+            <test_auto as HandlerDescriptor<()>>::subscription_mode(&test_auto),
+            SubscriptionMode::Auto
+        );
+
+        assert_eq!(
+            <test_manual as HandlerDescriptor<()>>::subscription_mode(&test_manual),
+            SubscriptionMode::Manual
+        );
+    }
+
+    #[test]
+    fn generate_handler_with_dispatch_queue() {
+        #[handler(auto)]
+        async fn test(_cmd: TestCommand) {}
+
+        #[handler(auto, queue = "TestQueue")]
+        async fn test_queue(_cmd: TestCommand) {}
+
+        assert_eq!(<test as HandlerDescriptor<()>>::queue(&test), None);
+        assert_eq!(
+            <test_queue as HandlerDescriptor<()>>::queue(&test_queue),
+            Some("TestQueue")
+        );
     }
 
     #[tokio::test]

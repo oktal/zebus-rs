@@ -21,8 +21,8 @@ use crate::{Bus, Message, MessageDescriptor};
 pub(crate) use context::DispatchContext;
 pub(crate) use dispatcher::{Error, MessageDispatcher};
 use futures_core::future::BoxFuture;
-pub use invoker::InvokerService;
 pub(crate) use invoker::{HandlerResponse, MessageInvokerDescriptor};
+pub use invoker::{InvokeRequest, InvokerService};
 use tower_service::Service;
 use zebus_core::MessageTypeDescriptor;
 

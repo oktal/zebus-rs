@@ -33,7 +33,10 @@ use message_type_id::{MessageType, MessageTypeId};
 
 pub use routing::BindingKey;
 pub use zebus_core::{
-    BindingKeyFragment, BoxError, MessageBinding, MessageDescriptor, MessageFlags, MessageKind,
-    MessageTypeDescriptor, SubscriptionMode, Upcast, DEFAULT_DISPATCH_QUEUE,
+    BindingKeyFragment, BoxError, HandlerDescriptor, MessageBinding, MessageDescriptor,
+    MessageFlags, MessageKind, MessageTypeDescriptor, SubscriptionMode, Upcast,
+    DEFAULT_DISPATCH_QUEUE,
 };
 pub use zebus_macros::{handler, Command, Event};
+
+extern crate self as zebus;

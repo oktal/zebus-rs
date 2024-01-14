@@ -412,6 +412,7 @@ mod test {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use zebus_macros::handler;
 
     use crate::{
         bus, core::MessagePayload, dispatch::DispatchRequest, inject::state::State,

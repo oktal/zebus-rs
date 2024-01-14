@@ -1,8 +1,9 @@
 use std::str::FromStr;
 
 use proc_macro::TokenStream;
+use proc_macro2::Ident;
 use quote::quote;
-use syn::{parse_macro_input, ItemImpl, NestedMeta, PathArguments};
+use syn::{parse_macro_input, ItemFn};
 use zebus_core::{BindingKey, BindingKeyFragment};
 
 #[derive(Debug, Default, deluxe::ParseMetaItem)]
@@ -10,6 +11,8 @@ use zebus_core::{BindingKey, BindingKeyFragment};
 pub struct HandlerAttrs {
     #[deluxe(flatten)]
     mode: SubscriptionModeAttr,
+
+    queue: Option<String>,
 
     #[deluxe(append, rename = binding)]
     bindings: Vec<String>,
@@ -23,36 +26,11 @@ enum SubscriptionModeAttr {
     Manual,
 }
 
-fn expand(item: ItemImpl, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
-    let trait_ = item.trait_.clone().ok_or(syn::Error::new_spanned(
-        &item,
-        "expected trait implementation",
-    ))?;
-    let trait_path = trait_.1;
-
-    let handler_segment = trait_path
-        .segments
-        .iter()
-        .find(|s| s.ident == "Handler")
-        .ok_or(syn::Error::new_spanned(
-            &item,
-            "#[handler] must be applied on a `Handler` trait implementation",
-        ))?;
-
-    let handler_ty = match &handler_segment.arguments {
-        PathArguments::AngleBracketed(args) => Ok(args.args.iter().next().unwrap()),
-        _ => Err(syn::Error::new_spanned(
-            handler_segment,
-            "unexpected handler argument",
-        )),
-    }?;
-
+fn expand(mut item: ItemFn, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
     let mode = match attrs.mode {
         SubscriptionModeAttr::Auto => quote! { ::zebus_core::SubscriptionMode::Auto },
         SubscriptionModeAttr::Manual => quote! { ::zebus_core::SubscriptionMode::Manual },
     };
-
-    let ty = &item.self_ty;
 
     let bindings = attrs.bindings.iter().map(|binding| {
         let binding = BindingKey::from_str(binding).unwrap();
@@ -67,7 +45,7 @@ fn expand(item: ItemImpl, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
 
             quote! {
                 ::zebus_core::BindingKey::from_raw_parts(
-                    vec![#( #fragments_expanded ) *]
+                    vec![#( #fragments_expanded ), *]
                 )
             }
         } else {
@@ -77,13 +55,51 @@ fn expand(item: ItemImpl, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
         binding_expanded
     });
 
+    let old_ident = item.sig.ident.clone();
+    let new_ident = Ident::new(&format!("{old_ident}_"), item.sig.ident.span());
+    item.sig.ident = new_ident.clone();
+
+    let queue = if let Some(queue) = attrs.queue {
+        quote! { Some(#queue) }
+    } else {
+        quote! { None }
+    };
+
     let handler_descriptor_expanded = quote! {
-        impl ::zebus_core::HandlerDescriptor<#handler_ty> for #ty {
-            fn subscription_mode() -> ::zebus_core::SubscriptionMode {
+        #[allow(non_camel_case_types)]
+        struct #old_ident;
+
+        impl<S> ::zebus_core::HandlerDescriptor<S> for #old_ident
+            where S: Clone + Send + 'static
+        {
+            type Service = tower::util::BoxService<::zebus::dispatch::InvokeRequest, Option<::zebus::Response>, std::convert::Infallible>;
+            type Binding = ::zebus_core::BindingKey;
+
+            fn service(self, state: S) -> Self::Service
+            {
+                tower::util::BoxService::new(#new_ident.into_service(state))
+            }
+
+            fn message(&self) -> ::zebus_core::MessageTypeDescriptor
+            {
+                #new_ident.message()
+            }
+
+            fn queue(&self) -> Option<&'static str>
+            {
+                #queue
+            }
+
+            fn name(&self) -> &'static str
+            {
+                #new_ident.name()
+            }
+
+            fn subscription_mode(&self) -> ::zebus_core::SubscriptionMode {
                 #mode
             }
 
-            fn bindings() -> Vec<::zebus_core::BindingKey> {
+            fn bindings(&self) -> Vec<Self::Binding> {
                 vec![#( #bindings )*]
             }
         }
@@ -91,7 +107,6 @@ fn expand(item: ItemImpl, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
 
     let expanded = quote! {
         #item
-
         #handler_descriptor_expanded
     };
 
@@ -104,6 +119,6 @@ pub(crate) fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.into_compile_error().into(),
     };
 
-    let item_impl = parse_macro_input!(item as ItemImpl);
-    expand(item_impl, attrs).unwrap_or_else(|e| e.into_compile_error().into())
+    let item_fn = parse_macro_input!(item as ItemFn);
+    expand(item_fn, attrs).unwrap_or_else(|e| e.into_compile_error().into())
 }
