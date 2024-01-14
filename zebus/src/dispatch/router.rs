@@ -23,8 +23,8 @@ use super::{
     MessageInvokerDescriptor,
 };
 
-#[pin_project(project = ErrorOrResponseProj)]
-pub enum ErrorOrResponse<R, F>
+#[pin_project(project = RouteFutureProj)]
+pub enum RouteFuture<R, F>
 where
     R: IntoResponse,
     F: Future<Output = R>,
@@ -33,7 +33,7 @@ where
     Response(#[pin] F),
 }
 
-impl<R, F> Future for ErrorOrResponse<R, F>
+impl<R, F> Future for RouteFuture<R, F>
 where
     R: IntoResponse,
     F: Future<Output = R>,
@@ -45,8 +45,8 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         match self.project() {
-            ErrorOrResponseProj::Error(e) => Poll::Ready(e.take()),
-            ErrorOrResponseProj::Response(fut) => match fut.poll(cx) {
+            RouteFutureProj::Error(e) => Poll::Ready(e.take()),
+            RouteFutureProj::Response(fut) => match fut.poll(cx) {
                 Poll::Ready(resp) => Poll::Ready(resp.into_response()),
                 Poll::Pending => Poll::Pending,
             },
@@ -54,23 +54,20 @@ where
     }
 }
 
-pub trait IntoHandler<S> {
-    type Service;
+pub type BoxRouteHandlerService = BoxService<InvokeRequest, Option<Response>, Infallible>;
 
-    fn into_handler(self, state: S) -> (Box<Self::Service>, MessageInvokerDescriptor);
+pub trait IntoHandler<S> {
+    fn into_handler(self, state: S) -> (BoxRouteHandlerService, MessageInvokerDescriptor);
 }
 
 impl<S, H> IntoHandler<S> for H
 where
     H: HandlerDescriptor<S>,
-    H::Service: Service<InvokeRequest>,
-    <<H as HandlerDescriptor<S>>::Service as Service<InvokeRequest>>::Future: Send,
+    H::Service: Into<BoxRouteHandlerService>,
     H::Binding: Into<BindingKey>,
     S: Clone + Send + 'static,
 {
-    type Service = H::Service;
-
-    fn into_handler(self, state: S) -> (Box<Self::Service>, MessageInvokerDescriptor) {
+    fn into_handler(self, state: S) -> (BoxRouteHandlerService, MessageInvokerDescriptor) {
         let descriptor = MessageInvokerDescriptor {
             invoker_type: self.name(),
             dispatch_queue: self.queue(),
@@ -78,8 +75,7 @@ where
             subscription_mode: self.subscription_mode(),
             bindings: self.bindings().into_iter().map(Into::into).collect(),
         };
-        let service = self.service(state);
-        (Box::new(service), descriptor)
+        (self.service(state).into(), descriptor)
     }
 }
 
@@ -249,6 +245,18 @@ where
     }
 }
 
+impl<Args, S, H, Fut> Into<BoxRouteHandlerService> for RouteHandlerService<Args, S, H, Fut>
+where
+    Fut: Future<Output = Option<Response>> + Send + 'static,
+    H: RouteHandler<Args, S, Future = Fut>,
+    S: Clone + Send + 'static,
+    Args: 'static,
+{
+    fn into(self) -> BoxRouteHandlerService {
+        self.boxed()
+    }
+}
+
 macro_rules! impl_tuple {
     ($($arg:ident $t:tt),*) => {
         impl<F, Fut, M, $($t,)* S, R> RouteHandler<(M, $($t,)*), S> for F
@@ -260,22 +268,22 @@ macro_rules! impl_tuple {
             S: Clone + Send + 'static,
             R: IntoResponse + 'static,
         {
-            type Future = ErrorOrResponse<R, Fut>;
+            type Future = RouteFuture<R, Fut>;
 
             fn handle(self, req: InvokeRequest, state: S) -> Self::Future {
                 let dispatch = &req.dispatch;
                 $(
                     let $arg = match $t::extract(&dispatch, &state) {
                         Ok(arg) => arg,
-                        Err(e) => return ErrorOrResponse::Error(e.into_response()),
+                        Err(e) => return RouteFuture::Error(e.into_response()),
                     };
 
                 )*
                 let msg = inject::message::Message::extract(&dispatch, &state).map(|m| m.0);
 
                 match msg {
-                    Ok(msg) => ErrorOrResponse::Response(self(msg, $($arg,)*)),
-                    Err(e) => ErrorOrResponse::Error(e.into_response()),
+                    Ok(msg) => RouteFuture::Response(self(msg, $($arg,)*)),
+                    Err(e) => RouteFuture::Error(e.into_response()),
                 }
             }
         }
@@ -310,13 +318,7 @@ pub struct Router<S>
 where
     S: Clone + Send + 'static,
 {
-    invokers: HashMap<
-        &'static str,
-        (
-            MessageInvokerDescriptor,
-            BoxService<InvokeRequest, Option<Response>, Infallible>,
-        ),
-    >,
+    invokers: HashMap<&'static str, (MessageInvokerDescriptor, BoxRouteHandlerService)>,
     state: S,
 }
 
@@ -339,17 +341,13 @@ where
     pub fn handles<H>(mut self, handler: H) -> Self
     where
         H: IntoHandler<S>,
-        <H as IntoHandler<S>>::Service: Service<InvokeRequest, Response = Option<Response>, Error = Infallible>
-            + Send
-            + 'static,
-        <<H as IntoHandler<S>>::Service as Service<InvokeRequest>>::Future: Send,
     {
         let (service, descriptor) = handler.into_handler(self.state.clone());
         let message_type = descriptor.message.full_name;
 
         match self.invokers.entry(message_type) {
             Entry::Occupied(_) => None,
-            Entry::Vacant(e) => Some(e.insert((descriptor.clone(), service.boxed()))),
+            Entry::Vacant(e) => Some(e.insert((descriptor.clone(), service))),
         }
         .expect(&format!(
             "attempted to double-insert handler for {}",
