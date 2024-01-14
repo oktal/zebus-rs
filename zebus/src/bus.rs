@@ -14,7 +14,7 @@ use crate::{
     core::{MessageDescriptor, MessageFlags, MessagePayload, RawMessage, Upcast, UpcastFrom},
     directory, dispatch,
     transport::MessageExecutionCompleted,
-    MessageType, Peer, PeerId,
+    BoxError, MessageType, Peer, PeerId,
 };
 
 /// An error which can be returned when sending a command
@@ -147,7 +147,7 @@ pub enum SendError {
 pub enum Error {
     /// Transport error
     #[error("an error occured during a transport operation {0}")]
-    Transport(Box<dyn std::error::Error>),
+    Transport(BoxError),
 
     /// None of the directories tried for registration succeeded
     #[error("{0}")]

@@ -330,3 +330,6 @@ where
 
 /// Name of the default dispatch queue
 pub const DEFAULT_DISPATCH_QUEUE: &'static str = "DefaultQueue";
+
+/// Type alias for a generic standard error type that is safe to send across threads
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

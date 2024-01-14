@@ -5,9 +5,9 @@ mod send_context;
 mod transport_message;
 pub mod zmq;
 
-use crate::{directory, Peer, PeerId};
+use crate::{directory, BoxError, Peer, PeerId};
 use futures_core::Stream;
-use std::{borrow::Cow};
+use std::borrow::Cow;
 
 pub use message_execution_completed::MessageExecutionCompleted;
 pub use originator_info::OriginatorInfo;
@@ -17,7 +17,8 @@ pub use transport_message::TransportMessage;
 /// Transport layer trait
 pub trait Transport: Send + Sync + 'static {
     /// The associated error type which can be returned from the transport layer
-    type Err: std::error::Error + Send + 'static;
+    /// The error type must be convertible to a [`BoxError`]
+    type Err: Into<BoxError>;
 
     /// Type of [`TransportMessage`] [`Stream`]
     /// The stream is used to receive messages from the transport

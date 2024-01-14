@@ -2,7 +2,7 @@ use core::fmt;
 
 use super::RawMessage;
 use crate::{
-    message_id::proto, proto::IntoProtobuf, transport::MessageExecutionCompleted,
+    message_id::proto, proto::IntoProtobuf, transport::MessageExecutionCompleted, BoxError,
     MessageDescriptor, MessageTypeDescriptor,
 };
 
@@ -43,7 +43,7 @@ pub enum Response {
     Error(i32, String),
 
     /// A standard Rust [`std::error::Error`] raised by common Rust faillible functions
-    StandardError(Box<dyn std::error::Error + Send>),
+    StandardError(BoxError),
 }
 
 impl Response {
@@ -102,7 +102,7 @@ pub enum HandlerError<E: Error> {
     /// A standard [`Error`](std::error::Error).
     ///
     /// Corresponds to a faillible operation that failed
-    Standard(Box<dyn std::error::Error + Send>),
+    Standard(BoxError),
 
     /// A user [`Error`].
     ///
@@ -117,10 +117,10 @@ where
 impl<E, Err> From<Err> for HandlerError<E>
 where
     E: Error,
-    Err: std::error::Error + Send + 'static,
+    Err: Into<BoxError>,
 {
     fn from(error: Err) -> Self {
-        Self::Standard(Box::new(error))
+        Self::Standard(error.into())
     }
 }
 
@@ -146,7 +146,7 @@ impl<E: Error> IntoResponse for HandlerError<E> {
 }
 
 /// Turn an error into an `Error` [`Response`]
-impl IntoResponse for Box<dyn std::error::Error + Send> {
+impl IntoResponse for BoxError {
     fn into_response(self) -> Option<Response> {
         Some(Response::StandardError(self))
     }

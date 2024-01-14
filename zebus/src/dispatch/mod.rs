@@ -15,7 +15,7 @@ use crate::lotus::MessageProcessingFailed;
 use crate::proto::IntoProtobuf;
 use crate::{
     transport::{MessageExecutionCompleted, TransportMessage},
-    MessageKind, Peer,
+    BoxError, MessageKind, Peer,
 };
 use crate::{Bus, Message, MessageDescriptor};
 pub(crate) use context::DispatchContext;
@@ -45,14 +45,17 @@ impl DispatchMessage {
     }
 }
 
-type ErrorRepr = (&'static str, Box<dyn std::error::Error + Send>);
+type ErrorRepr = (&'static str, BoxError);
 
 #[derive(Debug, Default)]
 pub(crate) struct DispatchError(Vec<ErrorRepr>);
 
 impl DispatchError {
-    fn add(&mut self, handler_type: &'static str, error: Box<dyn std::error::Error + Send>) {
-        self.0.push((handler_type, error));
+    fn add<E>(&mut self, handler_type: &'static str, err: E)
+    where
+        E: Into<BoxError>,
+    {
+        self.0.push((handler_type, err.into()));
     }
 
     fn is_empty(&self) -> bool {
