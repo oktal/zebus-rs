@@ -1,5 +1,9 @@
 use std::time::Duration;
 
+use rand::{seq::SliceRandom, thread_rng};
+
+use crate::{Peer, PeerId};
+
 /// Default time to wait for when registering to a Directory
 pub const DEFAULT_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -80,6 +84,32 @@ impl BusConfiguration {
     pub fn with_error_publication(mut self, value: bool) -> Self {
         self.enable_error_publication = value;
         self
+    }
+
+    /// Return an iterator of [`Peer`] peers over the configured directory endpoints
+    /// Shuffle the peers if [`Self::pick_random_directory`] is true
+    pub(crate) fn directory_peers(&self) -> Vec<Peer> {
+        let mut peers = self
+            .directory_endpoints
+            .iter()
+            .enumerate()
+            .map(|(idx, endpoint)| {
+                let peer_id = PeerId::directory(idx);
+
+                Peer {
+                    id: peer_id,
+                    endpoint: endpoint.to_string(),
+                    is_up: true,
+                    is_responding: true,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if self.pick_random_directory {
+            peers.shuffle(&mut thread_rng());
+        }
+
+        peers
     }
 }
 

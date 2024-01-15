@@ -5,6 +5,7 @@ use std::{
 };
 
 use thiserror::Error;
+use tracing::{error, info};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -27,8 +28,9 @@ enum Inner {
     },
 
     Started {
+        name: String,
         tx: mpsc::Sender<super::Task>,
-        _handle: JoinHandle<()>,
+        handle: JoinHandle<()>,
     },
 }
 
@@ -85,10 +87,37 @@ impl DispatchQueue {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Init { name }) => {
                 // Start worker
-                let (tx, _handle) = Worker::start(&name)?;
+                info!("starting dispatch queue {name}...");
+                let (tx, handle) = Worker::start(&name)?;
+                info!("... {name} started");
 
                 // Transition to Started state
-                (Some(Inner::Started { tx, _handle }), Ok(()))
+                (Some(Inner::Started { name, tx, handle }), Ok(()))
+            }
+            x => (x, Err(Error::InvalidOperation)),
+        };
+
+        self.inner = inner;
+        res
+    }
+
+    pub(super) fn stop(&mut self) -> Result<(), Error> {
+        let (inner, res) = match self.inner.take() {
+            Some(Inner::Started { name, tx, handle }) => {
+                info!("stopping dispatch queue {name}...");
+
+                // Drop tx channel to stop the worker
+                drop(tx);
+
+                // Wait for the worker to finish
+                if let Err(_) = handle.join() {
+                    error!("{name} panic'ed");
+                }
+
+                info!("... {name} stopped");
+
+                // Transition to Init state
+                (Some(Inner::Init { name }), Ok(()))
             }
             x => (x, Err(Error::InvalidOperation)),
         };

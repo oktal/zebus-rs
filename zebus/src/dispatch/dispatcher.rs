@@ -99,6 +99,14 @@ impl InvokerDispatcher {
         Ok(())
     }
 
+    fn stop(&mut self) -> Result<(), Error> {
+        for (_name, dipatch_queue) in &mut self.dispatch_queues {
+            dipatch_queue.stop().map_err(Error::Queue)?;
+        }
+
+        Ok(())
+    }
+
     fn dispatch(&mut self, request: DispatchRequest) -> DispatchFuture {
         // Retrieve the descriptor for the message we are about to dispatch and
         // return an error'd future if we failed to find it
@@ -217,6 +225,23 @@ impl MessageDispatcher {
 
                 // Transition to Started state
                 (Some(Inner::Started(dispatch)), Ok(()))
+            }
+            x => (x, Err(Error::InvalidOperation)),
+        };
+        self.inner = inner;
+        res
+    }
+
+    /// Stop the [`MessageDispatcher`]. This will stop all the registered [`DispatchQueue`]
+    /// queues
+    pub(crate) fn stop(&mut self) -> Result<(), Error> {
+        let (inner, res) = match self.inner.take() {
+            Some(Inner::Started(mut dispatch)) => {
+                // Stop all the dispatchers
+                dispatch.stop()?;
+
+                // Transition to Init state
+                (Some(Inner::Init(dispatch)), Ok(()))
             }
             x => (x, Err(Error::InvalidOperation)),
         };

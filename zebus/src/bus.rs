@@ -9,6 +9,7 @@ use std::{
 use async_trait::async_trait;
 use dyn_clone::DynClone;
 use thiserror::Error;
+use tokio::task::JoinError;
 
 use crate::{
     core::{MessageDescriptor, MessageFlags, MessagePayload, RawMessage, Upcast, UpcastFrom},
@@ -160,6 +161,9 @@ pub enum Error {
     /// An error occured when attempting to dispatch a message
     #[error("an error occured on the dispatcher {0}")]
     Dispatch(dispatch::Error),
+
+    #[error("error waiting for task to terminate: {0}")]
+    Join(JoinError),
 
     /// An operation was attempted while the [`Bus`] was in an invalid state
     #[error("an operation was attempted while the bus was not in a valid state")]

@@ -5,7 +5,7 @@ mod send_context;
 mod transport_message;
 pub mod zmq;
 
-use crate::{directory, BoxError, Peer, PeerId};
+use crate::{directory, BoxError, Message, Peer, PeerId};
 use futures_core::Stream;
 use std::borrow::Cow;
 
@@ -44,6 +44,10 @@ pub trait Transport: Send + Sync + 'static {
     /// Get the [`PeerId`] associated with the transport layer.
     /// This can fail if the transport layer has not been configured properly
     fn peer_id(&self) -> Result<&PeerId, Self::Err>;
+    ///
+    /// Retrieve the environment associated with this transport layer
+    /// This can fail if the transport layer has not been configured properly
+    fn environment(&self) -> Result<Cow<'_, str>, Self::Err>;
 
     /// Get the associated endpoint that has been bound by the transport layer
     /// This can fail if the transport layer has not been configured properly
@@ -57,3 +61,36 @@ pub trait Transport: Send + Sync + 'static {
         context: SendContext,
     ) -> Result<(), Self::Err>;
 }
+
+/// Extension methods for [`Transport`]
+pub trait TransportExt: Transport {
+    /// Retrieve the [`Peer`] associated with this transport layer
+    /// This can fail if the transport layer has not been configured properly
+    fn peer(&self) -> Result<Peer, <Self as Transport>::Err> {
+        Ok(Peer {
+            id: self.peer_id()?.clone(),
+            endpoint: self.inbound_endpoint()?.into_owned(),
+            is_up: true,
+            is_responding: true,
+        })
+    }
+
+    /// Send one [`Message`] to a destination [`Peer`]
+    fn send_one(
+        &mut self,
+        peer: Peer,
+        message: &dyn Message,
+        context: SendContext,
+    ) -> Result<uuid::Uuid, <Self as Transport>::Err> {
+        let self_peer = self.peer()?;
+        let environment = self.environment()?.into_owned();
+
+        let (message_id, message) = TransportMessage::create(&self_peer, environment, message);
+
+        self.send(std::iter::once(peer), message, context)?;
+
+        Ok(message_id)
+    }
+}
+
+impl<T> TransportExt for T where T: Transport {}

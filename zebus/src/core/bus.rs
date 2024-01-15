@@ -9,7 +9,9 @@ use dyn_clone::clone_box;
 use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tower_service::Service;
+use tracing::{error, info};
 
 use crate::{
     bus::{CommandFuture, CommandResult, Error, RegistrationError, Result, SendError},
@@ -29,7 +31,6 @@ use crate::{
 };
 
 struct Core<T: Transport, D: Directory> {
-    _configuration: BusConfiguration,
     self_peer: Peer,
     environment: String,
 
@@ -63,29 +64,78 @@ enum State<T: Transport, D: Directory> {
 
     Started {
         core: Arc<Core<T, D>>,
+
+        configuration: BusConfiguration,
+        directory: Arc<D>,
+        peer_id: PeerId,
+        environment: String,
+
+        cancellation: CancellationToken,
+
+        tx_handle: tokio::task::JoinHandle<TxHandle<T>>,
+        rx_handle: tokio::task::JoinHandle<RxHandle>,
     },
 }
 
-struct SendEntry {
-    message: TransportMessage,
-    peers: Vec<Peer>,
+#[derive(Debug)]
+enum SendEntry {
+    Message {
+        message: TransportMessage,
+        peers: Vec<Peer>,
+    },
+    Unregister {
+        tx: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+}
+
+struct TxHandle<T: Transport> {
+    transport: T,
 }
 
 struct Sender<T: Transport> {
     transport: T,
+    configuration: BusConfiguration,
+    cancellation: CancellationToken,
     rx: mpsc::Receiver<SendEntry>,
 }
 
 impl<T: Transport> Sender<T> {
-    fn new(transport: T) -> (mpsc::Sender<SendEntry>, Self) {
+    fn new(
+        transport: T,
+        configuration: BusConfiguration,
+        cancellation: CancellationToken,
+    ) -> (mpsc::Sender<SendEntry>, Self) {
         // TODO(oktal): hardcoded limit
         let (tx, rx) = mpsc::channel(128);
-        (tx, Self { transport, rx })
+        (
+            tx,
+            Self {
+                transport,
+                configuration,
+                cancellation,
+                rx,
+            },
+        )
     }
 
-    async fn run(mut self) {
-        while let Some(entry) = self.rx.recv().await {
-            self.handle_send(entry);
+    async fn run(mut self) -> TxHandle<T> {
+        loop {
+            tokio::select! {
+                // We have been cancelled
+                _ = self.cancellation.cancelled() => break,
+
+                // We received an entry
+                Some(entry) = self.rx.recv() => {
+                    if let Err(e) = self.handle_entry(entry).await {
+                        error!("{e}");
+                    }
+                }
+            }
+        }
+
+        // Yield back the transport
+        TxHandle {
+            transport: self.transport,
         }
     }
 
@@ -109,7 +159,7 @@ impl<T: Transport> Sender<T> {
 
         // Enqueue the message
         snd_tx
-            .send(SendEntry {
+            .send(SendEntry::Message {
                 message,
                 peers: peers.into_iter().collect(),
             })
@@ -131,7 +181,7 @@ impl<T: Transport> Sender<T> {
 
         // Enqueue the message
         snd_tx
-            .send(SendEntry {
+            .send(SendEntry::Message {
                 message,
                 peers: peers.into_iter().collect(),
             })
@@ -140,12 +190,18 @@ impl<T: Transport> Sender<T> {
         Ok(())
     }
 
-    fn handle_send(&mut self, entry: SendEntry) {
-        self.transport.send(
-            entry.peers.into_iter(),
-            entry.message,
-            SendContext::default(),
-        );
+    async fn handle_entry(&mut self, entry: SendEntry) -> Result<()> {
+        match entry {
+            SendEntry::Message { message, peers } => self
+                .transport
+                .send(peers.into_iter(), message, SendContext::default())
+                .map_err(|e| Error::Transport(e.into())),
+            SendEntry::Unregister { tx } => {
+                tx.send(unregister(&mut self.transport, &self.configuration).await)
+                    .expect("channel closed unexpectdely");
+                Ok(())
+            }
+        }
     }
 }
 
@@ -187,6 +243,10 @@ impl LocalDispatchRequest {
     }
 }
 
+struct RxHandle {
+    dispatcher: MessageDispatcher,
+}
+
 struct Receiver<T: Transport, D: Directory> {
     rcv_rx: T::MessageStream,
     dispatch_rx: mpsc::Receiver<LocalDispatchRequest>,
@@ -196,6 +256,7 @@ struct Receiver<T: Transport, D: Directory> {
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
     directory: Arc<D>,
     dispatcher: MessageDispatcher,
+    cancellation: CancellationToken,
 }
 
 impl<T: Transport, D: Directory> Receiver<T, D> {
@@ -206,6 +267,7 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
         environment: String,
         directory: Arc<D>,
         dispatcher: MessageDispatcher,
+        cancellation: CancellationToken,
     ) -> (
         Self,
         mpsc::Sender<LocalDispatchRequest>,
@@ -224,15 +286,18 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
                 pending_commands: pending_commands.clone(),
                 directory,
                 dispatcher,
+                cancellation,
             },
             dispatch_tx,
             pending_commands,
         )
     }
 
-    async fn run(mut self, bus: Arc<dyn crate::Bus>) {
+    async fn run(mut self, bus: Arc<dyn crate::Bus>) -> RxHandle {
         loop {
             tokio::select! {
+                // We have been cancelled
+                _ = self.cancellation.cancelled() => break,
 
                 // Handle inbound TransportMessage
                 Some(message) = self.rcv_rx.next() => {
@@ -283,24 +348,24 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
                         }
 
                     }
-                    },
+                }
 
-                    // Handle local message dispatch request
-                    Some(request) = self.dispatch_rx.recv() => {
-                        // TODO(oktal): send `MessageProcessingFailed` if dispatch failed ?
-                        match request {
-                            LocalDispatchRequest::Command { tx, message } => {
-                                // Dispatch command locally
-                                let dispatched = self.dispatch(DispatchRequest::local(message, bus.clone())).await.unwrap();
+                // Handle local message dispatch request
+                Some(request) = self.dispatch_rx.recv() => {
+                    // TODO(oktal): send `MessageProcessingFailed` if dispatch failed ?
+                    match request {
+                        LocalDispatchRequest::Command { tx, message } => {
+                            // Dispatch command locally
+                            let dispatched = self.dispatch(DispatchRequest::local(message, bus.clone())).await.unwrap();
 
-                                // Retrieve the `CommandResult`
-                                let command_result: Option<CommandResult> = dispatched.try_into().ok();
+                            // Retrieve the `CommandResult`
+                            let command_result: Option<CommandResult> = dispatched.try_into().ok();
 
                             // Resolve command future
                             if let Some(command_result) = command_result {
                                 let _ = tx.send(command_result);
                             }
-                        },
+                        }
                         LocalDispatchRequest::Event { tx, message } => {
                             // Dispatch event locally
                             let _dispatched = self.dispatch(DispatchRequest::local(message, bus.clone())).await.unwrap();
@@ -309,8 +374,14 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
                             let _ = tx.send(());
                         }
                     }
+
                 }
             }
+        }
+
+        // Yield back the dispatcher
+        RxHandle {
+            dispatcher: self.dispatcher,
         }
     }
 
@@ -332,7 +403,7 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
         let (_id, message) =
             TransportMessage::create(&self.self_peer, self.environment.clone(), message);
 
-        let _ = self.tx.send(SendEntry { message, peers }).await;
+        let _ = self.tx.send(SendEntry::Message { message, peers }).await;
     }
 }
 
@@ -344,25 +415,13 @@ async fn register<T: Transport>(
     environment: &String,
     configuration: &BusConfiguration,
 ) -> Result<Registration> {
-    let directory_peers =
-        configuration
-            .directory_endpoints
-            .iter()
-            .enumerate()
-            .map(|(idx, endpoint)| {
-                let peer_id = PeerId::directory(idx);
-
-                Peer {
-                    id: peer_id,
-                    endpoint: endpoint.to_string(),
-                    is_up: true,
-                    is_responding: true,
-                }
-            });
+    let directory_peers = configuration.directory_peers();
 
     let timeout = configuration.registration_timeout;
     let mut error = RegistrationError::new();
     for directory_peer in directory_peers {
+        info!("register on directory {directory_peer}",);
+
         match directory::registration::register(
             transport,
             self_peer.clone(),
@@ -374,7 +433,36 @@ async fn register<T: Transport>(
         .await
         {
             Ok(r) => return Ok(r),
-            Err(e) => error.add(directory_peer.clone(), e),
+            Err(e) => {
+                error!("failed to register on directory {directory_peer}: {e}");
+                error.add(directory_peer.clone(), e)
+            }
+        }
+    }
+
+    Err(Error::Registration(error))
+}
+
+async fn unregister<T: Transport>(
+    transport: &mut T,
+    configuration: &BusConfiguration,
+) -> Result<()> {
+    let directory_peers = configuration.directory_peers();
+
+    let timeout = configuration.registration_timeout;
+
+    let mut error = RegistrationError::new();
+
+    for directory_peer in directory_peers {
+        info!("unregister from directory {directory_peer}",);
+
+        match directory::registration::unregister(transport, directory_peer.clone(), timeout).await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                error!("failed to unregister from directory {directory_peer}: {e}");
+                error.add(directory_peer, e);
+            }
         }
     }
 
@@ -513,6 +601,17 @@ impl<T: Transport, D: Directory> Core<T, D> {
 
         Ok(())
     }
+
+    async fn unregister(&self) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        self.snd_tx
+            .send(SendEntry::Unregister { tx })
+            .await
+            .expect("channel has been closed unexpectedely");
+
+        rx.await.expect("channel has been closed unexpectedely")
+    }
 }
 
 #[async_trait]
@@ -606,6 +705,8 @@ impl<T: Transport, D: Directory> Bus<T, D> {
     }
 
     async fn start(&self) -> Result<()> {
+        info!("starting bus...");
+
         let state = {
             let mut state_lock = self.inner.lock().unwrap();
             let state = state_lock.take();
@@ -670,8 +771,12 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 .subscribe()
                 .map_err(|e| Error::Transport(e.into()))?;
 
+            // Create cancellation token
+            let cancellation = CancellationToken::new();
+
             // Create sender
-            let (snd_tx, sender) = Sender::new(transport);
+            let (snd_tx, sender) =
+                Sender::new(transport, configuration.clone(), cancellation.clone());
 
             // Create receiver
             let (receiver, dispatch_tx, pending_commands) = Receiver::<T, D>::new(
@@ -681,14 +786,14 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 environment.clone(),
                 directory.clone(),
                 dispatcher,
+                cancellation.clone(),
             );
 
             // Create Core
             let core = Arc::new(Core::<T, D> {
-                _configuration: configuration,
                 self_peer,
-                environment,
-                directory,
+                environment: environment.clone(),
+                directory: Arc::clone(&directory),
                 pending_commands,
                 snd_tx,
                 dispatch_tx,
@@ -696,14 +801,23 @@ impl<T: Transport, D: Directory> Bus<T, D> {
             });
 
             // Start sender
-            let _tx_handle = tokio::spawn(sender.run());
+            let tx_handle = tokio::spawn(sender.run());
 
             // Start receiver
-            let _rx_handle = tokio::spawn(receiver.run(core.clone()));
+            let rx_handle = tokio::spawn(receiver.run(core.clone()));
 
             // Transition to started state
             let mut state_lock = self.inner.lock().unwrap();
-            *state_lock = Some(State::Started { core });
+            *state_lock = Some(State::Started {
+                core,
+                configuration,
+                directory,
+                peer_id,
+                environment,
+                cancellation,
+                tx_handle,
+                rx_handle,
+            });
 
             Ok(())
         } else {
@@ -714,7 +828,63 @@ impl<T: Transport, D: Directory> Bus<T, D> {
     }
 
     async fn stop(&self) -> Result<()> {
-        todo!()
+        // Take the state so that we do not hold a `MutexGuard` across await points,
+        // which is not `Send`
+        // TODO(oktal): revert back to the original state if the function errors
+        let state = self.inner.lock().unwrap().take();
+
+        info!("stopping bus...");
+
+        let (inner, res) = match state {
+            Some(State::Started {
+                core,
+                configuration,
+                directory,
+                peer_id,
+                environment,
+                cancellation,
+                tx_handle,
+                rx_handle,
+            }) => {
+                // Unregister from directory
+                core.unregister().await?;
+
+                // Cancel receiver and sender
+                cancellation.cancel();
+
+                // Wait for the receiver to stop and yield us back the dispatcher
+                let rx_handle = rx_handle.await.map_err(Error::Join)?;
+
+                // Wait for the sender to stop and yield us back the transport
+                let tx_handle = tx_handle.await.map_err(Error::Join)?;
+
+                // Stop the dispatcher
+                let mut dispatcher = rx_handle.dispatcher;
+                dispatcher.stop().map_err(Error::Dispatch)?;
+
+                // Stop the transport
+                let mut transport = tx_handle.transport;
+                transport.stop().map_err(|e| Error::Transport(e.into()))?;
+
+                // Transition to configured state
+                (
+                    Some(State::Configured {
+                        configuration,
+                        transport,
+                        dispatcher,
+                        directory,
+                        peer_id,
+                        environment,
+                    }),
+                    Ok(()),
+                )
+            }
+            x => (x, Err(Error::InvalidOperation)),
+        };
+
+        *self.inner.lock().unwrap() = inner;
+        info!("... bus stopped");
+        res
     }
 
     async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
@@ -1173,6 +1343,10 @@ mod tests {
 
         fn peer_id(&self) -> std::result::Result<&PeerId, Self::Err> {
             unimplemented!()
+        }
+
+        fn environment(&self) -> std::result::Result<Cow<'_, str>, Self::Err> {
+            unimplemented!();
         }
 
         fn inbound_endpoint(&self) -> std::result::Result<Cow<'_, str>, Self::Err> {

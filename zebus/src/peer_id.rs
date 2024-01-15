@@ -1,3 +1,5 @@
+use core::fmt;
+
 /// Identifies a named peer throughout bus communication between peers
 #[derive(Clone, Eq, PartialEq, Hash, prost::Message)]
 pub struct PeerId {
@@ -37,5 +39,11 @@ impl PeerId {
     pub(crate) fn test() -> Self {
         let id = uuid::Uuid::new_v4();
         Self::new(format!("Peer.Test.{id}"))
+    }
+}
+
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.value)
     }
 }
