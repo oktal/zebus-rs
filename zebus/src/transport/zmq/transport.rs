@@ -144,28 +144,25 @@ impl InboundWorker {
         let shutdown_rx = shutdown_tx.subscribe();
 
         // Create inbound worker
-        let inbound_worker = InboundWorker {
+        let mut worker = InboundWorker {
             inbound_socket,
             rcv_tx,
             shutdown_rx,
         };
 
+        // Create tokio runtime
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(Error::Io)?;
+
         // Spawn inbound thread
         let inbound_thread = std::thread::Builder::new()
             .name(INBOUND_THREAD_NAME.into())
-            .spawn(move || {
-                inbound_worker.block_on();
-            })
+            .spawn(move || rt.block_on(worker.run()))
             .map_err(Error::Io)?;
 
         Ok(inbound_thread)
-    }
-
-    fn block_on(self) {
-        let mut this = self;
-        Handle::current().block_on(async move {
-            this.run().await;
-        });
     }
 
     #[cfg(unix)]
@@ -242,7 +239,7 @@ impl OutboundWorker {
         let (actions_tx, actions_rx) = mpsc::channel(128);
 
         // Create outbound worker
-        let worker = OutboundWorker {
+        let mut worker = OutboundWorker {
             context,
             peer_id,
             outbound_sockets: HashMap::new(),
@@ -251,18 +248,19 @@ impl OutboundWorker {
             shutdown_rx,
         };
 
+        // Create tokio runtime
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(Error::Io)?;
+
         // Spawn outbound thread
         let outbound_thread = std::thread::Builder::new()
             .name(OUTBOUND_THREAD_NAME.into())
-            .spawn(move || worker.block_on())
+            .spawn(move || rt.block_on(worker.run()))
             .map_err(Error::Io)?;
 
         Ok((actions_tx, outbound_thread))
-    }
-
-    fn block_on(self) -> Result<(), Error> {
-        let mut this = self;
-        Handle::current().block_on(async move { this.run().await })
     }
 
     async fn run(&mut self) -> Result<(), Error> {
@@ -386,7 +384,6 @@ impl OutboundWorker {
 
 impl Transport for ZmqTransport {
     type Err = Error;
-
     type MessageStream = crate::sync::stream::BroadcastStream<TransportMessage>;
 
     fn configure(
@@ -500,6 +497,18 @@ impl Transport for ZmqTransport {
         match self.inner.as_ref() {
             Some(Inner::Configured { ref peer_id, .. })
             | Some(Inner::Started { ref peer_id, .. }) => Ok(peer_id),
+            _ => Err(Error::InvalidOperation),
+        }
+    }
+
+    fn environment(&self) -> Result<Cow<'_, str>, Self::Err> {
+        match self.inner.as_ref() {
+            Some(Inner::Configured {
+                ref environment, ..
+            })
+            | Some(Inner::Started {
+                ref environment, ..
+            }) => Ok(Cow::Borrowed(environment.as_str())),
             _ => Err(Error::InvalidOperation),
         }
     }
