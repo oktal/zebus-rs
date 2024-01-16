@@ -7,11 +7,17 @@ edition = "2018"
 [dev-dependencies]
 
 [[example]]
-name = "start"
-path = "start_bus.rs"
+name = "echo-service"
+path = "echo/service.rs"
+
+[[example]]
+name = "echo-client"
+path = "echo/client.rs"
 
 [dependencies]
+prost = "0.11"
 tokio = { version = "1.21.2" }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 zebus = { version = "0.1.0", path = "../zebus" }
+zebus-core = { version = "0.1.0", path = "../zebus-core" }

@@ -23,6 +23,7 @@ pub(crate) use dispatcher::{Error, MessageDispatcher};
 use futures_core::future::BoxFuture;
 pub(crate) use invoker::{HandlerResponse, MessageInvokerDescriptor};
 pub use invoker::{InvokeRequest, InvokerService};
+pub use router::{IntoHandler, RouteHandler, RouteHandlerDescriptor, Router};
 use tower_service::Service;
 use zebus_core::MessageTypeDescriptor;
 

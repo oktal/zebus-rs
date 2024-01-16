@@ -1,4 +1,5 @@
 use core::fmt;
+use std::fmt::Display;
 
 /// Identifies a named peer throughout bus communication between peers
 #[derive(Clone, Eq, PartialEq, Hash, prost::Message)]
@@ -12,6 +13,11 @@ impl PeerId {
         Self {
             value: value.into(),
         }
+    }
+
+    pub fn new_unique(prefix: impl Display) -> Self {
+        let id = uuid::Uuid::new_v4();
+        Self::new(format!("{prefix}.{id}"))
     }
 
     pub fn value(&self) -> &str {
@@ -39,6 +45,18 @@ impl PeerId {
     pub(crate) fn test() -> Self {
         let id = uuid::Uuid::new_v4();
         Self::new(format!("Peer.Test.{id}"))
+    }
+}
+
+impl Into<PeerId> for String {
+    fn into(self) -> PeerId {
+        PeerId::new(self)
+    }
+}
+
+impl Into<PeerId> for &str {
+    fn into(self) -> PeerId {
+        PeerId::new(self)
     }
 }
 
