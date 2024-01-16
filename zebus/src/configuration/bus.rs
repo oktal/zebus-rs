@@ -3,6 +3,8 @@ use std::time::Duration;
 use rand::{seq::SliceRandom, thread_rng};
 
 use crate::{Peer, PeerId};
+#[cfg(feature = "config-provider")]
+use serde::{Deserialize, Serialize};
 
 /// Default time to wait for when registering to a Directory
 pub const DEFAULT_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -15,6 +17,7 @@ pub const DEFAULT_MAX_BATCH_SIZE: usize = 100;
 
 /// Configuration parameters for a [`Bus`](crate::Bus)
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "config-provider", derive(Serialize, Deserialize))]
 pub struct BusConfiguration {
     /// The list of directories that can be used by the Bus to register.
     /// The syntax is `tcp://hostname:port`
@@ -22,10 +25,12 @@ pub struct BusConfiguration {
 
     /// The time to wait for when registering to a Directory, once this time is over,
     /// the next directory in the list will be used.
+    #[cfg_attr(feature = "config-provider", serde(with = "humantime_serde"))]
     pub registration_timeout: Duration,
 
     /// The time to wait for when trying to replay messages from the persistence on startup.
     /// Failing to get a response from the Persistence in the allocated time causes the Peer to stop.
+    #[cfg_attr(feature = "config-provider", serde(with = "humantime_serde"))]
     pub start_replay_timeout: Duration,
 
     /// A peer marked as persistent will benefit from the [persistence](https://github.com/Abc-Arbitrage/Zebus/wiki/Persistence) mechanism

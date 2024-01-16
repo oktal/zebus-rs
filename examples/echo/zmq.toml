@@ -1,0 +1,2 @@
+inbound_endpoint = "tcp://*:*"
+wait_for_end_of_stream_ack_timeout = "10s"

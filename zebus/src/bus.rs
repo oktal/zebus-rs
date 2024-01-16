@@ -150,6 +150,10 @@ pub enum Error {
     #[error("an error occured during a transport operation {0}")]
     Transport(BoxError),
 
+    /// An error occured when attempting to retrieve a configuration
+    #[error("error retrieving configuration {0}")]
+    Configuration(BoxError),
+
     /// None of the directories tried for registration succeeded
     #[error("{0}")]
     Registration(RegistrationError),

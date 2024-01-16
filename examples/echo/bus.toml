@@ -1,0 +1,6 @@
+registration_timeout = "1min"
+start_replay_timeout = "1min"
+is_persistent = false
+pick_random_directory = true
+enable_error_publication = true
+message_batch_size = 10

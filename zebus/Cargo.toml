@@ -29,6 +29,12 @@ tower = { version = "0.4.13", features = ["util"] }
 tracing = "0.1.40"
 rand = "0.8.5"
 tokio-util = "0.7.10"
+serde = { version = "1.0.195", optional = true }
+config = { version = "0.13.4", optional = true }
+humantime-serde = { version = "1.1.1", optional = true }
+
+[features]
+config-provider = ["config", "humantime-serde", "serde"]
 
 [dependencies.uuid]
 version = "1.2.0"

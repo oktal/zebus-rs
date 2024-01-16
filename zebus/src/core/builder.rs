@@ -6,7 +6,7 @@ use crate::{
     directory::{self, Directory},
     dispatch::{InvokerService, MessageDispatcher},
     transport::Transport,
-    Bus, BusConfiguration, ConfigurationProvider, Error, PeerId,
+    Bus, BusConfiguration, ConfigurationProvider, PeerId,
 };
 
 pub trait Step {}
@@ -68,19 +68,23 @@ impl BusBuilder<Init> {
         self.configure(peer_id, environment, configuration)
     }
 
-    pub fn configure_with<P, Provider, Config, Env>(
+    pub fn configure_with<P, Provider, Env>(
         self,
         peer_id: P,
         environment: Env,
         provider: &mut Provider,
-    ) -> BusBuilder<Configured>
+    ) -> bus::Result<BusBuilder<Configured>>
     where
         P: Into<PeerId>,
         Provider: ConfigurationProvider,
         <Provider as ConfigurationProvider>::Configuration: Into<BusConfiguration>,
         Env: Into<String>,
     {
-        self.configure(peer_id, environment.into(), provider.configure().into())
+        let configuration = provider
+            .configure()
+            .map_err(|e| bus::Error::Configuration(e.into()))?
+            .into();
+        Ok(self.configure(peer_id, environment.into(), configuration))
     }
 
     pub fn configure<P, Env>(

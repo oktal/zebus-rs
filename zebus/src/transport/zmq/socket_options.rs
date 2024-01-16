@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+#[cfg(feature = "config-provider")]
+use serde::{Deserialize, Serialize};
+
 pub const DEFAULT_SEND_HIGH_WATERMARK: i32 = 20000;
 pub const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_millis(200);
 pub const DEFAULT_RECV_HIGH_WATERMARK: i32 = 40000;
@@ -10,6 +13,7 @@ pub const DEFAULT_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Keep alive options that can be set to a zmq [`zmq::Socket`]
 #[derive(Copy, Clone, Debug)]
+#[cfg_attr(feature = "config-provider", derive(Serialize, Deserialize))]
 pub struct KeepAliveOptions {
     /// Set the `ZMQ_TCP_KEEPALIVE` option to the provided value
     /// Override SO_KEEPALIVE socket option
@@ -23,6 +27,7 @@ pub struct KeepAliveOptions {
 /// Options that can be set to a zmq [`zmq::Socket`]
 /// Please refer to [zmq_setsockopt](http://api.zeromq.org/3-0:zmq-setsockopt) for a complete documentation of all available options
 #[derive(Copy, Clone, Debug)]
+#[cfg_attr(feature = "config-provider", derive(Serialize, Deserialize))]
 pub struct ZmqSocketOptions {
     /// Set the `ZMQ_SNDHWM` option to the provided value
     /// Set high water mark for outbound messages
@@ -34,10 +39,12 @@ pub struct ZmqSocketOptions {
 
     /// Set the `ZMQ_SNDTIMEO` option to the provided value
     /// Maximum time before a send operation returns with EAGAIN
+    #[cfg_attr(feature = "config-provider", serde(with = "humantime_serde"))]
     pub send_timeout: Option<Duration>,
 
     /// Set the `ZMQ_RCVTIMEO` option to the provided value
     /// Maximum time before a recv operation returns with EAGAIN
+    #[cfg_attr(feature = "config-provider", serde(with = "humantime_serde"))]
     pub recv_timeout: Option<Duration>,
 
     /// Set [`KeepAliveOptions`] zmq socket options
