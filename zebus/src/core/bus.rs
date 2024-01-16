@@ -15,14 +15,10 @@ use tracing::{error, info};
 
 use crate::{
     bus::{CommandFuture, CommandResult, Error, RegistrationError, Result, SendError},
-    bus_configuration::{
-        DEFAULT_MAX_BATCH_SIZE, DEFAULT_REGISTRATION_TIMEOUT, DEFAULT_START_REPLAY_TIMEOUT,
-    },
     core::{MessagePayload, SubscriptionMode},
     directory::{self, Directory, Registration},
     dispatch::{
-        self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, InvokerService,
-        MessageDispatcher,
+        self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, MessageDispatcher,
     },
     proto::FromProtobuf,
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
@@ -356,15 +352,19 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
                     match request {
                         LocalDispatchRequest::Command { tx, message } => {
                             // Dispatch command locally
-                            let dispatched = self.dispatch(DispatchRequest::local(message, bus.clone())).await.unwrap();
+                            match self.dispatch(DispatchRequest::local(message, bus.clone())).await {
+                                Ok(dispatched) => {
+                                    // Retrieve the `CommandResult`
+                                    let command_result: Option<CommandResult> = dispatched.try_into().ok();
 
-                            // Retrieve the `CommandResult`
-                            let command_result: Option<CommandResult> = dispatched.try_into().ok();
+                                    // Resolve command future
+                                    if let Some(command_result) = command_result {
+                                        let _ = tx.send(command_result);
+                                    }
 
-                            // Resolve command future
-                            if let Some(command_result) = command_result {
-                                let _ = tx.send(command_result);
-                            }
+                                },
+                                Err(e) => error!("failed to dispatch message locally: {e}")
+                             }
                         }
                         LocalDispatchRequest::Event { tx, message } => {
                             // Dispatch event locally
@@ -641,12 +641,12 @@ impl<T: Transport, D: Directory> crate::Bus for Core<T, D> {
     }
 }
 
-struct Bus<T: Transport, D: Directory> {
+pub(super) struct Bus<T: Transport, D: Directory> {
     inner: Mutex<Option<State<T, D>>>,
 }
 
 impl<T: Transport, D: Directory> Bus<T, D> {
-    fn new(
+    pub(super) fn new(
         configuration: BusConfiguration,
         transport: T,
         directory: Arc<D>,
@@ -934,106 +934,6 @@ impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
 
     async fn publish(&self, event: &dyn Event) -> Result<()> {
         self.publish(event).await
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum CreateError<E> {
-    MissingConfiguration,
-
-    Configure(E),
-}
-
-pub struct BusBuilder<T: Transport> {
-    transport: T,
-    peer_id: Option<PeerId>,
-    configuration: Option<BusConfiguration>,
-    environment: Option<String>,
-    dispatcher: MessageDispatcher,
-}
-
-impl<T: Transport> BusBuilder<T> {
-    pub fn new(transport: T) -> Self {
-        Self {
-            transport,
-            peer_id: None,
-            configuration: None,
-            environment: None,
-            dispatcher: MessageDispatcher::new(),
-        }
-    }
-
-    pub fn with_peer_id(mut self, peer_id: PeerId) -> Self {
-        self.peer_id = Some(peer_id);
-        self
-    }
-
-    pub fn with_configuration(
-        mut self,
-        configuration: BusConfiguration,
-        environment: String,
-    ) -> Self {
-        self.configuration = Some(configuration);
-        self.environment = Some(environment);
-        self
-    }
-
-    pub fn with_default_configuration(
-        self,
-        directory_endpoints: &str,
-        environment: String,
-    ) -> Self {
-        let directory_endpoints = directory_endpoints
-            .split(&[' ', ',', ';'])
-            .map(Into::into)
-            .collect();
-        let configuration = BusConfiguration {
-            directory_endpoints,
-            registration_timeout: DEFAULT_REGISTRATION_TIMEOUT,
-            start_replay_timeout: DEFAULT_START_REPLAY_TIMEOUT,
-            is_persistent: false,
-            pick_random_directory: false,
-            enable_error_publication: false,
-            message_batch_size: DEFAULT_MAX_BATCH_SIZE,
-        };
-        self.with_configuration(configuration, environment)
-    }
-
-    pub fn handles<H>(mut self, handler: H) -> Self
-    where
-        H: InvokerService + 'static,
-    {
-        self.dispatcher.add(Box::new(handler)).unwrap();
-        self
-    }
-
-    pub fn create(self) -> std::result::Result<impl crate::Bus, CreateError<Error>> {
-        let (transport, peer_id, configuration, environment) = (
-            self.transport,
-            self.peer_id.unwrap_or(Self::testing_peer_id()),
-            self.configuration
-                .ok_or(CreateError::MissingConfiguration)?,
-            self.environment.ok_or(CreateError::MissingConfiguration)?,
-        );
-
-        let dispatcher = self.dispatcher;
-
-        // Create peer directory client
-        let client = directory::Client::new();
-
-        // Create the bus
-        let bus = Bus::new(configuration, transport, client, dispatcher);
-
-        // Configure the bus
-        bus.configure(peer_id, environment)
-            .map_err(CreateError::Configure)?;
-        Ok(bus)
-    }
-
-    fn testing_peer_id() -> PeerId {
-        let uuid = uuid::Uuid::new_v4();
-        let peer_id = format!("Abc.Testing.{uuid}");
-        PeerId::new(peer_id)
     }
 }
 

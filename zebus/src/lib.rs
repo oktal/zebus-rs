@@ -1,9 +1,9 @@
 mod bcl;
 pub mod bus;
-mod bus_configuration;
+pub mod configuration;
 pub mod core;
 mod directory;
-mod dispatch;
+pub mod dispatch;
 pub mod inject;
 pub mod lotus;
 mod message_id;
@@ -18,11 +18,9 @@ mod sync;
 pub mod transport;
 
 pub use bus::{Bus, Command, CommandError, Event, Message, MessageExt, SendError};
-pub use bus_configuration::BusConfiguration;
+pub use configuration::{BusConfiguration, ConfigurationProvider};
 
-pub use crate::core::{
-    BusBuilder, CreateError, Error, HandlerError, IntoResponse, Response, ResponseMessage,
-};
+pub use crate::core::{BusBuilder, Error, HandlerError, IntoResponse, Response, ResponseMessage};
 
 pub use message_id::MessageId;
 pub use peer::Peer;
