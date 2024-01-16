@@ -1,6 +1,7 @@
 //! A client to communicate with a a peer directory
 use itertools::Itertools;
 use tokio::sync::broadcast;
+use tracing::debug;
 
 use crate::dispatch::router::{RouteHandler, Router};
 use crate::inject;
@@ -513,11 +514,10 @@ async fn peer_responding(
         .peer_responding(message)
 }
 
-async fn ping_peer(
-    _message: PingPeerCommand,
-    inject::State(_state): inject::State<Arc<Mutex<DirectoryState>>>,
-) {
-    println!("PING");
+async fn ping_peer(_message: PingPeerCommand, inject::Originator(originator): inject::Originator) {
+    let sender_id = originator.sender_id;
+    let sender_endpoint = originator.sender_endpoint;
+    debug!("Received PING from {sender_id} [{sender_endpoint}]",)
 }
 
 async fn peer_subscriptions_for_type_updated(

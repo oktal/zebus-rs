@@ -3,6 +3,8 @@ use crate::{dispatch::DispatchRequest, IntoResponse};
 pub mod bus;
 pub(crate) mod message;
 pub use bus::Bus;
+pub mod originator;
+pub use originator::Originator;
 pub mod state;
 pub use state::State;
 
