@@ -15,7 +15,8 @@ use zebus_core::{HandlerDescriptor, MessageTypeDescriptor};
 
 use crate::{
     inject::{self, Extract},
-    BindingKey, IntoResponse, Message, MessageDescriptor, Response, SubscriptionMode,
+    BindingKey, IntoResponse, Message, MessageBinding, MessageDescriptor, Response,
+    SubscriptionMode,
 };
 
 use super::{
@@ -80,6 +81,8 @@ where
 }
 
 pub trait RouteHandlerDescriptor<Args> {
+    type Message;
+
     /// Type of message handled by the handler
     fn message(&self) -> MessageTypeDescriptor;
 
@@ -96,6 +99,16 @@ where
     handler: H,
     descriptor: MessageInvokerDescriptor,
     phantom: PhantomData<fn(Args, S) -> Fut>,
+}
+
+fn bind<M, F>(bind_fn: F) -> BindingKey
+where
+    M: MessageBinding,
+    F: FnOnce(&mut <M as MessageBinding>::Binding),
+{
+    let mut binding = M::Binding::default();
+    bind_fn(&mut binding);
+    M::bind(binding).into()
 }
 
 impl<Args, S, H, Fut> MakeRouteHandler<Args, S, H, Fut>
@@ -125,6 +138,18 @@ where
 
     pub fn subscription_mode(mut self, mode: SubscriptionMode) -> Self {
         self.descriptor.subscription_mode = mode;
+        self
+    }
+
+    pub fn bind<F>(mut self, bind_fn: F) -> Self
+    where
+        H::Message: MessageBinding,
+        F: FnOnce(&mut <H::Message as MessageBinding>::Binding),
+    {
+        self.descriptor
+            .bindings
+            .push(bind::<H::Message, _>(bind_fn));
+
         self
     }
 
@@ -295,6 +320,8 @@ macro_rules! impl_tuple {
             M: Message + MessageDescriptor + prost::Message + Clone + Default,
             R: IntoResponse + 'static,
         {
+            type Message = M;
+
             fn message(&self) -> MessageTypeDescriptor {
                 MessageTypeDescriptor::of::<M>()
             }
@@ -412,7 +439,6 @@ mod test {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use zebus_macros::handler;
 
     use crate::{
         bus, core::MessagePayload, dispatch::DispatchRequest, inject::state::State,
@@ -544,6 +570,14 @@ mod test {
         temperature: u32,
     }
 
+    #[derive(prost::Message, crate::Event, Clone, Eq, PartialEq)]
+    #[zebus(namespace = "Abc.Coffee", routable)]
+    struct CoffeeBrewed {
+        #[prost(fixed64, tag = 1)]
+        #[zebus(routing_position = 1)]
+        progress_pct: u64,
+    }
+
     fn decode_as<M>(response: Option<Response>) -> Option<M>
     where
         M: MessageDescriptor + prost::Message + Default,
@@ -584,6 +618,8 @@ mod test {
         }
         .into()
     }
+
+    async fn brewed(_ev: CoffeeBrewed) {}
 
     #[tokio::test]
     async fn route_message_simple() {
@@ -640,5 +676,38 @@ mod test {
         };
 
         assert_eq!(dispatch_queue, Some("Brewer"));
+    }
+
+    #[tokio::test]
+    async fn route_message_with_bindings() {
+        let fixture = Fixture::new((), |r| {
+            r.handles(
+                brewed
+                    .into_handler()
+                    .bind(|b| b.progress_pct.matches(25))
+                    .bind(|b| b.progress_pct.matches(50))
+                    .bind(|b| b.progress_pct.matches(100)),
+            )
+        });
+
+        let descriptor = fixture.router.poll_invoke(
+            &fixture.request_for(CoffeeBrewed { progress_pct: 25 }, |message, bus| {
+                DispatchRequest::remote(message, bus)
+            }),
+        );
+
+        let bindings = match descriptor {
+            Poll::Ready(Some(descriptor)) => Some(descriptor.bindings.clone()),
+            _ => None,
+        };
+
+        assert_eq!(
+            bindings,
+            Some(vec![
+                BindingKey::from(vec!["25"]),
+                BindingKey::from(vec!["50"]),
+                BindingKey::from(vec!["100"]),
+            ])
+        );
     }
 }
