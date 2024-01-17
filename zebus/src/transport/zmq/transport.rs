@@ -82,7 +82,7 @@ enum Inner {
 trait DisconnectStrategy {
     fn disconnect(
         socket: &mut ZmqOutboundSocket,
-        peer: &Peer,
+        sender: &Peer,
         environment: &String,
         buf: &mut Vec<u8>,
     ) -> Result<(), Error>;
@@ -94,13 +94,14 @@ struct TerminateConnection;
 impl DisconnectStrategy for EndStreamGracefully {
     fn disconnect(
         socket: &mut ZmqOutboundSocket,
-        peer: &Peer,
+        sender: &Peer,
         environment: &String,
         buf: &mut Vec<u8>,
     ) -> Result<(), Error> {
+        let peer = socket.peer().map_err(Error::Outbound)?;
         debug!("sending EndOfStreamAck to {peer}");
         let (_, end_of_stream_ack) =
-            TransportMessage::create(&peer, environment.clone(), &close::EndOfStreamAck {});
+            TransportMessage::create(&sender, environment.clone(), &close::EndOfStreamAck {});
         buf.clear();
         end_of_stream_ack.encode(buf).map_err(Error::Encode)?;
         socket.write_all(buf).map_err(Error::Io)?;
@@ -111,7 +112,7 @@ impl DisconnectStrategy for EndStreamGracefully {
 impl DisconnectStrategy for TerminateConnection {
     fn disconnect(
         _socket: &mut ZmqOutboundSocket,
-        _peer: &Peer,
+        _sender: &Peer,
         _environment: &String,
         _buf: &mut Vec<u8>,
     ) -> Result<(), Error> {

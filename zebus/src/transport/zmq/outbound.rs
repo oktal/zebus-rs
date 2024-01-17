@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use thiserror::Error;
 use zmq::Context;
 
-use crate::{transport::zmq::ZmqSocketOptions, PeerId};
+use crate::{transport::zmq::ZmqSocketOptions, Peer, PeerId};
 
 /// Outbound socket error
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
@@ -92,6 +92,24 @@ impl ZmqOutboundSocket {
     pub(super) fn endpoint(&self) -> Result<&str> {
         match self.inner.as_ref() {
             Some(Inner::Connected { ref endpoint, .. }) => Ok(endpoint),
+            _ => Err(Error::InvalidOperation),
+        }
+    }
+
+    /// Get the [`Peer`] associated with thie connection
+    /// Returns [`Error`] `InvalidOperation` if the socket is not connected
+    pub(super) fn peer(&self) -> Result<Peer> {
+        match self.inner.as_ref() {
+            Some(Inner::Connected {
+                ref endpoint,
+                ref peer_id,
+                ..
+            }) => Ok(Peer {
+                id: peer_id.clone(),
+                endpoint: endpoint.clone(),
+                is_up: true,
+                is_responding: true,
+            }),
             _ => Err(Error::InvalidOperation),
         }
     }
