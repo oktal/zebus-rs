@@ -455,8 +455,8 @@ impl OutboundWorker {
     where
         S: DisconnectStrategy,
     {
+        info!("disconnecting peer {peer_id}");
         if let Some(mut socket) = self.outbound_sockets.remove(&peer_id) {
-            info!("disconnecting peer {peer_id}");
             // Invoke the disconnect strategy
             S::disconnect(&mut socket, &self.peer, &self.environment, encode_buf)?;
 

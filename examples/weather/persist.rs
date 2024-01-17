@@ -71,8 +71,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let routing = std::env::args().skip(1).next();
     let instance_id = if let Some(routing) = routing.as_ref() {
+        info!("Subscribing to {routing} station measurements");
         routing.to_uppercase().replace(" ", "_")
     } else {
+        info!("Subscribing to all station measurements");
         "ALL".to_string()
     };
 
