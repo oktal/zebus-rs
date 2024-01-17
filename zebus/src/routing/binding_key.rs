@@ -1,10 +1,11 @@
+use crate::proto::FromProtobuf;
 use crate::Message;
 use crate::{proto::IntoProtobuf, BindingKeyFragment};
 
 pub(crate) mod proto {
     #[derive(Clone, prost::Message)]
     pub struct BindingKey {
-        #[prost(string, repeated, tag = "1")]
+        #[prost(string, repeated, tag = 1)]
         pub parts: Vec<String>,
     }
 }
@@ -60,6 +61,14 @@ impl From<Vec<String>> for BindingKey {
 impl From<proto::BindingKey> for BindingKey {
     fn from(key: proto::BindingKey) -> Self {
         Self::from(key.parts)
+    }
+}
+
+impl FromProtobuf for BindingKey {
+    type Input = proto::BindingKey;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        Self::from(input)
     }
 }
 

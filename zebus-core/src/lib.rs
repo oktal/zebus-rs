@@ -87,7 +87,13 @@ impl FromStr for BindingKey {
 
 impl From<Vec<String>> for BindingKey {
     fn from(value: Vec<String>) -> Self {
-        let fragments = value.into_iter().map(BindingKeyFragment::Value).collect();
+        let fragments = value
+            .into_iter()
+            .map(|v| {
+                v.parse()
+                    .expect("parsing BindingKeyFragment is infaillible")
+            })
+            .collect();
         Self {
             fragments: Some(fragments),
         }

@@ -5,10 +5,10 @@ use crate::{MessageBinding, MessageDescriptor};
 pub(crate) mod proto {
     #[derive(Clone, prost::Message)]
     pub struct Subscription {
-        #[prost(message, required, tag = "1")]
+        #[prost(message, required, tag = 1)]
         pub message_type_id: crate::proto::MessageTypeId,
 
-        #[prost(message, required, tag = "2")]
+        #[prost(message, required, tag = 2)]
         pub binding_key: crate::proto::BindingKey,
     }
 }
