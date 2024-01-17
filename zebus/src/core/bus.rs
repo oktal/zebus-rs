@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tower_service::Service;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     bus::{CommandFuture, CommandResult, Error, RegistrationError, Result, SendError},
@@ -569,6 +569,26 @@ impl<T: Transport, D: Directory> Core<T, D> {
     async fn publish(&self, event: &dyn Event) -> Result<()> {
         // Retrieve the list of peers handling the event from the directory
         let peers = self.directory.get_peers_handling(event.up());
+        let len = peers.len();
+
+        let name = event.name();
+
+        if len == 0 {
+            info!(message = event.name(), "sending {name} to no target peer");
+            return Ok(());
+        }
+
+        if len == 1 {
+            let peer = &peers[0];
+            info!(message = event.name(), "sending {name} to {peer}");
+        } else {
+            let first = &peers[0];
+            let rest = len - 1;
+            info!(
+                message = event.name(),
+                "sending {name} to {first} and {rest} other peers"
+            );
+        }
 
         let self_dst_peer = peers.iter().find(|&p| p.id == self.self_peer.id);
         // TODO(oktal): add local dispatch toggling

@@ -37,7 +37,7 @@ impl Peer {
 
 impl fmt::Display for Peer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Peer({}, {})", self.id.value(), self.endpoint)?;
+        write!(f, "{} [{}]", self.id.value(), self.endpoint)?;
         Ok(())
     }
 }
