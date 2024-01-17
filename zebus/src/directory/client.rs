@@ -492,7 +492,15 @@ async fn peer_stopped(
     state.lock().expect("poisoned mutex").peer_stopped(message)
 }
 
-async fn peer_decommissioned(_message: PeerDecommissioned) {}
+async fn peer_decommissioned(
+    message: PeerDecommissioned,
+    inject::State(state): inject::State<Arc<Mutex<DirectoryState>>>,
+) {
+    state
+        .lock()
+        .expect("poisoned mutex")
+        .peer_decommissioned(message)
+}
 
 async fn peer_not_responding(
     message: PeerNotResponding,
