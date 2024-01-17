@@ -24,14 +24,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let zmq_configuration = DefaultConfigurationProvider::<ZmqTransportConfiguration>::default()
-        .with_file("examples/echo/zmq.toml")
+        .with_file("examples/zmq.toml")
         .configure()?;
 
     let zmq_socket_opts = ZmqSocketOptions::default();
     let zmq = ZmqTransport::new(zmq_configuration, zmq_socket_opts);
 
-    let mut configuration = DefaultConfigurationProvider::<BusConfiguration>::default()
-        .with_file("examples/echo/bus.toml");
+    let mut configuration =
+        DefaultConfigurationProvider::<BusConfiguration>::default().with_file("examples/bus.toml");
 
     let bus = BusBuilder::new()
         .configure_with(

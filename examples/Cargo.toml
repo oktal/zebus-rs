@@ -14,6 +14,14 @@ path = "echo/service.rs"
 name = "echo-client"
 path = "echo/client.rs"
 
+[[example]]
+name = "weather-persist"
+path = "weather/persist.rs"
+
+[[example]]
+name = "weather-collect"
+path = "weather/collect.rs"
+
 [dependencies]
 prost = "0.12"
 tokio = { version = "1.21.2" }
