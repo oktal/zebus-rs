@@ -1,6 +1,7 @@
 use bitflags::bitflags;
 use std::{
     any::{Any, TypeId},
+    convert::Infallible,
     fmt,
     marker::PhantomData,
     str::FromStr,
@@ -49,7 +50,7 @@ impl fmt::Display for BindingKeyFragment {
 }
 
 impl FromStr for BindingKeyFragment {
-    type Err = ();
+    type Err = Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
@@ -74,13 +75,16 @@ impl BindingKey {
 }
 
 impl FromStr for BindingKey {
-    type Err = ();
+    type Err = Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let fragments: Result<Vec<_>, _> = s.split('.').map(FromStr::from_str).collect();
+        let fragments = s
+            .split('.')
+            .map(FromStr::from_str)
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
-            fragments: Some(fragments?),
+            fragments: Some(fragments),
         })
     }
 }
