@@ -441,8 +441,12 @@ mod test {
     use async_trait::async_trait;
 
     use crate::{
-        bus, core::MessagePayload, dispatch::DispatchRequest, inject::state::State,
-        transport::TransportMessage, Bus, Command, Event, Peer, PeerId, ResponseMessage,
+        bus::{self, CommandResult},
+        core::MessagePayload,
+        dispatch::DispatchRequest,
+        inject::state::State,
+        transport::TransportMessage,
+        Bus, Command, Event, Peer, PeerId, ResponseMessage,
     };
 
     use super::*;
@@ -516,16 +520,12 @@ mod test {
             Err(bus::Error::InvalidOperation)
         }
 
-        async fn send(&self, _command: &dyn Command) -> bus::Result<crate::bus::CommandFuture> {
-            Err(bus::Error::InvalidOperation)
+        async fn send(&self, _command: &dyn Command) -> CommandResult {
+            Err(bus::Error::InvalidOperation.into())
         }
 
-        async fn send_to(
-            &self,
-            _command: &dyn Command,
-            _peer: Peer,
-        ) -> bus::Result<crate::bus::CommandFuture> {
-            Err(bus::Error::InvalidOperation)
+        async fn send_to(&self, _command: &dyn Command, _peer: Peer) -> CommandResult {
+            Err(bus::Error::InvalidOperation.into())
         }
 
         async fn publish(&self, _event: &dyn Event) -> bus::Result<()> {

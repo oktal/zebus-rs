@@ -11,10 +11,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tower_service::Service;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::{
-    bus::{CommandFuture, CommandResult, Error, RegistrationError, Result, SendError},
+    bus::{CommandResult, Error, RegistrationError, Result, SendError},
     core::{MessagePayload, SubscriptionMode},
     directory::{self, Directory, Registration},
     dispatch::{
@@ -22,8 +22,8 @@ use crate::{
     },
     proto::FromProtobuf,
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
-    BindingKey, BusConfiguration, Command, Event, Message, MessageExt, MessageId, Peer, PeerId,
-    Subscription,
+    BindingKey, BusConfiguration, Command, CommandError, Event, Message, MessageExt, MessageId,
+    Peer, PeerId, Subscription,
 };
 
 struct Core<T: Transport, D: Directory> {
@@ -142,7 +142,7 @@ impl<T: Transport> Sender<T> {
         environment: &str,
         pending_commands: &Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>,
         peers: impl IntoIterator<Item = Peer>,
-    ) -> Result<CommandFuture> {
+    ) -> CommandResult {
         // Create the reception channel for the result of the command
         let (tx, rx) = oneshot::channel();
 
@@ -161,7 +161,12 @@ impl<T: Transport> Sender<T> {
             })
             .await
             .map_err(|_| Error::Send(SendError::Closed))?;
-        Ok(CommandFuture(rx))
+
+        // Await the result of the command
+        match rx.await {
+            Ok(r) => r,
+            Err(e) => Err(CommandError::Receive(e)),
+        }
     }
 
     async fn publish(
@@ -501,7 +506,7 @@ fn get_startup_subscriptions<D: DispatchService>(
 }
 
 impl<T: Transport, D: Directory> Core<T, D> {
-    async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+    async fn send(&self, command: &dyn Command) -> CommandResult {
         // Retrieve the list of peers handling the command from the directory
         let peers = self.directory.get_peers_handling(command.up());
 
@@ -518,8 +523,11 @@ impl<T: Transport, D: Directory> Core<T, D> {
                 .await
                 .map_err(|_| Error::Send(SendError::Closed))?;
 
-            // Return the future
-            Ok(CommandFuture(rx))
+            // Await the result of the command
+            match rx.await {
+                Ok(r) => r,
+                Err(e) => Err(CommandError::Receive(e)),
+            }
         } else {
             // Make sure there is only one peer handling the command
             let dst_peer = peers
@@ -531,7 +539,7 @@ impl<T: Transport, D: Directory> Core<T, D> {
             // Attempting to send a non-persistent command to a non-responding peer result in
             // an error
             if !dst_peer.is_responding && command.is_transient() && !command.is_infrastructure() {
-                Err(Error::Send(SendError::PeerNotResponding(dst_peer)))
+                Err(Error::Send(SendError::PeerNotResponding(dst_peer)).into())
             } else {
                 // Send the command
                 Sender::<T>::send(
@@ -547,11 +555,11 @@ impl<T: Transport, D: Directory> Core<T, D> {
         }
     }
 
-    async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
+    async fn send_to(&self, command: &dyn Command, peer: Peer) -> CommandResult {
         // Attempting to send a non-persistent command to a non-responding peer result in
         // an error
         if !peer.is_responding && command.is_transient() && !command.is_infrastructure() {
-            return Err(Error::Send(SendError::PeerNotResponding(peer)));
+            return Err(Error::Send(SendError::PeerNotResponding(peer)).into());
         }
 
         // Send the command
@@ -648,11 +656,11 @@ impl<T: Transport, D: Directory> crate::Bus for Core<T, D> {
         Err(Error::InvalidOperation)
     }
 
-    async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+    async fn send(&self, command: &dyn Command) -> CommandResult {
         self.send(command).await
     }
 
-    async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
+    async fn send_to(&self, command: &dyn Command, peer: Peer) -> CommandResult {
         self.send_to(command, peer).await
     }
 
@@ -907,12 +915,12 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         res
     }
 
-    async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+    async fn send(&self, command: &dyn Command) -> CommandResult {
         let core = self.core()?;
         core.send(command).await
     }
 
-    async fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> Result<CommandFuture> {
+    async fn send_to(&self, command: &dyn Command, peer: crate::Peer) -> CommandResult {
         let core = self.core()?;
         core.send_to(command, peer).await
     }
@@ -944,11 +952,11 @@ impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
         self.stop().await
     }
 
-    async fn send(&self, command: &dyn Command) -> Result<CommandFuture> {
+    async fn send(&self, command: &dyn Command) -> CommandResult {
         self.send(command).await
     }
 
-    async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture> {
+    async fn send_to(&self, command: &dyn Command, peer: Peer) -> CommandResult {
         self.send_to(command, peer).await
     }
 
@@ -1605,7 +1613,10 @@ mod tests {
             .await;
 
         // Assert that send failed with InvalidOperation
-        assert!(matches!(res, Err(Error::InvalidOperation)));
+        assert!(matches!(
+            res,
+            Err(CommandError::Bus(Error::InvalidOperation))
+        ));
     }
 
     async fn test_registration_timeout<T: Into<String>>(
@@ -1803,7 +1814,10 @@ mod tests {
             .await;
 
         // Assert that send failed with NoPeer
-        assert!(matches!(res, Err(Error::Send(SendError::NoPeer))));
+        assert!(matches!(
+            res,
+            Err(CommandError::Bus(Error::Send(SendError::NoPeer)))
+        ));
     }
 
     #[tokio::test]
@@ -1829,7 +1843,10 @@ mod tests {
             .await;
 
         // Assert that send failed with MultiplePeers
-        assert!(matches!(res, Err(Error::Send(SendError::MultiplePeers(_)))));
+        assert!(matches!(
+            res,
+            Err(CommandError::Bus(Error::Send(SendError::MultiplePeers(_))))
+        ));
     }
 
     #[tokio::test]
@@ -1854,7 +1871,9 @@ mod tests {
         // Assert that send failed with PeerNotResponding
         assert!(matches!(
             res,
-            Err(Error::Send(SendError::PeerNotResponding(_)))
+            Err(CommandError::Bus(Error::Send(
+                SendError::PeerNotResponding(_)
+            )))
         ));
     }
 
@@ -1881,16 +1900,12 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(Peer::test());
 
         // Send command
-        let res = fixture
+        let result = fixture
             .bus
             .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
             .await;
 
-        // Assert that command was successfully sent
-        assert_eq!(res.is_ok(), true);
-
         // Assert that command has been locally dispatched
-        let result = res.unwrap().await;
         assert!(matches!(result, Ok(None)));
 
         // Make sure the handler was called
@@ -2010,16 +2025,10 @@ mod tests {
             .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
 
         // Send command
-        let res = fixture
+        let result = fixture
             .bus
             .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
             .await;
-
-        // Make sure command was successfully sent
-        assert_eq!(res.is_ok(), true);
-
-        // Make sure command resulted in an error
-        let result = res.unwrap().await;
 
         // Make sure command failed with the right error
         if let Err(CommandError::Command { code, message }) = result {

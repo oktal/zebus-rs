@@ -52,10 +52,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         info!("Echoing {msg}");
 
-        // TODO(oktal): remove the need for double await
-        let result = bus.send(&EchoCommand { msg }).await?;
-        if let Err(e) = result.await {
-            error!("{e}");
+        let result = bus.send(&EchoCommand { msg }).await;
+        if let Err(e) = result {
+            error!("error sending command: {e}");
         }
         bus.stop().await.expect("Failed to stop bus");
     }

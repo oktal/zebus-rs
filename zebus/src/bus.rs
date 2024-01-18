@@ -1,10 +1,5 @@
 use core::fmt;
-use std::{
-    any::Any,
-    future::Future,
-    pin::Pin,
-    task::{ready, Context, Poll},
-};
+use std::any::Any;
 
 use async_trait::async_trait;
 use dyn_clone::DynClone;
@@ -17,76 +12,6 @@ use crate::{
     transport::MessageExecutionCompleted,
     BoxError, MessageType, Peer, PeerId,
 };
-
-/// An error which can be returned when sending a command
-#[derive(Debug, Error)]
-pub enum CommandError {
-    /// Error raised by a remote peer command handler
-    #[error("execution of command returned error {code} with message: {message:?}")]
-    Command {
-        /// Error code returned by the handler of the command
-        code: i32,
-
-        /// Optional error message returned by the handler of the command
-        message: Option<String>,
-    },
-
-    /// A local error occured when attempting to receive the result of the command
-    #[error("failed to receive command: {0}")]
-    Receive(tokio::sync::oneshot::error::RecvError),
-}
-
-/// Execution result of a [`Command`]
-pub type CommandResult = std::result::Result<Option<RawMessage<MessageType>>, CommandError>;
-
-impl MessagePayload for CommandResult {
-    fn message_type(&self) -> Option<&str> {
-        match self {
-            Ok(Some(message)) => message.message_type(),
-            _ => None,
-        }
-    }
-
-    fn content(&self) -> Option<&[u8]> {
-        match self {
-            Ok(Some(message)) => message.content(),
-            _ => None,
-        }
-    }
-}
-
-impl From<MessageExecutionCompleted> for CommandResult {
-    fn from(message: MessageExecutionCompleted) -> Self {
-        if message.error_code != 0 {
-            Err(CommandError::Command {
-                code: message.error_code,
-                message: message.response_message,
-            })
-        } else {
-            let response = match (message.payload_type_id, message.payload) {
-                (Some(message_type), Some(payload)) => Some(RawMessage::new(message_type, payload)),
-                _ => None,
-            };
-
-            Ok(response)
-        }
-    }
-}
-
-pub struct CommandFuture(pub(crate) tokio::sync::oneshot::Receiver<CommandResult>);
-
-impl Future for CommandFuture {
-    type Output = CommandResult;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let pin = Pin::new(&mut self.0);
-        let result = ready!(pin.poll(cx));
-        Poll::Ready(match result {
-            Ok(r) => r,
-            Err(e) => Err(CommandError::Receive(e)),
-        })
-    }
-}
 
 /// Error raised when failing to register with the directory
 #[derive(Debug)]
@@ -176,6 +101,64 @@ pub enum Error {
 
 /// A wrapper arround a [`std::result::Result`] type for bus-specific [`Error`]
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// An error which can be returned when sending a command
+#[derive(Debug, Error)]
+pub enum CommandError {
+    #[error(transparent)]
+    Bus(#[from] Error),
+
+    /// Error raised by a remote peer command handler
+    #[error("execution of command returned error {code} with message: {message:?}")]
+    Command {
+        /// Error code returned by the handler of the command
+        code: i32,
+
+        /// Optional error message returned by the handler of the command
+        message: Option<String>,
+    },
+
+    /// A local error occured when attempting to receive the result of the command
+    #[error("failed to receive command: {0}")]
+    Receive(tokio::sync::oneshot::error::RecvError),
+}
+
+/// Execution result of a [`Command`]
+pub type CommandResult = std::result::Result<Option<RawMessage<MessageType>>, CommandError>;
+
+impl MessagePayload for CommandResult {
+    fn message_type(&self) -> Option<&str> {
+        match self {
+            Ok(Some(message)) => message.message_type(),
+            _ => None,
+        }
+    }
+
+    fn content(&self) -> Option<&[u8]> {
+        match self {
+            Ok(Some(message)) => message.content(),
+            _ => None,
+        }
+    }
+}
+
+impl From<MessageExecutionCompleted> for CommandResult {
+    fn from(message: MessageExecutionCompleted) -> Self {
+        if message.error_code != 0 {
+            Err(CommandError::Command {
+                code: message.error_code,
+                message: message.response_message,
+            })
+        } else {
+            let response = match (message.payload_type_id, message.payload) {
+                (Some(message_type), Some(payload)) => Some(RawMessage::new(message_type, payload)),
+                _ => None,
+            };
+
+            Ok(response)
+        }
+    }
+}
 
 pub trait EncodableMessage {
     fn encode_to_vec(&self) -> Vec<u8>;
@@ -285,10 +268,10 @@ pub trait Bus: Send + Sync + 'static {
     async fn stop(&self) -> Result<()>;
 
     /// Send a [`Command`] to the handling [`Peer`]
-    async fn send(&self, command: &dyn Command) -> Result<CommandFuture>;
+    async fn send(&self, command: &dyn Command) -> CommandResult;
 
     /// Send a [`Command`] to a destination [`Peer`]
-    async fn send_to(&self, command: &dyn Command, peer: Peer) -> Result<CommandFuture>;
+    async fn send_to(&self, command: &dyn Command, peer: Peer) -> CommandResult;
 
     /// Send an [`Event`] to the handling [`Peer`] peers
     async fn publish(&self, event: &dyn Event) -> Result<()>;
@@ -311,12 +294,12 @@ impl Bus for NoopBus {
         Err(Error::InvalidOperation)
     }
 
-    async fn send(&self, _command: &dyn Command) -> Result<CommandFuture> {
-        Err(Error::InvalidOperation)
+    async fn send(&self, _command: &dyn Command) -> CommandResult {
+        Err(Error::InvalidOperation.into())
     }
 
-    async fn send_to(&self, _command: &dyn Command, _peer: Peer) -> Result<CommandFuture> {
-        Err(Error::InvalidOperation)
+    async fn send_to(&self, _command: &dyn Command, _peer: Peer) -> CommandResult {
+        Err(Error::InvalidOperation.into())
     }
 
     async fn publish(&self, _event: &dyn Event) -> Result<()> {
