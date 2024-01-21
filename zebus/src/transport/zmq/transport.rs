@@ -1,3 +1,4 @@
+use futures_util::FutureExt;
 use prost::Message;
 use std::{borrow::Cow, collections::HashMap, io::Write, thread::JoinHandle};
 use tokio::sync::{broadcast, mpsc};
@@ -6,8 +7,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    directory::{self, event::PeerEvent},
+    bus::{BusEvent, BusEventStream},
+    directory::event::PeerEvent,
+    sync::stream::{BoxEventStream, EventStream},
     transport::{
+        self,
+        future::SendFuture,
         zmq::{ZmqSocketOptions, ZmqTransportConfiguration},
         SendContext, Transport, TransportMessage,
     },
@@ -22,13 +27,13 @@ use tokio::io::AsyncReadExt;
 
 use super::close::{self, EndOfStream};
 use super::outbound::ZmqOutboundSocket;
-use super::{inbound::ZmqInboundSocket, Error};
+use super::{inbound::ZmqInboundSocket, ZmqError};
 
 const OUTBOUND_THREAD_NAME: &'static str = "outbound";
 const INBOUND_THREAD_NAME: &'static str = "inbound";
 
 #[derive(Debug)]
-enum OutboundAction {
+pub enum OutboundAction {
     /// Send a message to a list of peers
     Send {
         message: TransportMessage,
@@ -38,6 +43,16 @@ enum OutboundAction {
 
     /// End stream of a peer
     EndStream { peer_id: PeerId },
+}
+
+impl From<transport::future::SendEntry> for OutboundAction {
+    fn from(value: transport::future::SendEntry) -> Self {
+        Self::Send {
+            peers: value.peers,
+            message: value.message,
+            context: SendContext::default(),
+        }
+    }
 }
 
 impl OutboundAction {
@@ -59,7 +74,7 @@ enum Inner {
         options: ZmqSocketOptions,
         peer_id: PeerId,
         environment: String,
-        directory_rx: directory::EventStream,
+        event_rx: BoxEventStream<BusEvent>,
     },
     Started {
         configuration: ZmqTransportConfiguration,
@@ -70,7 +85,7 @@ enum Inner {
         inbound_endpoint: String,
         inbound_handle: JoinHandle<()>,
 
-        outbound_handle: JoinHandle<Result<OutboundHandle, Error>>,
+        outbound_handle: JoinHandle<Result<OutboundHandle, ZmqError>>,
         actions_tx: mpsc::Sender<OutboundAction>,
         rcv_tx: broadcast::Sender<TransportMessage>,
 
@@ -94,7 +109,7 @@ struct InboundWorker {
 }
 
 struct OutboundHandle {
-    directory_rx: directory::EventStream,
+    event_rx: BusEventStream,
 }
 
 struct OutboundWorker {
@@ -116,8 +131,8 @@ struct OutboundWorker {
     /// Reception channel for outbound actions
     actions_rx: mpsc::Receiver<OutboundAction>,
 
-    /// Stream of events from the directory
-    directory_rx: directory::EventStream,
+    /// Stream of events from the bus
+    event_rx: BusEventStream,
 
     /// Channel to receive incoming messages from
     /// Used to subscribe to receive incoming messages
@@ -133,7 +148,7 @@ trait DisconnectStrategy {
         sender: &Peer,
         environment: &String,
         buf: &mut Vec<u8>,
-    ) -> Result<(), Error>;
+    ) -> Result<(), ZmqError>;
 }
 
 struct EndStreamGracefully;
@@ -145,14 +160,14 @@ impl DisconnectStrategy for EndStreamGracefully {
         sender: &Peer,
         environment: &String,
         buf: &mut Vec<u8>,
-    ) -> Result<(), Error> {
-        let peer = socket.peer().map_err(Error::Outbound)?;
+    ) -> Result<(), ZmqError> {
+        let peer = socket.peer().map_err(ZmqError::Outbound)?;
         debug!("sending EndOfStreamAck to {peer}");
         let (_, end_of_stream_ack) =
             TransportMessage::create(&sender, environment.clone(), &close::EndOfStreamAck {});
         buf.clear();
-        end_of_stream_ack.encode(buf).map_err(Error::Encode)?;
-        socket.write_all(buf).map_err(Error::Io)?;
+        end_of_stream_ack.encode(buf).map_err(ZmqError::Encode)?;
+        socket.write_all(buf).map_err(ZmqError::Io)?;
         Ok(())
     }
 }
@@ -163,7 +178,7 @@ impl DisconnectStrategy for TerminateConnection {
         _sender: &Peer,
         _environment: &String,
         _buf: &mut Vec<u8>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZmqError> {
         Ok(())
     }
 }
@@ -186,7 +201,7 @@ impl ZmqTransport {
         }
     }
 
-    fn start(&mut self) -> Result<(), Error> {
+    fn start(&mut self) -> Result<(), ZmqError> {
         info!("starting zmq transport...");
 
         let (inner, res) = match self.inner.take() {
@@ -195,7 +210,7 @@ impl ZmqTransport {
                 options,
                 peer_id,
                 environment,
-                directory_rx,
+                event_rx,
             }) => {
                 // Create zmq context
                 let context = zmq::Context::new();
@@ -209,9 +224,9 @@ impl ZmqTransport {
                 );
 
                 // Bind the inbound socket
-                let mut inbound_endpoint = inbound_socket.bind().map_err(Error::Inbound)?;
+                let mut inbound_endpoint = inbound_socket.bind().map_err(ZmqError::Inbound)?;
                 let hostname = gethostname::gethostname();
-                let host_str = hostname.to_str().ok_or(Error::InvalidUtf8)?;
+                let host_str = hostname.to_str().ok_or(ZmqError::InvalidUtf8)?;
                 inbound_endpoint = inbound_endpoint.replace("0.0.0.0", &host_str);
                 info!("socket bound to endpoint {inbound_endpoint}");
 
@@ -235,7 +250,7 @@ impl ZmqTransport {
                     configuration.clone(),
                     peer,
                     environment.clone(),
-                    directory_rx,
+                    event_rx,
                     rcv_tx.clone(),
                     cancel_tx.clone(),
                 )?;
@@ -266,7 +281,7 @@ impl ZmqTransport {
                     Ok(()),
                 )
             }
-            x => (x, Err(Error::InvalidOperation)),
+            x => (x, Err(ZmqError::InvalidOperation)),
         };
 
         info!("... started");
@@ -274,7 +289,7 @@ impl ZmqTransport {
         res
     }
 
-    fn stop(&mut self) -> Result<(), Error> {
+    fn stop(&mut self) -> Result<(), ZmqError> {
         info!("stopping zmq transport...");
 
         let (inner, res) = match self.inner.take() {
@@ -313,7 +328,7 @@ impl ZmqTransport {
                     Ok(()),
                 )
             }
-            x => (x, Err(Error::InvalidOperation)),
+            x => (x, Err(ZmqError::InvalidOperation)),
         };
 
         info!("... stopped");
@@ -326,7 +341,7 @@ impl ZmqTransport {
         peers: impl Iterator<Item = Peer>,
         message: TransportMessage,
         context: SendContext,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZmqError> {
         match self.inner.as_ref() {
             Some(Inner::Started { ref actions_tx, .. }) => {
                 let peers = peers.collect();
@@ -341,7 +356,7 @@ impl ZmqTransport {
 
                 Ok(())
             }
-            _ => Err(Error::InvalidOperation),
+            _ => Err(ZmqError::InvalidOperation),
         }
     }
 }
@@ -352,7 +367,7 @@ impl InboundWorker {
         rcv_tx: broadcast::Sender<TransportMessage>,
         outbound_tx: mpsc::Sender<OutboundAction>,
         shutdown_rx: CancellationToken,
-    ) -> Result<JoinHandle<()>, Error> {
+    ) -> Result<JoinHandle<()>, ZmqError> {
         // Create inbound worker
         let worker = InboundWorker {
             inbound_socket,
@@ -365,13 +380,13 @@ impl InboundWorker {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(Error::Io)?;
+            .map_err(ZmqError::Io)?;
 
         // Spawn inbound thread
         let inbound_thread = std::thread::Builder::new()
             .name(INBOUND_THREAD_NAME.into())
             .spawn(move || rt.block_on(worker.run()))
-            .map_err(Error::Io)?;
+            .map_err(ZmqError::Io)?;
 
         Ok(inbound_thread)
     }
@@ -436,7 +451,7 @@ impl InboundWorker {
         let _ = self.close();
     }
 
-    fn close(&mut self) -> Result<(), Error> {
+    fn close(&mut self) -> Result<(), ZmqError> {
         if let Err(e) = self.inbound_socket.close() {
             warn!("failed to unbind: {e}");
         }
@@ -451,15 +466,15 @@ impl OutboundWorker {
         configuration: ZmqTransportConfiguration,
         peer: Peer,
         environment: String,
-        directory_rx: directory::EventStream,
+        event_rx: BusEventStream,
         rcv_tx: tokio::sync::broadcast::Sender<TransportMessage>,
         shutdown_rx: CancellationToken,
     ) -> Result<
         (
             mpsc::Sender<OutboundAction>,
-            JoinHandle<Result<OutboundHandle, Error>>,
+            JoinHandle<Result<OutboundHandle, ZmqError>>,
         ),
-        Error,
+        ZmqError,
     > {
         // Create outbound channel for outbound socket operations
         // TODO(oktal): remove hardcoded bound limit
@@ -473,7 +488,7 @@ impl OutboundWorker {
             environment,
             outbound_sockets: HashMap::new(),
             actions_rx,
-            directory_rx,
+            event_rx,
             rcv_tx,
             shutdown_rx,
         };
@@ -482,18 +497,18 @@ impl OutboundWorker {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(Error::Io)?;
+            .map_err(ZmqError::Io)?;
 
         // Spawn outbound thread
         let outbound_thread = std::thread::Builder::new()
             .name(OUTBOUND_THREAD_NAME.into())
             .spawn(move || rt.block_on(worker.run()))
-            .map_err(Error::Io)?;
+            .map_err(ZmqError::Io)?;
 
         Ok((actions_tx, outbound_thread))
     }
 
-    async fn run(mut self) -> Result<OutboundHandle, Error> {
+    async fn run(mut self) -> Result<OutboundHandle, ZmqError> {
         let mut encode_buf = vec![0u8; 1024];
 
         loop {
@@ -502,8 +517,16 @@ impl OutboundWorker {
                 Some(action) = self.actions_rx.recv() => {
                     (action.as_str(), self.handle_action(action, &mut encode_buf))
                 },
-                Some(event) = self.directory_rx.next()=> {
-                    (event.kind().as_str(),  self.handle_event(event, &mut encode_buf))
+                Some(event) = self.event_rx.next() => {
+                    let kind = match &event {
+                        BusEvent::Starting => "BusStarting",
+                        BusEvent::Registered(_) => "BusRegistered",
+                        BusEvent::Started => "BusStarted",
+                        BusEvent::Stopping => "BusStopping",
+                        BusEvent::Stopped => "BusStopped",
+                        BusEvent::Peer(ev) => ev.kind().as_str(),
+                    };
+                    (kind,  self.handle_event(event, &mut encode_buf))
                 },
             };
 
@@ -521,7 +544,7 @@ impl OutboundWorker {
         debug!("outbound stopped");
 
         Ok(OutboundHandle {
-            directory_rx: self.directory_rx,
+            event_rx: self.event_rx,
         })
     }
 
@@ -529,7 +552,7 @@ impl OutboundWorker {
         &mut self,
         action: OutboundAction,
         encode_buf: &mut Vec<u8>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZmqError> {
         match action {
             OutboundAction::Send {
                 message,
@@ -542,21 +565,25 @@ impl OutboundWorker {
         }
     }
 
-    fn handle_event(&mut self, event: PeerEvent, encode_buf: &mut Vec<u8>) -> Result<(), Error> {
-        if event.peer_id() == &self.peer.id {
-            return Ok(());
-        }
+    fn handle_event(&mut self, event: BusEvent, encode_buf: &mut Vec<u8>) -> Result<(), ZmqError> {
+        if let BusEvent::Peer(peer_event) = event {
+            if peer_event.peer_id() == &self.peer.id {
+                return Ok(());
+            }
 
-        match event {
-            PeerEvent::Decomissionned(peer_id) if !peer_id.is_persistence() => {
-                self.disconnect::<TerminateConnection>(&peer_id, encode_buf)
+            match peer_event {
+                PeerEvent::Decomissionned(peer) if !peer.id.is_persistence() => {
+                    self.disconnect::<TerminateConnection>(&peer.id, encode_buf)
+                }
+                // If a previously existing peer starts up with a new endpoint, make sure to disconnect
+                // the previous socket to avoid keeping stale sockets
+                PeerEvent::Started(peer) => {
+                    self.disconnect::<TerminateConnection>(&peer.id, encode_buf)
+                }
+                _ => Ok(()),
             }
-            // If a previously existing peer starts up with a new endpoint, make sure to disconnect
-            // the previous socket to avoid keeping stale sockets
-            PeerEvent::Started(peer_id) => {
-                self.disconnect::<TerminateConnection>(&peer_id, encode_buf)
-            }
-            _ => Ok(()),
+        } else {
+            Ok(())
         }
     }
 
@@ -566,7 +593,7 @@ impl OutboundWorker {
         peers: Vec<Peer>,
         context: SendContext,
         encode_buf: &mut Vec<u8>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZmqError> {
         for peer in peers {
             let was_persisted = context.was_persisted(&peer.id);
             message.was_persisted = Some(was_persisted);
@@ -583,14 +610,14 @@ impl OutboundWorker {
         peer: &Peer,
         message: &TransportMessage,
         encode_buf: &mut Vec<u8>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ZmqError> {
         let socket = self.get_connected_socket(&peer)?;
         let bytes = Self::encode(message, encode_buf)?;
 
-        socket.write_all(bytes).map_err(Error::Io)
+        socket.write_all(bytes).map_err(ZmqError::Io)
     }
 
-    fn get_socket(&mut self, peer_id: &PeerId) -> Result<&mut ZmqOutboundSocket, Error> {
+    fn get_socket(&mut self, peer_id: &PeerId) -> Result<&mut ZmqOutboundSocket, ZmqError> {
         let socket = self
             .outbound_sockets
             .entry(peer_id.clone())
@@ -600,17 +627,17 @@ impl OutboundWorker {
         Ok(socket)
     }
 
-    fn get_connected_socket(&mut self, peer: &Peer) -> Result<&mut ZmqOutboundSocket, Error> {
+    fn get_connected_socket(&mut self, peer: &Peer) -> Result<&mut ZmqOutboundSocket, ZmqError> {
         let socket = self.get_socket(&peer.id)?;
         // TODO(oktal): Handle reconnection to a different endpoint
         if !socket.is_connected() {
-            socket.connect(&peer.endpoint).map_err(Error::Outbound)?;
+            socket.connect(&peer.endpoint).map_err(ZmqError::Outbound)?;
             info!("connected to {peer}");
         }
         Ok(socket)
     }
 
-    fn disconnect<S>(&mut self, peer_id: &PeerId, encode_buf: &mut Vec<u8>) -> Result<(), Error>
+    fn disconnect<S>(&mut self, peer_id: &PeerId, encode_buf: &mut Vec<u8>) -> Result<(), ZmqError>
     where
         S: DisconnectStrategy,
     {
@@ -620,17 +647,17 @@ impl OutboundWorker {
             S::disconnect(&mut socket, &self.peer, &self.environment, encode_buf)?;
 
             // Disconnect the underlying zmq socket
-            socket.disconnect().map_err(Error::Outbound)?;
+            socket.disconnect().map_err(ZmqError::Outbound)?;
             // Dropping the socket will close the underlying zmq file descriptor
             drop(socket);
 
             Ok(())
         } else {
-            Err(Error::UnknownPeer(peer_id.clone()))
+            Err(ZmqError::UnknownPeer(peer_id.clone()))
         }
     }
 
-    async fn close_all(&mut self) -> Result<(), Error> {
+    async fn close_all(&mut self) -> Result<(), ZmqError> {
         let timeout =
             tokio::time::Duration::from(self.configuration.wait_for_end_of_stream_ack_timeout);
 
@@ -673,68 +700,75 @@ impl OutboundWorker {
     fn encode<'a>(
         message: &TransportMessage,
         encode_buf: &'a mut Vec<u8>,
-    ) -> Result<&'a [u8], Error> {
+    ) -> Result<&'a [u8], ZmqError> {
         encode_buf.clear();
-        message.encode(encode_buf).map_err(Error::Encode)?;
+        message.encode(encode_buf).map_err(ZmqError::Encode)?;
 
         Ok(&encode_buf[..])
     }
 }
 
 impl Transport for ZmqTransport {
-    type Err = Error;
+    type Err = ZmqError;
     type MessageStream = super::MessageStream;
 
-    type Future = std::future::Ready<Result<(), Self::Err>>;
+    type StartCompletionFuture = futures_util::future::Ready<Result<(), Self::Err>>;
+    type StopCompletionFuture = futures_util::future::Ready<Result<(), Self::Err>>;
+    type SendFuture = transport::future::SendFuture<OutboundAction, Self::Err>;
 
     fn configure(
         &mut self,
         peer_id: PeerId,
         environment: String,
-        directory_rx: directory::EventStream,
-    ) -> Self::Future {
+        event_rx: EventStream<BusEvent>,
+    ) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Unconfigured {
                 configuration,
                 options,
-            }) => (
+            }) => {
+                let event_rx = event_rx.boxed();
+
                 // Transition to Configured state
-                Some(Inner::Configured {
-                    configuration,
-                    options,
-                    peer_id,
-                    environment,
-                    directory_rx,
-                }),
-                Ok(()),
-            ),
-            x => (x, Err(Error::InvalidOperation)),
+                (
+                    Some(Inner::Configured {
+                        configuration,
+                        options,
+                        peer_id,
+                        environment,
+                        event_rx,
+                    }),
+                    Ok(()),
+                )
+            }
+            x => (x, Err(ZmqError::InvalidOperation)),
         };
         self.inner = inner;
-
-        std::future::ready(res)
+        res
     }
 
     fn subscribe(&self) -> Result<Self::MessageStream, Self::Err> {
         match self.inner {
             Some(Inner::Started { ref rcv_tx, .. }) => Ok(rcv_tx.subscribe().into()),
-            _ => Err(Error::InvalidOperation),
+            _ => Err(ZmqError::InvalidOperation),
         }
     }
 
-    fn start(&mut self) -> Self::Future {
-        std::future::ready(self.start())
+    fn start(&mut self) -> Result<Self::StartCompletionFuture, Self::Err> {
+        self.start()?;
+        Ok(futures_util::future::ready(Ok(())))
     }
 
-    fn stop(&mut self) -> Self::Future {
-        std::future::ready(self.stop())
+    fn stop(&mut self) -> Result<Self::StopCompletionFuture, Self::Err> {
+        self.stop()?;
+        Ok(futures_util::future::ready(Ok(())))
     }
 
     fn peer_id(&self) -> Result<&PeerId, Self::Err> {
         match self.inner.as_ref() {
             Some(Inner::Configured { ref peer_id, .. })
             | Some(Inner::Started { ref peer_id, .. }) => Ok(peer_id),
-            _ => Err(Error::InvalidOperation),
+            _ => Err(ZmqError::InvalidOperation),
         }
     }
 
@@ -746,7 +780,7 @@ impl Transport for ZmqTransport {
             | Some(Inner::Started {
                 ref environment, ..
             }) => Ok(Cow::Borrowed(environment.as_str())),
-            _ => Err(Error::InvalidOperation),
+            _ => Err(ZmqError::InvalidOperation),
         }
     }
 
@@ -756,7 +790,7 @@ impl Transport for ZmqTransport {
                 ref inbound_endpoint,
                 ..
             }) => Ok(Cow::Borrowed(inbound_endpoint.as_str())),
-            _ => Err(Error::InvalidOperation),
+            _ => Err(ZmqError::InvalidOperation),
         }
     }
 
@@ -765,7 +799,12 @@ impl Transport for ZmqTransport {
         peers: impl Iterator<Item = Peer>,
         message: TransportMessage,
         context: SendContext,
-    ) -> Self::Future {
-        std::future::ready(self.send(peers, message, context))
+    ) -> Result<Self::SendFuture, Self::Err> {
+        match self.inner.as_ref() {
+            Some(Inner::Started { ref actions_tx, .. }) => {
+                Ok(SendFuture::new(actions_tx.clone(), peers, message))
+            }
+            _ => Err(ZmqError::InvalidOperation),
+        }
     }
 }

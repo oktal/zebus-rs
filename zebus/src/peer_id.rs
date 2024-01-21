@@ -28,14 +28,17 @@ impl PeerId {
         self.value.starts_with(service_name)
     }
 
+    // TODO(oktal): don't hardcode instance name of PersistenceService
     pub fn is_persistence(&self) -> bool {
         self.is_instance_of("Abc.Zebus.PersistenceService")
     }
 
+    // TODO(oktal): don't hardcode instance name of Directory
     pub fn is_directory(&self) -> bool {
         self.is_instance_of("Abc.Zebus.Directory")
     }
 
+    // TODO(oktal): don't hardcode instance name of Directory
     pub(crate) fn directory(instance_id: usize) -> Self {
         let value = format!("Abc.Zebus.Directory.{instance_id}");
         Self { value }

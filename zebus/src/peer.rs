@@ -33,6 +33,12 @@ impl Peer {
         self.is_responding = false;
         self
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_down(mut self) -> Self {
+        self.is_up = false;
+        self
+    }
 }
 
 impl fmt::Display for Peer {

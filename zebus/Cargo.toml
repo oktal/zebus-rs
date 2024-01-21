@@ -25,7 +25,7 @@ dyn-clone = "1.0.10"
 async-trait = "0.1.69"
 futures-util = "0.3.28"
 tower-service = "0.3.2"
-tower = { version = "0.4.13", features = ["util"] }
+tower = { version = "0.4.13", features = ["util", "spawn-ready"] }
 tracing = "0.1.40"
 rand = "0.8.5"
 tokio-util = "0.7.10"

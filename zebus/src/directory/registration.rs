@@ -95,6 +95,7 @@ async fn try_register<T: Transport>(
             message.clone(),
             SendContext::default(),
         )
+        .map_err(|e| RegistrationError::Transport(e.into()))?
         .await
         .map_err(|e| RegistrationError::Transport(e.into()))?;
 

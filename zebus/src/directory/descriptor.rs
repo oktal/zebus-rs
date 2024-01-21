@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use crate::{proto::IntoProtobuf, Peer, Subscription};
+use crate::{proto::IntoProtobuf, Peer, PeerId, Subscription};
 
 pub(crate) mod proto {
     #[derive(Clone, prost::Message)]
@@ -40,6 +40,13 @@ pub struct PeerDescriptor {
     /// Optional flag indicating whether the current [`Peer`] has been started
     /// with a debugger attached
     pub has_debugger_attached: Option<bool>,
+}
+
+impl PeerDescriptor {
+    /// Returns the [`PeerId`] of this peer
+    pub fn id(&self) -> &PeerId {
+        &self.peer.id
+    }
 }
 
 impl IntoProtobuf for PeerDescriptor {

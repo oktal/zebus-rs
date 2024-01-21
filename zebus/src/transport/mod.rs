@@ -1,11 +1,15 @@
 //! Transport base layer for Zebus peer-to-peer communication
+pub(crate) mod future;
 mod message_execution_completed;
 mod originator_info;
 mod send_context;
 mod transport_message;
 pub mod zmq;
 
-use crate::{directory, BoxError, Message, MessageId, Peer, PeerId};
+use crate::{
+    bus::BusEvent, persistence::transport::PersistentTransport, sync::stream::EventStream,
+    BoxError, BusConfiguration, Message, Peer, PeerId,
+};
 use futures_core::{future::BoxFuture, Future, Stream};
 use futures_util::FutureExt;
 use std::borrow::Cow;
@@ -19,35 +23,51 @@ pub use transport_message::TransportMessage;
 pub trait Transport: Send + Sync + 'static {
     /// The associated error type which can be returned from the transport layer
     /// The error type must be convertible to a [`BoxError`]
-    type Err: Into<BoxError> + Send;
+    type Err: Into<BoxError> + std::error::Error + Send;
 
     /// Type of [`TransportMessage`] [`Stream`]
     /// The stream is used to receive messages from the transport
     type MessageStream: Stream<Item = TransportMessage> + Unpin + Send + 'static;
 
-    type Future: Future<Output = Result<(), Self::Err>> + Send;
+    /// A [`Future`] type returned by `start` that will resolve when the start operation completes
+    /// Note that the future does not need to be poll-ed or await-ed for the operation to make
+    /// progress.
+    /// That start operation should start immediately and return a [`Future`] type that can
+    /// be await-ed to wait for the start to complete
+    type StartCompletionFuture: Future<Output = Result<(), Self::Err>> + Send + 'static;
+
+    /// A [`Future`] type returned by `stop` that will resolve when the stop operation completes
+    /// Note that the future does not need to be poll-ed or await-ed for the operation to make
+    /// progress.
+    /// That stop operation should start immediately and return a [`Future`] type that can
+    /// be await-ed to wait for the stop to complete
+    type StopCompletionFuture: Future<Output = Result<(), Self::Err>> + Send + 'static;
+
+    /// A [`Future`] type returned by `send`
+    /// Note that this future must be polled-ed or await-ed for the operation to make progress
+    type SendFuture: Future<Output = Result<(), Self::Err>> + Send + 'static;
 
     /// Configure this transport layer with a [`PeerId`]
     fn configure(
         &mut self,
         peer_id: PeerId,
         environment: String,
-        directory_rx: directory::EventStream,
-    ) -> Self::Future;
+        event: EventStream<BusEvent>,
+    ) -> Result<(), Self::Err>;
 
     /// Create a new subscription to the transport messages stream
     fn subscribe(&self) -> Result<Self::MessageStream, Self::Err>;
 
     /// Start the transport layer
-    fn start(&mut self) -> Self::Future;
+    fn start(&mut self) -> Result<Self::StartCompletionFuture, Self::Err>;
 
     /// Stop the transport layer
-    fn stop(&mut self) -> Self::Future;
+    fn stop(&mut self) -> Result<Self::StopCompletionFuture, Self::Err>;
 
     /// Get the [`PeerId`] associated with the transport layer.
     /// This can fail if the transport layer has not been configured properly
     fn peer_id(&self) -> Result<&PeerId, Self::Err>;
-    ///
+
     /// Retrieve the environment associated with this transport layer
     /// This can fail if the transport layer has not been configured properly
     fn environment(&self) -> Result<Cow<'_, str>, Self::Err>;
@@ -62,7 +82,7 @@ pub trait Transport: Send + Sync + 'static {
         peers: impl Iterator<Item = Peer>,
         message: TransportMessage,
         context: SendContext,
-    ) -> Self::Future;
+    ) -> Result<Self::SendFuture, Self::Err>;
 }
 
 /// Extension methods for [`Transport`]
@@ -79,26 +99,18 @@ pub trait TransportExt: Transport {
     }
 
     /// Send one [`Message`] to a destination [`Peer`]
-    // NOTE(oktal): we could avoid boxing the future by creating our own
-    // Future response type but this extension function should not be
-    // used often enough to justify the need for it
     fn send_one<'a>(
         &'a mut self,
         peer: Peer,
         message: &dyn Message,
         context: SendContext,
-    ) -> futures_util::future::Either<
-        futures_util::future::Ready<Result<uuid::Uuid, <Self as Transport>::Err>>,
-        BoxFuture<'a, Result<uuid::Uuid, <Self as Transport>::Err>>,
-    > {
+    ) -> BoxFuture<Result<uuid::Uuid, Self::Err>> {
         match self.create_message(message) {
-            Ok((id, msg)) => async move {
-                self.send(std::iter::once(peer), msg, context).await?;
+            Ok((id, msg)) => Box::pin(async move {
+                self.send(std::iter::once(peer), msg, context)?.await?;
                 Ok(id)
-            }
-            .boxed()
-            .right_future(),
-            Err(e) => futures_util::future::ready(Err(e)).left_future(),
+            }),
+            Err(e) => futures_util::future::ready(Err(e)).boxed(),
         }
     }
 
@@ -110,6 +122,13 @@ pub trait TransportExt: Transport {
         let environment = self.environment()?.into_owned();
 
         Ok(TransportMessage::create(&self_peer, environment, message))
+    }
+
+    fn persistent(self, configuration: BusConfiguration) -> PersistentTransport<Self>
+    where
+        Self: Sized,
+    {
+        PersistentTransport::new(configuration, self)
     }
 }
 

@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::proto::{FromProtobuf, IntoProtobuf};
 
 pub(crate) mod proto {
@@ -11,7 +13,7 @@ pub(crate) mod proto {
 }
 
 /// Id of a message that is sent on the bus
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct MessageId(uuid::Uuid);
 
 impl MessageId {
@@ -41,5 +43,11 @@ impl IntoProtobuf for MessageId {
         proto::MessageId {
             value: self.0.into(),
         }
+    }
+}
+
+impl Display for MessageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }

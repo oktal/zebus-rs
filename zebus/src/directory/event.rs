@@ -1,4 +1,4 @@
-use crate::PeerId;
+use crate::{Peer, PeerId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PeerEventKind {
@@ -21,26 +21,26 @@ impl PeerEventKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PeerEvent {
-    /// A new peer [`PeerId`] has been started
-    Started(PeerId),
+    /// A new peer as been started
+    Started(Peer),
 
-    /// Peer [`PeerId`] has been stopped
-    Stopped(PeerId),
+    /// Peer been stopped
+    Stopped(Peer),
 
-    /// Peer [`PeerId`] has been updated
-    Updated(PeerId),
+    /// Peer has been updated
+    Updated(Peer),
 
-    /// Peer [`PeerId`] has been decomissionned
-    Decomissionned(PeerId),
+    /// Peer has been decomissionned
+    Decomissionned(Peer),
 }
 
 impl PeerEvent {
     pub(crate) fn peer_id(&self) -> &PeerId {
         match self {
-            PeerEvent::Started(peer_id)
-            | PeerEvent::Stopped(peer_id)
-            | PeerEvent::Updated(peer_id)
-            | PeerEvent::Decomissionned(peer_id) => peer_id,
+            PeerEvent::Started(peer)
+            | PeerEvent::Stopped(peer)
+            | PeerEvent::Updated(peer)
+            | PeerEvent::Decomissionned(peer) => &peer.id,
         }
     }
 

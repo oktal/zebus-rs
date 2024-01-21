@@ -14,13 +14,14 @@ use tower_service::Service;
 use tracing::{error, info};
 
 use crate::{
-    bus::{CommandResult, Error, RegistrationError, Result, SendError},
+    bus::{BusEvent, CommandResult, Error, RegistrationError, Result, SendError},
     core::{MessagePayload, SubscriptionMode},
     directory::{self, Directory, Registration},
     dispatch::{
         self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, MessageDispatcher,
     },
     proto::FromProtobuf,
+    sync::stream::EventStream,
     transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
     BindingKey, BusConfiguration, Command, CommandError, Event, Message, MessageExt, MessageId,
     Peer, PeerId, Subscription,
@@ -51,6 +52,8 @@ enum State<T: Transport, D: Directory> {
         transport: T,
         dispatcher: MessageDispatcher,
 
+        event_tx: EventStream<BusEvent>,
+
         directory: Arc<D>,
         peer_id: PeerId,
         environment: String,
@@ -60,6 +63,7 @@ enum State<T: Transport, D: Directory> {
         core: Arc<Core<T, D>>,
 
         configuration: BusConfiguration,
+        event_tx: EventStream<BusEvent>,
         directory: Arc<D>,
         peer_id: PeerId,
         environment: String,
@@ -194,6 +198,7 @@ impl<T: Transport> Sender<T> {
             SendEntry::Message { message, peers } => self
                 .transport
                 .send(peers.into_iter(), message, SendContext::default())
+                .map_err(|e| Error::Transport(e.into()))?
                 .await
                 .map_err(|e| Error::Transport(e.into())),
             SendEntry::Unregister { tx } => {
@@ -255,6 +260,8 @@ struct Receiver<T: Transport, D: Directory> {
     environment: String,
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
     directory: Arc<D>,
+    directory_rx: D::EventStream,
+    event_tx: EventStream<BusEvent>,
     dispatcher: MessageDispatcher,
     cancellation: CancellationToken,
 }
@@ -266,6 +273,7 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
         self_peer: Peer,
         environment: String,
         directory: Arc<D>,
+        event_tx: EventStream<BusEvent>,
         dispatcher: MessageDispatcher,
         cancellation: CancellationToken,
     ) -> (
@@ -276,6 +284,8 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
         let pending_commands = Arc::new(Mutex::new(HashMap::new()));
         let (dispatch_tx, dispatch_rx) = mpsc::channel(128);
 
+        let directory_rx = directory.subscribe();
+
         (
             Self {
                 rcv_rx: transport_rx,
@@ -285,6 +295,8 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
                 environment,
                 pending_commands: pending_commands.clone(),
                 directory,
+                directory_rx,
+                event_tx,
                 dispatcher,
                 cancellation,
             },
@@ -298,6 +310,10 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
             tokio::select! {
                 // We have been cancelled
                 _ = self.cancellation.cancelled() => break,
+
+                Some(peer_event) = self.directory_rx.next() => {
+                    let _ = self.event_tx.send(BusEvent::Peer(peer_event));
+                }
 
                 // Handle inbound TransportMessage
                 Some(message) = self.rcv_rx.next() => {
@@ -701,16 +717,12 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 directory,
                 dispatcher,
             }) => {
-                // Subscribe to the directory event stream
-                let directory_rx = directory.subscribe();
-
-                // Pin the directory event stream
-                let directory_rx = Box::pin(directory_rx);
+                // Create event stream for bus events
+                let event = EventStream::new(32);
 
                 // Configure transport
                 transport
-                    .configure(peer_id.clone(), environment.clone(), directory_rx)
-                    .await
+                    .configure(peer_id.clone(), environment.clone(), event.clone())
                     .map_err(|e| Error::Transport(e.into()))?;
 
                 (
@@ -718,6 +730,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                         configuration,
                         transport,
                         dispatcher,
+                        event_tx: event,
                         directory,
                         peer_id,
                         environment,
@@ -741,15 +754,17 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 configuration,
                 mut transport,
                 mut dispatcher,
+                event_tx,
                 peer_id,
                 directory,
                 environment,
             }) => {
+                if let Err(e) = event_tx.send(BusEvent::Starting) {
+                    error!("failed to publish {:?}", e.0);
+                }
+
                 // Start transport
-                transport
-                    .start()
-                    .await
-                    .map_err(|e| Error::Transport(e.into()))?;
+                let start_future = transport.start().map_err(|e| Error::Transport(e.into()))?;
 
                 // Setup peer
                 let endpoint = transport
@@ -784,12 +799,22 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 .await?;
 
                 // Handle peer directory response
+                // TODO(oktal): properly handle error
                 if let Ok(response) = registration.result {
+                    let peers = response.peers.clone().into_iter().map(|d| d.peer).collect();
+
+                    if let Err(e) = event_tx.send(BusEvent::Registered(peers)) {
+                        error!("failed to publish {:?}", e.0);
+                    }
+
                     directory.handle_registration(response);
                 }
 
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
+
+                // Wait for transport to start
+                start_future.await.map_err(|e| Error::Transport(e.into()))?;
 
                 // Create transport reception stream
                 let rcv_rx = transport
@@ -810,6 +835,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                     self_peer.clone(),
                     environment.clone(),
                     directory.clone(),
+                    event_tx.clone(),
                     dispatcher,
                     cancellation.clone(),
                 );
@@ -831,11 +857,16 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 // Start receiver
                 let rx_handle = tokio::spawn(receiver.run(core.clone()));
 
+                if let Err(e) = event_tx.send(BusEvent::Started) {
+                    error!("failed to publish {:?}", e.0);
+                }
+
                 // Transition to started state
                 (
                     Some(State::Started {
                         core,
                         configuration,
+                        event_tx,
                         directory,
                         peer_id,
                         environment,
@@ -862,13 +893,19 @@ impl<T: Transport, D: Directory> Bus<T, D> {
             Some(State::Started {
                 core,
                 configuration,
+                event_tx,
                 directory,
                 peer_id,
                 environment,
                 cancellation,
                 tx_handle,
                 rx_handle,
+                ..
             }) => {
+                if let Err(e) = event_tx.send(BusEvent::Stopping) {
+                    error!("failed to publish {:?}", e.0);
+                }
+
                 // Unregister from directory
                 core.unregister().await?;
 
@@ -887,17 +924,22 @@ impl<T: Transport, D: Directory> Bus<T, D> {
 
                 // Stop the transport
                 let mut transport = tx_handle.transport;
-                transport
-                    .stop()
-                    .await
-                    .map_err(|e| Error::Transport(e.into()))?;
+                let stop_future = transport.stop().map_err(|e| Error::Transport(e.into()))?;
 
-                // Transition to configured state
+                if let Err(e) = event_tx.send(BusEvent::Stopped) {
+                    error!("failed to publish {:?}", e.0);
+                }
+
+                // Wait for transport to stop
+                stop_future.await.map_err(|e| Error::Transport(e.into()))?;
+
+                // Transport to Configured state
                 (
                     Some(State::Configured {
                         configuration,
                         transport,
                         dispatcher,
+                        event_tx,
                         directory,
                         peer_id,
                         environment,
@@ -1235,18 +1277,21 @@ mod tests {
         type Err = MemoryTransportError;
         type MessageStream = crate::sync::stream::BroadcastStream<TransportMessage>;
 
-        type Future = std::future::Ready<std::result::Result<(), MemoryTransportError>>;
+        type StartCompletionFuture =
+            futures_util::future::Ready<std::result::Result<(), Self::Err>>;
+        type StopCompletionFuture = futures_util::future::Ready<std::result::Result<(), Self::Err>>;
+        type SendFuture = futures_util::future::Ready<std::result::Result<(), Self::Err>>;
 
         fn configure(
             &mut self,
             peer_id: PeerId,
             environment: String,
-            _directory_rx: directory::EventStream,
-        ) -> Self::Future {
+            _event_rx: EventStream<BusEvent>,
+        ) -> std::result::Result<(), MemoryTransportError> {
             let mut inner = self.inner.lock().unwrap();
             inner.peer_id = Some(peer_id);
             inner.environment = Some(environment);
-            std::future::ready(Ok(()))
+            Ok(())
         }
 
         fn subscribe(&self) -> std::result::Result<Self::MessageStream, Self::Err> {
@@ -1257,16 +1302,20 @@ mod tests {
             }
         }
 
-        fn start(&mut self) -> Self::Future {
+        fn start(
+            &mut self,
+        ) -> std::result::Result<Self::StartCompletionFuture, MemoryTransportError> {
             let mut inner = self.inner.lock().unwrap();
             let (rcv_tx, _) = broadcast::channel(128);
             inner.started = true;
             inner.rcv_tx = Some(rcv_tx);
-            std::future::ready(Ok(()))
+            Ok(futures_util::future::ready(Ok(())))
         }
 
-        fn stop(&mut self) -> Self::Future {
-            std::future::ready(Ok(()))
+        fn stop(
+            &mut self,
+        ) -> std::result::Result<Self::StopCompletionFuture, MemoryTransportError> {
+            Ok(futures_util::future::ready(Ok(())))
         }
 
         fn peer_id(&self) -> std::result::Result<&PeerId, Self::Err> {
@@ -1286,7 +1335,7 @@ mod tests {
             peers: impl Iterator<Item = Peer>,
             message: TransportMessage,
             _context: SendContext,
-        ) -> Self::Future {
+        ) -> std::result::Result<Self::SendFuture, Self::Err> {
             let peers: Vec<_> = peers.collect();
 
             let mut inner = self.inner.lock().unwrap();
@@ -1317,7 +1366,7 @@ mod tests {
                 notify.notify_waiters();
             }
 
-            std::future::ready(Ok(()))
+            Ok(futures_util::future::ready(Ok(())))
         }
     }
 

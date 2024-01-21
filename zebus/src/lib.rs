@@ -11,6 +11,7 @@ mod message_type_descriptor;
 mod message_type_id;
 mod peer;
 mod peer_id;
+mod persistence;
 pub mod proto;
 mod routing;
 mod subscription;

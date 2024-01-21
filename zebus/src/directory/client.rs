@@ -189,14 +189,14 @@ impl PeerEntry {
     }
 }
 
-struct PeerUpdate<'a> {
-    id: &'a PeerId,
+struct PeerUpdate {
+    peer: Peer,
     events_tx: broadcast::Sender<PeerEvent>,
 }
 
-impl PeerUpdate<'_> {
-    fn raise(&self, event_fn: impl FnOnce(PeerId) -> PeerEvent) {
-        if let Err(_) = self.events_tx.send(event_fn(self.id.clone())) {}
+impl PeerUpdate {
+    fn raise(self, event_fn: impl FnOnce(Peer) -> PeerEvent) {
+        let _ = self.events_tx.send(event_fn(self.peer));
     }
 
     fn forget(self) {}
@@ -288,13 +288,14 @@ impl DirectoryState {
     }
 
     fn add_or_update(&mut self, descriptor: PeerDescriptor) -> PeerUpdate {
-        let peer_id = descriptor.peer.id.clone();
+        let peer = descriptor.peer.clone();
+        let peer_id = peer.id.clone();
         let subscriptions = descriptor.subscriptions.clone();
         let timestamp_utc = descriptor.timestamp_utc.clone();
 
         let peer_entry = self
             .peers
-            .entry(peer_id.clone())
+            .entry(peer_id)
             .and_modify(|e| e.update(&descriptor))
             .or_insert_with(|| PeerEntry::new(descriptor));
 
@@ -303,38 +304,42 @@ impl DirectoryState {
         peer_entry.set_subscriptions(index, subscriptions, timestamp_utc);
 
         PeerUpdate {
-            id: &peer_entry.peer.id,
+            peer,
             events_tx: self.events_tx.clone(),
         }
     }
 
-    fn set_subscriptions_for<'a>(
+    fn set_subscriptions_for(
         &mut self,
-        peer_id: &'a PeerId,
+        peer_id: &PeerId,
         subscriptions: Vec<SubscriptionsForType>,
         timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Option<PeerUpdate<'a>> {
-        let mut modified = false;
-        self.peers.entry(peer_id.clone()).and_modify(|e| {
+    ) -> Option<PeerUpdate> {
+        if let Some(entry) = self.peers.get_mut(peer_id) {
             if let Some(timestamp) = timestamp_utc {
-                if let Some(entry) = e.checked_mut(timestamp) {
+                if let Some(entry) = entry.checked_mut(timestamp) {
                     entry.set_subscriptions_for(
                         &mut self.subscriptions,
                         subscriptions,
                         timestamp_utc,
                     );
-                    modified = true;
+                    Some(PeerUpdate {
+                        peer: entry.peer.clone(),
+                        events_tx: self.events_tx.clone(),
+                    })
+                } else {
+                    None
                 }
             } else {
-                e.set_subscriptions_for(&mut self.subscriptions, subscriptions, timestamp_utc);
-                modified = true;
+                entry.set_subscriptions_for(&mut self.subscriptions, subscriptions, timestamp_utc);
+                Some(PeerUpdate {
+                    peer: entry.peer.clone(),
+                    events_tx: self.events_tx.clone(),
+                })
             }
-        });
-
-        modified.then_some(PeerUpdate {
-            id: peer_id,
-            events_tx: self.events_tx.clone(),
-        })
+        } else {
+            None
+        }
     }
 
     fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
@@ -343,24 +348,25 @@ impl DirectoryState {
         self.subscriptions.get(&message_type, &binding_key)
     }
 
-    fn update_with<'a>(
+    fn update_with(
         &mut self,
-        peer_id: &'a PeerId,
+        peer_id: &PeerId,
         timestamp: Option<chrono::DateTime<chrono::Utc>>,
         f: impl FnOnce(&mut PeerEntry),
-    ) -> Option<PeerUpdate<'a>> {
+    ) -> Option<PeerUpdate> {
         let entry = self.entry_mut(peer_id, timestamp)?;
         f(entry);
         Some(PeerUpdate {
-            id: peer_id,
+            peer: entry.peer.clone(),
             events_tx: self.events_tx.clone(),
         })
     }
 
-    fn remove<'a>(&mut self, peer_id: &'a PeerId) -> Option<PeerUpdate<'a>> {
-        self.peers.remove(peer_id)?;
+    fn remove(&mut self, peer_id: &PeerId) -> Option<PeerUpdate> {
+        let entry = self.peers.remove(peer_id)?;
+        let peer = entry.peer;
         Some(PeerUpdate {
-            id: peer_id,
+            peer,
             events_tx: self.events_tx.clone(),
         })
     }
@@ -827,13 +833,13 @@ mod tests {
             .await
             .unwrap();
 
-        let peer_id = fixture.peer_id();
+        let peer = fixture.peer();
 
         assert_eq!(fixture.client.get(&fixture.peer_id()), Some(fixture.peer()));
         assert_eq!(fixture.client.get(&PeerId::new("Test.Peer.0")), None);
         assert_eq!(
             fixture.try_recv_n(1).await,
-            vec![Some(PeerEvent::Started(peer_id))]
+            vec![Some(PeerEvent::Started(peer))]
         );
     }
 
@@ -843,6 +849,7 @@ mod tests {
         let descriptor = fixture.descriptor.clone();
 
         let peer = fixture.peer();
+        let peer_id = fixture.peer_id();
         let timestamp_utc = chrono::Utc::now();
 
         fixture
@@ -855,7 +862,7 @@ mod tests {
             .service
             .invoke(
                 PeerStopped {
-                    id: peer.id.clone(),
+                    id: peer_id.clone(),
                     endpoint: Some(peer.endpoint.clone()),
                     timestamp_utc: Some(timestamp_utc.into_protobuf()),
                 },
@@ -863,8 +870,6 @@ mod tests {
             )
             .await
             .unwrap();
-
-        let peer_id = fixture.peer_id();
 
         let peer_stopped = fixture.client.get(&peer_id);
         assert_eq!(
@@ -881,8 +886,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Some(PeerEvent::Started(peer_id.clone())),
-                Some(PeerEvent::Stopped(peer_id.clone()))
+                Some(PeerEvent::Started(peer.clone())),
+                Some(PeerEvent::Stopped(
+                    peer.clone().set_down().set_not_responding()
+                ))
             ]
         );
     }
@@ -904,21 +911,23 @@ mod tests {
             id: 0xBADC0FFEE,
         };
 
-        let peer = Peer::test();
+        let test_peer = Peer::test();
         let peer_desc_1 = PeerDescriptor {
-            peer: peer.clone(),
+            peer: test_peer.clone(),
             subscriptions: vec![Fixture::create_subscription(&command_1)],
             is_persistent: true,
             timestamp_utc: None,
             has_debugger_attached: Some(false),
         };
         let peer_desc_2 = PeerDescriptor {
-            peer: peer.clone(),
+            peer: test_peer.clone(),
             subscriptions: vec![Fixture::create_subscription(&command_2)],
             is_persistent: true,
             timestamp_utc: None,
             has_debugger_attached: Some(false),
         };
+
+        let peer = fixture.peer();
 
         fixture
             .service
@@ -935,8 +944,8 @@ mod tests {
             .service
             .invoke(
                 PeerStopped {
-                    id: peer.id.clone(),
-                    endpoint: Some(peer.endpoint.clone()),
+                    id: test_peer.id.clone(),
+                    endpoint: Some(test_peer.endpoint.clone()),
                     timestamp_utc: None,
                 },
                 fixture.bus(),
@@ -955,12 +964,12 @@ mod tests {
             .await
             .unwrap();
 
-        let peer_1 = fixture.client.get(&peer.id);
+        let peer_1 = fixture.client.get(&test_peer.id);
         assert_eq!(
             peer_1,
             Some(Peer {
-                id: peer.id.clone(),
-                endpoint: peer.endpoint.clone(),
+                id: test_peer.id.clone(),
+                endpoint: test_peer.endpoint.clone(),
                 is_up: true,
                 is_responding: true
             })
@@ -968,16 +977,18 @@ mod tests {
         let peers_1 = fixture.client.get_peers_handling(&command_1);
         assert_eq!(peers_1, vec![]);
         let peers_2 = fixture.client.get_peers_handling(&command_2);
-        assert_eq!(peers_2, vec![peer.clone()]);
+        assert_eq!(peers_2, vec![test_peer.clone()]);
         let peers_3 = fixture.client.get_peers_handling(&command_3);
         assert_eq!(peers_3, vec![]);
 
         assert_eq!(
             fixture.try_recv_n(4).await,
             vec![
-                Some(PeerEvent::Started(peer.id.clone())),
-                Some(PeerEvent::Stopped(peer.id.clone())),
-                Some(PeerEvent::Started(peer.id.clone())),
+                Some(PeerEvent::Started(test_peer.clone())),
+                Some(PeerEvent::Stopped(
+                    test_peer.clone().set_not_responding().set_down()
+                )),
+                Some(PeerEvent::Started(test_peer.clone())),
                 None,
             ]
         );
@@ -1004,6 +1015,7 @@ mod tests {
             .await
             .unwrap();
 
+        let peer = fixture.peer();
         let peer_id = fixture.peer_id();
         let now = chrono::Utc::now();
 
@@ -1024,12 +1036,13 @@ mod tests {
         assert_eq!(peers_1, vec![fixture.peer()]);
         let peers_2 = fixture.client.get_peers_handling(&command_2);
         assert!(peers_2.is_empty());
+
         let events = fixture.try_recv_n(2).await;
         assert_eq!(
             events,
             vec![
-                Some(PeerEvent::Started(peer_id.clone())),
-                Some(PeerEvent::Updated(peer_id.clone()))
+                Some(PeerEvent::Started(peer.clone())),
+                Some(PeerEvent::Updated(peer.clone()))
             ]
         );
     }
@@ -1056,6 +1069,7 @@ mod tests {
             .await
             .unwrap();
 
+        let peer = fixture.peer();
         let peer_id = fixture.peer_id();
         let now = chrono::Utc::now();
 
@@ -1092,8 +1106,8 @@ mod tests {
         assert_eq!(
             fixture.try_recv_n(3).await,
             vec![
-                Some(PeerEvent::Started(peer_id.clone())),
-                Some(PeerEvent::Updated(peer_id.clone())),
+                Some(PeerEvent::Started(peer.clone())),
+                Some(PeerEvent::Updated(peer.clone())),
                 None
             ]
         );

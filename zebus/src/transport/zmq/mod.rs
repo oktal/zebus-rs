@@ -23,7 +23,7 @@ type MessageStream = crate::sync::stream::BroadcastStream<TransportMessage>;
 
 /// Associated Error type with zmq
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum ZmqError {
     /// Inbound error
     #[error("receive error {0}")]
     Inbound(inbound::Error),
@@ -53,10 +53,20 @@ pub enum Error {
     #[error("error decoding protobuf message {0}")]
     Decode(prost::DecodeError),
 
+    /// Attemtping to send to an async channel failed
+    #[error("failed to send message")]
+    Send,
+
     /// An operation was attempted while the [`ZmqTransport`] was in an invalid state for the
     /// operation
     #[error("An operation was attempted while the transport was not in a valid state")]
     InvalidOperation,
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+impl From<super::future::SendError> for ZmqError {
+    fn from(_value: super::future::SendError) -> Self {
+        Self::Send
+    }
+}
+
+pub type Result<T> = std::result::Result<T, ZmqError>;

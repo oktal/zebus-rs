@@ -10,7 +10,7 @@ use prost::Message;
 
 use crate::{core::MessagePayload, transport::TransportMessage, Command, Peer};
 
-use super::outbound::ZmqOutboundSocket;
+use super::{outbound::ZmqOutboundSocket, ZmqError};
 
 #[derive(prost::Message, Command, Clone)]
 #[zebus(namespace = "Abc.Zebus.Transport")]
@@ -62,6 +62,6 @@ pub(super) fn close(
 
     let rx = crate::sync::stream::BroadcastStream::from(rx);
 
-    socket.write_all(&buf).map_err(super::Error::Io)?;
+    socket.write_all(&buf).map_err(ZmqError::Io)?;
     Ok(CloseFuture { rx, start })
 }

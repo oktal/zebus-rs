@@ -1,4 +1,4 @@
-use crate::{bcl, proto};
+use crate::proto;
 
 /// [`Command`] to send to register a [`Peer`] to the directory
 #[derive(prost::Message, crate::Command, Clone)]

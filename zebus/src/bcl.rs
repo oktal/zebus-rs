@@ -32,6 +32,14 @@ impl FromProtobuf for uuid::Uuid {
     }
 }
 
+impl IntoProtobuf for uuid::Uuid {
+    type Output = Guid;
+
+    fn into_protobuf(self) -> Self::Output {
+        Guid::from(self)
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
 pub enum TimeSpanScale {

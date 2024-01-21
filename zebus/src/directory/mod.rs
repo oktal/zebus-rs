@@ -40,7 +40,7 @@ pub trait DirectoryReader: Send + Sync + 'static {
 /// A description trait for a directory
 pub(crate) trait Directory: DirectoryReader {
     /// Type of [`PeerEvent`] [`Stream`] that the directory will yield
-    type EventStream: Stream<Item = PeerEvent> + Send + Sync + 'static;
+    type EventStream: Stream<Item = PeerEvent> + Unpin + Send + Sync + 'static;
 
     /// Type of [`Handler`] that will be used to handle commands and events related to the
     /// directory

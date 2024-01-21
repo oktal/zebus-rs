@@ -7,7 +7,7 @@ use std::{
 
 use futures_core::Stream;
 use pin_project::pin_project;
-use tokio::sync::broadcast;
+use tokio::sync::broadcast::{self, error::SendError};
 
 /// Extension trait for [`Stream`]
 pub(crate) trait StreamExt: Stream {
@@ -110,5 +110,42 @@ where
                 _ => Poll::Ready(Some(None)),
             }
         }
+    }
+}
+
+/// A stream of events
+#[derive(Clone)]
+pub struct EventStream<E> {
+    tx: broadcast::Sender<E>,
+}
+
+/// A boxed stream of events
+pub type BoxEventStream<E> = Pin<Box<dyn Stream<Item = E> + Send + Sync + 'static>>;
+
+impl<E> EventStream<E>
+where
+    E: Clone,
+{
+    pub(crate) fn new(capacity: usize) -> Self {
+        let (tx, _rx) = broadcast::channel(capacity);
+        Self { tx }
+    }
+
+    pub(crate) fn send(&self, event: E) -> Result<usize, SendError<E>> {
+        self.tx.send(event)
+    }
+}
+
+impl<E> EventStream<E>
+where
+    E: Clone + Send + 'static,
+{
+    pub(crate) fn stream(&self) -> impl Stream<Item = E> {
+        let rx = self.tx.subscribe();
+        BroadcastStream::from(rx)
+    }
+
+    pub(crate) fn boxed(&self) -> BoxEventStream<E> {
+        Box::pin(self.stream())
     }
 }

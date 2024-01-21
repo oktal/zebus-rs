@@ -5,7 +5,7 @@ use crate::{
     },
     directory::{self, Directory},
     dispatch::{InvokerService, MessageDispatcher},
-    transport::Transport,
+    transport::{Transport, TransportExt},
     Bus, BusConfiguration, ConfigurationProvider, PeerId,
 };
 
@@ -152,7 +152,12 @@ where
         let client = directory::Client::new();
 
         // Create the bus
-        let bus = super::bus::Bus::new(configuration, transport, client, dispatcher);
+        let bus = super::bus::Bus::new(
+            configuration.clone(),
+            transport.persistent(configuration),
+            client,
+            dispatcher,
+        );
 
         // Configure the bus
         bus.configure(peer_id, environment).await?;

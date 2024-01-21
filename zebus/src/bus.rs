@@ -1,14 +1,16 @@
 use core::fmt;
-use std::any::Any;
+use std::{any::Any, pin::Pin};
 
 use async_trait::async_trait;
 use dyn_clone::DynClone;
+use futures_core::Stream;
 use thiserror::Error;
 use tokio::task::JoinError;
 
 use crate::{
     core::{MessageDescriptor, MessageFlags, MessagePayload, RawMessage, Upcast, UpcastFrom},
-    directory, dispatch,
+    directory::{self, event::PeerEvent},
+    dispatch,
     transport::MessageExecutionCompleted,
     BoxError, MessageType, Peer, PeerId,
 };
@@ -29,6 +31,8 @@ impl fmt::Display for RegistrationError {
         Ok(())
     }
 }
+
+impl std::error::Error for RegistrationError {}
 
 impl RegistrationError {
     pub(crate) fn new() -> Self {
@@ -72,7 +76,7 @@ pub enum SendError {
 #[derive(Debug, Error)]
 pub enum Error {
     /// Transport error
-    #[error("an error occured during a transport operation {0}")]
+    #[error(transparent)]
     Transport(BoxError),
 
     /// An error occured when attempting to retrieve a configuration
@@ -80,15 +84,16 @@ pub enum Error {
     Configuration(BoxError),
 
     /// None of the directories tried for registration succeeded
-    #[error("{0}")]
+    //#[error("{0}")]
+    #[error(transparent)]
     Registration(RegistrationError),
 
     /// An error occured when sending a message to one or multiple peers
-    #[error("{0}")]
+    #[error(transparent)]
     Send(SendError),
 
     /// An error occured when attempting to dispatch a message
-    #[error("an error occured on the dispatcher {0}")]
+    #[error("an error occured on the dispatcher: {0}")]
     Dispatch(dispatch::Error),
 
     #[error("error waiting for task to terminate: {0}")]
@@ -276,6 +281,33 @@ pub trait Bus: Send + Sync + 'static {
     /// Send an [`Event`] to the handling [`Peer`] peers
     async fn publish(&self, event: &dyn Event) -> Result<()>;
 }
+
+/// Event that can be raised by the [`Bus`]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum BusEvent {
+    /// Event raise when the bus is starting
+    Starting,
+
+    /// When starting, the bus will first attempt to register to the directory
+    /// Event raised when the bus successfully registered to the directory with
+    /// the list of current peers
+    Registered(Vec<Peer>),
+
+    /// Event raised when the bus has started after registering to the directory
+    Started,
+
+    /// Event raised when the bus is stopping
+    Stopping,
+
+    /// Event raised when the bus has stopped
+    Stopped,
+
+    /// Event raised by the directory
+    Peer(PeerEvent),
+}
+
+/// A boxed [`BusEvent`] event stream
+pub type BusEventStream = Pin<Box<dyn Stream<Item = BusEvent> + Send + Sync + 'static>>;
 
 /// A [`crate::Bus`] that does nothing
 pub(crate) struct NoopBus;
