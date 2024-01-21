@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .handles(Router::with_state(()).handles(echo.into_handler()))
         .with_transport(zmq)
         .create()
-        .unwrap();
+        .await?;
 
     if let Err(e) = bus.start().await {
         error!("failed to start bus: {e}");

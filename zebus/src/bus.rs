@@ -259,7 +259,7 @@ impl<T: Message + crate::core::Event> Event for T {}
 #[async_trait]
 pub trait Bus: Send + Sync + 'static {
     /// Configure the bus with the provided [`PeerId`] `peer_id` and `environment`
-    fn configure(&self, peer_id: PeerId, environment: String) -> Result<()>;
+    async fn configure(&self, peer_id: PeerId, environment: String) -> Result<()>;
 
     /// Start the bus
     async fn start(&self) -> Result<()>;
@@ -282,7 +282,7 @@ pub(crate) struct NoopBus;
 
 #[async_trait]
 impl Bus for NoopBus {
-    fn configure(&self, _peer_id: PeerId, _environment: String) -> Result<()> {
+    async fn configure(&self, _peer_id: PeerId, _environment: String) -> Result<()> {
         Err(Error::InvalidOperation)
     }
 

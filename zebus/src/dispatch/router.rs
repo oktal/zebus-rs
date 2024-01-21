@@ -508,7 +508,7 @@ mod test {
 
     #[async_trait]
     impl Bus for TestBus {
-        fn configure(&self, _peer_id: PeerId, _environment: String) -> bus::Result<()> {
+        async fn configure(&self, _peer_id: PeerId, _environment: String) -> bus::Result<()> {
             Err(bus::Error::InvalidOperation)
         }
 

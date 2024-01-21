@@ -79,6 +79,54 @@ enum Inner {
     },
 }
 
+struct InboundWorker {
+    /// Inbound socket
+    inbound_socket: ZmqInboundSocket,
+
+    /// Channel to broadcast received messages from socket
+    rcv_tx: broadcast::Sender<TransportMessage>,
+
+    /// Channel to communicate with outbound worker
+    outbound_tx: mpsc::Sender<OutboundAction>,
+
+    /// Shutdown token
+    shutdown_rx: CancellationToken,
+}
+
+struct OutboundHandle {
+    directory_rx: directory::EventStream,
+}
+
+struct OutboundWorker {
+    /// zmq context
+    context: zmq::Context,
+
+    /// Configuration of the transport
+    configuration: ZmqTransportConfiguration,
+
+    /// Bus peer
+    peer: Peer,
+
+    /// Bus Environment
+    environment: String,
+
+    /// Map of zmq outbound socket to their corresponding peer id
+    outbound_sockets: HashMap<PeerId, ZmqOutboundSocket>,
+
+    /// Reception channel for outbound actions
+    actions_rx: mpsc::Receiver<OutboundAction>,
+
+    /// Stream of events from the directory
+    directory_rx: directory::EventStream,
+
+    /// Channel to receive incoming messages from
+    /// Used to subscribe to receive incoming messages
+    rcv_tx: tokio::sync::broadcast::Sender<TransportMessage>,
+
+    /// Shutdown token
+    shutdown_rx: CancellationToken,
+}
+
 trait DisconnectStrategy {
     fn disconnect(
         socket: &mut ZmqOutboundSocket,
@@ -137,20 +185,165 @@ impl ZmqTransport {
             }),
         }
     }
-}
 
-struct InboundWorker {
-    /// Inbound socket
-    inbound_socket: ZmqInboundSocket,
+    fn start(&mut self) -> Result<(), Error> {
+        info!("starting zmq transport...");
 
-    /// Channel to broadcast received messages from socket
-    rcv_tx: broadcast::Sender<TransportMessage>,
+        let (inner, res) = match self.inner.take() {
+            Some(Inner::Configured {
+                configuration,
+                options,
+                peer_id,
+                environment,
+                directory_rx,
+            }) => {
+                // Create zmq context
+                let context = zmq::Context::new();
 
-    /// Channel to communicate with outbound worker
-    outbound_tx: mpsc::Sender<OutboundAction>,
+                // Create the inbound socket
+                let mut inbound_socket = ZmqInboundSocket::new(
+                    context.clone(),
+                    peer_id.clone(),
+                    configuration.inbound_endpoint.clone(),
+                    options,
+                );
 
-    /// Shutdown token
-    shutdown_rx: CancellationToken,
+                // Bind the inbound socket
+                let mut inbound_endpoint = inbound_socket.bind().map_err(Error::Inbound)?;
+                let hostname = gethostname::gethostname();
+                let host_str = hostname.to_str().ok_or(Error::InvalidUtf8)?;
+                inbound_endpoint = inbound_endpoint.replace("0.0.0.0", &host_str);
+                info!("socket bound to endpoint {inbound_endpoint}");
+
+                // Create cancellation token to shutdown inner components
+                let cancel_rx = CancellationToken::new();
+                let cancel_tx = CancellationToken::new();
+
+                // Create broadcast channel for transport message reception
+                let (rcv_tx, _rcv_rx) = broadcast::channel(128);
+
+                let peer = Peer {
+                    id: peer_id.clone(),
+                    endpoint: inbound_endpoint.clone(),
+                    is_up: true,
+                    is_responding: true,
+                };
+
+                // Start outbound worker
+                let (actions_tx, oubound_worker) = OutboundWorker::start(
+                    context.clone(),
+                    configuration.clone(),
+                    peer,
+                    environment.clone(),
+                    directory_rx,
+                    rcv_tx.clone(),
+                    cancel_tx.clone(),
+                )?;
+
+                // Start inbound worker
+                let inbound_handle = InboundWorker::start(
+                    inbound_socket,
+                    rcv_tx.clone(),
+                    actions_tx.clone(),
+                    cancel_rx.clone(),
+                )?;
+
+                (
+                    // Transition to Started state
+                    Some(Inner::Started {
+                        configuration,
+                        options,
+                        peer_id,
+                        environment,
+                        inbound_endpoint,
+                        inbound_handle,
+                        outbound_handle: oubound_worker,
+                        actions_tx,
+                        rcv_tx,
+                        shutdown_rx: cancel_rx,
+                        shutdown_tx: cancel_tx,
+                    }),
+                    Ok(()),
+                )
+            }
+            x => (x, Err(Error::InvalidOperation)),
+        };
+
+        info!("... started");
+        self.inner = inner;
+        res
+    }
+
+    fn stop(&mut self) -> Result<(), Error> {
+        info!("stopping zmq transport...");
+
+        let (inner, res) = match self.inner.take() {
+            Some(Inner::Started {
+                configuration,
+                options,
+                inbound_handle,
+                outbound_handle,
+                shutdown_tx,
+                shutdown_rx,
+                ..
+            }) => {
+                // Shutdown outbound worker first.
+                // We need to shutdown the oubound worker first because we still
+                // need the inbound to receive `EndOfStreamAck` from peers
+                shutdown_tx.cancel();
+
+                // Wait for the inbound worker to stop;
+                if let Err(_) = outbound_handle.join() {
+                    error!("outbound worker panic'ed");
+                }
+
+                // Now, shutdown inbound worker
+                shutdown_rx.cancel();
+                // Wait for the inbound worker to stop;
+                if let Err(_) = inbound_handle.join() {
+                    error!("inbound worker panic'ed");
+                }
+
+                // Transition to Configured state
+                (
+                    Some(Inner::Unconfigured {
+                        configuration,
+                        options,
+                    }),
+                    Ok(()),
+                )
+            }
+            x => (x, Err(Error::InvalidOperation)),
+        };
+
+        info!("... stopped");
+        self.inner = inner;
+        res
+    }
+
+    fn send(
+        &mut self,
+        peers: impl Iterator<Item = Peer>,
+        message: TransportMessage,
+        context: SendContext,
+    ) -> Result<(), Error> {
+        match self.inner.as_ref() {
+            Some(Inner::Started { ref actions_tx, .. }) => {
+                let peers = peers.collect();
+
+                actions_tx
+                    .try_send(OutboundAction::Send {
+                        message,
+                        peers,
+                        context,
+                    })
+                    .expect("unexpected send failure");
+
+                Ok(())
+            }
+            _ => Err(Error::InvalidOperation),
+        }
+    }
 }
 
 impl InboundWorker {
@@ -250,40 +443,6 @@ impl InboundWorker {
 
         Ok(())
     }
-}
-
-struct OutboundHandle {
-    directory_rx: directory::EventStream,
-}
-
-struct OutboundWorker {
-    /// zmq context
-    context: zmq::Context,
-
-    /// Configuration of the transport
-    configuration: ZmqTransportConfiguration,
-
-    /// Bus peer
-    peer: Peer,
-
-    /// Bus Environment
-    environment: String,
-
-    /// Map of zmq outbound socket to their corresponding peer id
-    outbound_sockets: HashMap<PeerId, ZmqOutboundSocket>,
-
-    /// Reception channel for outbound actions
-    actions_rx: mpsc::Receiver<OutboundAction>,
-
-    /// Stream of events from the directory
-    directory_rx: directory::EventStream,
-
-    /// Channel to receive incoming messages from
-    /// Used to subscribe to receive incoming messages
-    rcv_tx: tokio::sync::broadcast::Sender<TransportMessage>,
-
-    /// Shutdown token
-    shutdown_rx: CancellationToken,
 }
 
 impl OutboundWorker {
@@ -526,12 +685,14 @@ impl Transport for ZmqTransport {
     type Err = Error;
     type MessageStream = super::MessageStream;
 
+    type Future = std::future::Ready<Result<(), Self::Err>>;
+
     fn configure(
         &mut self,
         peer_id: PeerId,
         environment: String,
         directory_rx: directory::EventStream,
-    ) -> Result<(), Self::Err> {
+    ) -> Self::Future {
         let (inner, res) = match self.inner.take() {
             Some(Inner::Unconfigured {
                 configuration,
@@ -550,7 +711,8 @@ impl Transport for ZmqTransport {
             x => (x, Err(Error::InvalidOperation)),
         };
         self.inner = inner;
-        res
+
+        std::future::ready(res)
     }
 
     fn subscribe(&self) -> Result<Self::MessageStream, Self::Err> {
@@ -560,139 +722,12 @@ impl Transport for ZmqTransport {
         }
     }
 
-    fn start(&mut self) -> Result<(), Self::Err> {
-        info!("starting zmq transport...");
-
-        let (inner, res) = match self.inner.take() {
-            Some(Inner::Configured {
-                configuration,
-                options,
-                peer_id,
-                environment,
-                directory_rx,
-            }) => {
-                // Create zmq context
-                let context = zmq::Context::new();
-
-                // Create the inbound socket
-                let mut inbound_socket = ZmqInboundSocket::new(
-                    context.clone(),
-                    peer_id.clone(),
-                    configuration.inbound_endpoint.clone(),
-                    options,
-                );
-
-                // Bind the inbound socket
-                let mut inbound_endpoint = inbound_socket.bind().map_err(Error::Inbound)?;
-                let hostname = gethostname::gethostname();
-                let host_str = hostname.to_str().ok_or(Error::InvalidUtf8)?;
-                inbound_endpoint = inbound_endpoint.replace("0.0.0.0", &host_str);
-                info!("socket bound to endpoint {inbound_endpoint}");
-
-                // Create cancellation token to shutdown inner components
-                let cancel_rx = CancellationToken::new();
-                let cancel_tx = CancellationToken::new();
-
-                // Create broadcast channel for transport message reception
-                let (rcv_tx, _rcv_rx) = broadcast::channel(128);
-
-                let peer = Peer {
-                    id: peer_id.clone(),
-                    endpoint: inbound_endpoint.clone(),
-                    is_up: true,
-                    is_responding: true,
-                };
-
-                // Start outbound worker
-                let (actions_tx, oubound_worker) = OutboundWorker::start(
-                    context.clone(),
-                    configuration.clone(),
-                    peer,
-                    environment.clone(),
-                    directory_rx,
-                    rcv_tx.clone(),
-                    cancel_tx.clone(),
-                )?;
-
-                // Start inbound worker
-                let inbound_handle = InboundWorker::start(
-                    inbound_socket,
-                    rcv_tx.clone(),
-                    actions_tx.clone(),
-                    cancel_rx.clone(),
-                )?;
-
-                (
-                    // Transition to Started state
-                    Some(Inner::Started {
-                        configuration,
-                        options,
-                        peer_id,
-                        environment,
-                        inbound_endpoint,
-                        inbound_handle,
-                        outbound_handle: oubound_worker,
-                        actions_tx,
-                        rcv_tx,
-                        shutdown_rx: cancel_rx,
-                        shutdown_tx: cancel_tx,
-                    }),
-                    Ok(()),
-                )
-            }
-            x => (x, Err(Error::InvalidOperation)),
-        };
-
-        info!("... started");
-        self.inner = inner;
-        res
+    fn start(&mut self) -> Self::Future {
+        std::future::ready(self.start())
     }
 
-    fn stop(&mut self) -> Result<(), Self::Err> {
-        info!("stopping zmq transport...");
-
-        let (inner, res) = match self.inner.take() {
-            Some(Inner::Started {
-                configuration,
-                options,
-                inbound_handle,
-                outbound_handle,
-                shutdown_tx,
-                shutdown_rx,
-                ..
-            }) => {
-                // Shutdown outbound worker first.
-                // We need to shutdown the oubound worker first because we still
-                // need the inbound to receive `EndOfStreamAck` from peers
-                shutdown_tx.cancel();
-
-                // Wait for the inbound worker to stop;
-                if let Err(_) = outbound_handle.join() {
-                    error!("outbound worker panic'ed");
-                }
-
-                // Now, shutdown inbound worker
-                shutdown_rx.cancel();
-                // Wait for the inbound worker to stop;
-                if let Err(_) = inbound_handle.join() {
-                    error!("inbound worker panic'ed");
-                }
-
-                // Transition to Configured state
-                (
-                    Some(Inner::Unconfigured {
-                        configuration,
-                        options,
-                    }),
-                    Ok(()),
-                )
-            }
-            x => (x, Err(Error::InvalidOperation)),
-        };
-
-        info!("... stopped");
-        self.inner = inner;
-        res
+    fn stop(&mut self) -> Self::Future {
+        std::future::ready(self.stop())
     }
 
     fn peer_id(&self) -> Result<&PeerId, Self::Err> {
@@ -730,22 +765,7 @@ impl Transport for ZmqTransport {
         peers: impl Iterator<Item = Peer>,
         message: TransportMessage,
         context: SendContext,
-    ) -> Result<(), Self::Err> {
-        match self.inner.as_ref() {
-            Some(Inner::Started { ref actions_tx, .. }) => {
-                let peers = peers.collect();
-
-                actions_tx
-                    .try_send(OutboundAction::Send {
-                        message,
-                        peers,
-                        context,
-                    })
-                    .expect("unexpected send failure");
-
-                Ok(())
-            }
-            _ => Err(Error::InvalidOperation),
-        }
+    ) -> Self::Future {
+        std::future::ready(self.send(peers, message, context))
     }
 }

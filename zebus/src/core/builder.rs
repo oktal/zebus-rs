@@ -141,7 +141,7 @@ impl<T> BusBuilder<TransportAttached<T>>
 where
     T: Transport,
 {
-    pub fn create(self) -> std::result::Result<impl Bus, bus::Error> {
+    pub async fn create(self) -> std::result::Result<impl Bus, bus::Error> {
         let configuration = self.step.configuration;
         let peer_id = self.step.peer_id;
         let environment = self.step.environment;
@@ -155,7 +155,7 @@ where
         let bus = super::bus::Bus::new(configuration, transport, client, dispatcher);
 
         // Configure the bus
-        bus.configure(peer_id, environment)?;
+        bus.configure(peer_id, environment).await?;
         Ok(bus)
     }
 }

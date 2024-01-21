@@ -95,6 +95,7 @@ async fn try_register<T: Transport>(
             message.clone(),
             SendContext::default(),
         )
+        .await
         .map_err(|e| RegistrationError::Transport(e.into()))?;
 
     let mut pending = Vec::new();
@@ -159,6 +160,7 @@ async fn try_unregister<T: Transport>(
     // Send unregister command to the directory
     let unregister_id = transport
         .send_one(directory, &unregister, SendContext::default())
+        .await
         .map_err(|e| RegistrationError::Transport(e.into()))?;
 
     // Wait for the response of the [`UnregisterPeerCommand`]
