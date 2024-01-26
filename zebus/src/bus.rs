@@ -9,9 +9,11 @@ use tokio::task::JoinError;
 
 use crate::{
     core::{MessageDescriptor, MessageFlags, MessagePayload, RawMessage, Upcast, UpcastFrom},
-    directory::{self, event::PeerEvent},
+    directory::{self, event::PeerEvent, PeerDescriptor},
     dispatch,
-    transport::MessageExecutionCompleted,
+    persistence::event::MessageReplayed,
+    proto::IntoProtobuf,
+    transport::{MessageExecutionCompleted, TransportMessage},
     BoxError, MessageType, Peer, PeerId,
 };
 
@@ -215,6 +217,33 @@ pub trait MessageExt: Message {
     fn is_persistent(&self) -> bool {
         !self.is_transient()
     }
+
+    /// Create a [`TransportMessage`] from this [`Message`]
+    fn as_transport(&self, sender: &Peer, environment: String) -> (uuid::Uuid, TransportMessage)
+    where
+        Self: Sized,
+    {
+        TransportMessage::create(sender, environment, self)
+    }
+
+    /// Create a [`MessageReplayed`] [`TransportMessage`] from this [`Message`]
+    fn as_replayed(
+        &self,
+        replay_id: uuid::Uuid,
+        sender: &Peer,
+        environment: String,
+    ) -> (uuid::Uuid, MessageReplayed)
+    where
+        Self: Sized,
+    {
+        let (id, message) = TransportMessage::create(sender, environment.clone(), self);
+        let message_replayed = MessageReplayed {
+            replay_id: replay_id.into_protobuf(),
+            message,
+        };
+
+        (id, message_replayed)
+    }
 }
 
 impl<M: Message + ?Sized> MessageExt for M {}
@@ -285,12 +314,15 @@ pub trait Bus: Send + Sync + 'static {
 /// Event that can be raised by the [`Bus`]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum BusEvent {
-    /// Event raise when the bus is starting
+    /// Event raised when the bus is starting
     Starting,
 
-    /// When starting, the bus will first attempt to register to the directory
+    /// Event raised when the bus is about to register with the directory
+    /// The event holds the [`PeerDescriptor`] descriptor of the current peer
+    Registering(PeerDescriptor),
+
     /// Event raised when the bus successfully registered to the directory with
-    /// the list of current peers
+    /// the list of current peers received from the directory
     Registered(Vec<Peer>),
 
     /// Event raised when the bus has started after registering to the directory

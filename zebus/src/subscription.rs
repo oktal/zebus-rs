@@ -57,6 +57,10 @@ impl Subscription {
     pub fn full_name(&self) -> &str {
         self.message_type_id.full_name()
     }
+
+    pub(crate) fn message_type(&self) -> &MessageTypeId {
+        &self.message_type_id
+    }
 }
 
 impl IntoProtobuf for Subscription {

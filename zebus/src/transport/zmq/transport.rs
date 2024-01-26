@@ -520,6 +520,7 @@ impl OutboundWorker {
                 Some(event) = self.event_rx.next() => {
                     let kind = match &event {
                         BusEvent::Starting => "BusStarting",
+                        BusEvent::Registering(_) => "BusRegistering",
                         BusEvent::Registered(_) => "BusRegistered",
                         BusEvent::Started => "BusStarted",
                         BusEvent::Stopping => "BusStopping",

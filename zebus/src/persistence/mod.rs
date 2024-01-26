@@ -1,5 +1,5 @@
 mod command;
-mod event;
+pub mod event;
 pub mod future;
 mod service;
 pub mod transport;

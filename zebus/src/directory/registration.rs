@@ -62,26 +62,16 @@ impl Registration {
 /// Initiate a new registration to a peer directory
 async fn try_register<T: Transport>(
     transport: &mut T,
-    self_peer: Peer,
-    subscriptions: Vec<Subscription>,
+    descriptor: PeerDescriptor,
     environment: String,
     directory_endpoint: Peer,
 ) -> Result<Registration, RegistrationError> {
     // Create `RegisterPeerCommand`
-    let utc_now = Utc::now();
-
-    let descriptor = PeerDescriptor {
-        peer: self_peer.clone(),
-        subscriptions,
-        is_persistent: false,
-        timestamp_utc: Some(utc_now.into()),
-        has_debugger_attached: Some(false),
-    };
+    let peer = descriptor.peer.clone();
     let register_command = RegisterPeerCommand {
         peer: descriptor.into_protobuf(),
     };
-    let (_message_id, message) =
-        TransportMessage::create(&self_peer, environment, &register_command);
+    let (_message_id, message) = TransportMessage::create(&peer, environment, &register_command);
 
     // Subscribe to transport messages stream
     let mut rcv_rx = transport
@@ -199,21 +189,14 @@ where
 /// Initiate a new registration to a peer directory with a timeout
 pub(crate) async fn register<T: Transport>(
     transport: &mut T,
-    self_peer: Peer,
-    subscriptions: Vec<Subscription>,
+    descriptor: PeerDescriptor,
     environment: String,
     directory_endpoint: Peer,
     timeout: Duration,
 ) -> Result<Registration, RegistrationError> {
     with_timeout(
         timeout,
-        try_register(
-            transport,
-            self_peer,
-            subscriptions,
-            environment,
-            directory_endpoint,
-        ),
+        try_register(transport, descriptor, environment, directory_endpoint),
     )
     .await
 }

@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use dyn_clone::clone_box;
 use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
@@ -16,7 +17,7 @@ use tracing::{error, info};
 use crate::{
     bus::{BusEvent, CommandResult, Error, RegistrationError, Result, SendError},
     core::{MessagePayload, SubscriptionMode},
-    directory::{self, Directory, Registration},
+    directory::{self, Directory, PeerDescriptor, Registration},
     dispatch::{
         self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, MessageDispatcher,
     },
@@ -430,8 +431,7 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
 /// Register to the directory
 async fn register<T: Transport>(
     transport: &mut T,
-    self_peer: &Peer,
-    subscriptions: Vec<Subscription>,
+    descriptor: PeerDescriptor,
     environment: &String,
     configuration: &BusConfiguration,
 ) -> Result<Registration> {
@@ -444,8 +444,7 @@ async fn register<T: Transport>(
 
         match directory::registration::register(
             transport,
-            self_peer.clone(),
-            subscriptions.clone(),
+            descriptor.clone(),
             environment.clone(),
             directory_peer.clone(),
             timeout,
@@ -788,15 +787,23 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 let startup_subscriptions =
                     get_startup_subscriptions(&dispatcher).map_err(Error::Dispatch)?;
 
+                // Create description of our current peer
+                let utc_now = Utc::now();
+                let descriptor = PeerDescriptor {
+                    peer: self_peer.clone(),
+                    subscriptions: startup_subscriptions,
+                    is_persistent: configuration.is_persistent,
+                    timestamp_utc: Some(utc_now.into()),
+                    has_debugger_attached: Some(false),
+                };
+
+                if let Err(e) = event_tx.send(BusEvent::Registering(descriptor.clone())) {
+                    error!("failed to publish {:?}", e.0);
+                }
+
                 // Register to directory
-                let registration = register(
-                    &mut transport,
-                    &self_peer,
-                    startup_subscriptions,
-                    &environment,
-                    &configuration,
-                )
-                .await?;
+                let registration =
+                    register(&mut transport, descriptor, &environment, &configuration).await?;
 
                 // Handle peer directory response
                 // TODO(oktal): properly handle error
@@ -1007,7 +1014,7 @@ impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
 
 #[cfg(test)]
 mod tests {
-    use std::{any::Any, borrow::Cow, time::Duration};
+    use std::{any::Any, time::Duration};
 
     use super::*;
     use crate::bus::CommandError;
@@ -1019,60 +1026,16 @@ mod tests {
     use crate::dispatch::router::{RouteHandler, Router};
     use crate::inject::{self, State};
     use crate::message_type_id::MessageTypeId;
+    use crate::transport::memory::MemoryTransport;
     use crate::{
         directory::{
             commands::{RegisterPeerCommand, RegisterPeerResponse},
             event::PeerEvent,
             DirectoryReader,
         },
-        MessageDescriptor, MessageType,
+        MessageDescriptor,
     };
-    use tokio::sync::{broadcast, Notify};
-
-    /// Inner [`MemoryTransport`] state
-    struct MemoryTransportInner {
-        /// Configured peer id
-        peer_id: Option<PeerId>,
-
-        /// Configured environment
-        environment: Option<String>,
-
-        /// Flag indicating whether the transport has been started
-        started: bool,
-
-        /// Sender channel for transport messages
-        rcv_tx: Option<broadcast::Sender<TransportMessage>>,
-
-        /// Transmit queue
-        /// Messages that are sent through the transport will be stored in this queue along with
-        /// the recipient peers
-        tx_queue: Vec<(TransportMessage, Vec<Peer>)>,
-
-        /// Waiting transmission queue
-        tx_wait_queue: HashMap<MessageType, Arc<Notify>>,
-
-        /// Reception queue
-        /// Messages that should be "sent" back as a response to a transport message will be stored
-        /// in this queue.
-        ///
-        /// This queue holds two callbacks:
-        /// First callback is a predicate that will be used to determine whether the transport
-        /// should respond to a particular message
-        /// Second callback will be used to create an instance of a transport message that should
-        /// be sent back
-        rx_queue: Vec<(
-            Box<dyn Fn(&TransportMessage, &Peer) -> bool + Send + 'static>,
-            Box<dyn FnOnce(TransportMessage, Peer, String) -> TransportMessage + Send + 'static>,
-        )>,
-    }
-
-    /// A [`Transport`] that stores state in memory and has simplified logic for test purposes
-    struct MemoryTransport {
-        /// The peer the transport is operating on
-        peer: Peer,
-        /// Shared transport state
-        inner: Arc<Mutex<MemoryTransportInner>>,
-    }
+    use tokio::sync::broadcast;
 
     /// State of the memory directory
     struct MemoryDirectoryState {
@@ -1148,225 +1111,6 @@ mod tests {
             let mut state = self.state.lock().unwrap();
             state.add_peer_for::<M>(peer);
             self
-        }
-    }
-
-    #[derive(Debug, thiserror::Error)]
-    enum MemoryTransportError {
-        #[error("invalid operation")]
-        InvalidOperation,
-    }
-
-    impl MemoryTransport {
-        fn new(peer: Peer) -> Self {
-            Self {
-                peer,
-                inner: Arc::new(Mutex::new(MemoryTransportInner {
-                    peer_id: None,
-                    environment: None,
-                    started: false,
-                    rcv_tx: None,
-                    tx_queue: Vec::new(),
-                    tx_wait_queue: HashMap::new(),
-                    rx_queue: Vec::new(),
-                })),
-            }
-        }
-
-        fn is_started(&self) -> bool {
-            let inner = self.inner.lock().unwrap();
-            inner.started
-        }
-
-        /// Queue a message that will be sent back as a response to a transport message
-        fn queue_message<M: Message>(
-            &self,
-            predicate: impl Fn(&TransportMessage, &Peer) -> bool + Send + 'static,
-            message_fn: impl Fn(TransportMessage) -> M + Send + Sync + 'static,
-        ) -> Option<()> {
-            let message_fn = Box::new(message_fn);
-            let create_fn = Box::new(move |transport_message, sender, environment| {
-                let message = message_fn(transport_message);
-                let (_id, transport) = TransportMessage::create(&sender, environment, &message);
-                transport
-            });
-
-            let mut inner = self.inner.lock().unwrap();
-            inner.rx_queue.push((Box::new(predicate), create_fn));
-            Some(())
-        }
-
-        fn message_received<M: crate::Message + prost::Message>(
-            &self,
-            message: M,
-            sender: &Peer,
-            environment: String,
-        ) -> Option<()> {
-            let inner = self.inner.lock().unwrap();
-            let rcv_tx = inner.rcv_tx.as_ref()?;
-            let (_id, transport) = TransportMessage::create(sender, environment, &message);
-            rcv_tx.send(transport).ok()?;
-            Some(())
-        }
-
-        /// Wait for [`count`] messages of type `M` to be sent through the transport
-        async fn wait_for<M: MessageDescriptor + prost::Message + Default>(
-            &self,
-            count: usize,
-        ) -> Vec<(M, Vec<Peer>)> {
-            loop {
-                // First attempt to retrieve messages from the tx_queue
-                let tx_messages = self.get::<M>();
-
-                // If there is enough messages already in the tx_queue, return right away
-                if tx_messages.len() >= count {
-                    return tx_messages;
-                }
-
-                // We need to wait for more messages to be sent through the transport
-                let notify = {
-                    let mut inner = self.inner.lock().unwrap();
-
-                    inner
-                        .tx_wait_queue
-                        .entry(MessageType::of::<M>())
-                        .or_insert(Arc::new(Notify::new()))
-                        .clone()
-                };
-
-                notify.notified().await;
-            }
-        }
-
-        /// Get the list of messages that have been sent through the transport
-        fn get<M: MessageDescriptor + prost::Message + Default>(&self) -> Vec<(M, Vec<Peer>)> {
-            let inner = self.inner.lock().unwrap();
-            inner
-                .tx_queue
-                .iter()
-                .filter_map(|(msg, peers)| {
-                    let message = msg.decode_as::<M>()?.ok()?;
-                    Some((message, peers.clone()))
-                })
-                .collect()
-        }
-
-        /// Get the configured peer id
-        fn get_peer_id(&self) -> Option<PeerId> {
-            let inner = self.inner.lock().unwrap();
-            inner.peer_id.clone()
-        }
-
-        /// Get the configured environment
-        fn get_environment(&self) -> Option<String> {
-            let inner = self.inner.lock().unwrap();
-            inner.environment.clone()
-        }
-    }
-
-    impl Clone for MemoryTransport {
-        fn clone(&self) -> Self {
-            Self {
-                peer: self.peer.clone(),
-                inner: Arc::clone(&self.inner),
-            }
-        }
-    }
-
-    impl Transport for MemoryTransport {
-        type Err = MemoryTransportError;
-        type MessageStream = crate::sync::stream::BroadcastStream<TransportMessage>;
-
-        type StartCompletionFuture =
-            futures_util::future::Ready<std::result::Result<(), Self::Err>>;
-        type StopCompletionFuture = futures_util::future::Ready<std::result::Result<(), Self::Err>>;
-        type SendFuture = futures_util::future::Ready<std::result::Result<(), Self::Err>>;
-
-        fn configure(
-            &mut self,
-            peer_id: PeerId,
-            environment: String,
-            _event_rx: EventStream<BusEvent>,
-        ) -> std::result::Result<(), MemoryTransportError> {
-            let mut inner = self.inner.lock().unwrap();
-            inner.peer_id = Some(peer_id);
-            inner.environment = Some(environment);
-            Ok(())
-        }
-
-        fn subscribe(&self) -> std::result::Result<Self::MessageStream, Self::Err> {
-            let inner = self.inner.lock().unwrap();
-            match inner.rcv_tx.as_ref() {
-                Some(rcv_tx) => Ok(rcv_tx.subscribe().into()),
-                None => Err(MemoryTransportError::InvalidOperation),
-            }
-        }
-
-        fn start(
-            &mut self,
-        ) -> std::result::Result<Self::StartCompletionFuture, MemoryTransportError> {
-            let mut inner = self.inner.lock().unwrap();
-            let (rcv_tx, _) = broadcast::channel(128);
-            inner.started = true;
-            inner.rcv_tx = Some(rcv_tx);
-            Ok(futures_util::future::ready(Ok(())))
-        }
-
-        fn stop(
-            &mut self,
-        ) -> std::result::Result<Self::StopCompletionFuture, MemoryTransportError> {
-            Ok(futures_util::future::ready(Ok(())))
-        }
-
-        fn peer_id(&self) -> std::result::Result<&PeerId, Self::Err> {
-            unimplemented!()
-        }
-
-        fn environment(&self) -> std::result::Result<Cow<'_, str>, Self::Err> {
-            unimplemented!();
-        }
-
-        fn inbound_endpoint(&self) -> std::result::Result<Cow<'_, str>, Self::Err> {
-            Ok(Cow::Owned("tcp://localhost:5050".to_string()))
-        }
-
-        fn send(
-            &mut self,
-            peers: impl Iterator<Item = Peer>,
-            message: TransportMessage,
-            _context: SendContext,
-        ) -> std::result::Result<Self::SendFuture, Self::Err> {
-            let peers: Vec<_> = peers.collect();
-
-            let mut inner = self.inner.lock().unwrap();
-            let environment = inner.environment.clone().unwrap();
-
-            // TODO(oktal): drain_filter
-            for peer in &peers {
-                let mut i = 0;
-                while i < inner.rx_queue.len() {
-                    let entry = &inner.rx_queue[i];
-                    if (entry.0)(&message, peer) {
-                        let entry = inner.rx_queue.remove(i);
-                        let response =
-                            (entry.1)(message.clone(), self.peer.clone(), environment.clone());
-                        let tx = inner.rcv_tx.as_ref().unwrap();
-                        tx.send(response).unwrap();
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
-
-            let msg_type = MessageType::from(message.message_type_id.clone());
-            inner.tx_queue.push((message, peers));
-
-            // Notify any waiter that some messages have been sent
-            if let Some(notify) = inner.tx_wait_queue.get(&msg_type) {
-                notify.notify_waiters();
-            }
-
-            Ok(futures_util::future::ready(Ok(())))
         }
     }
 

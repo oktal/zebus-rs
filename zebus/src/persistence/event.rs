@@ -1,9 +1,4 @@
-use crate::{
-    core::MessagePayload,
-    message_id::proto,
-    proto::{bcl, FromProtobuf},
-    transport::TransportMessage,
-};
+use crate::{core::MessagePayload, message_id::proto, proto::bcl, transport::TransportMessage};
 
 pub(super) enum TryFromReplayEventError {
     /// [`TransportMessage`] is not a [`ReplayEvent`]
@@ -32,18 +27,6 @@ pub(super) enum ReplayEvent {
     SafetyPhaseEnded(SafetyPhaseEnded),
 }
 
-impl ReplayEvent {
-    fn replay_id(&self) -> uuid::Uuid {
-        let replay_id = match self {
-            Self::MessageReplayed(m) => m.replay_id,
-            Self::ReplayPhaseEnded(m) => m.replay_id,
-            Self::SafetyPhaseEnded(m) => m.replay_id,
-        };
-
-        uuid::Uuid::from_protobuf(replay_id)
-    }
-}
-
 impl TryFrom<TransportMessage> for ReplayEvent {
     type Error = TryFromReplayEventError;
 
@@ -62,7 +45,7 @@ impl TryFrom<TransportMessage> for ReplayEvent {
 
 #[derive(prost::Message, crate::Event, Clone)]
 #[zebus(namespace = "Abc.Zebus.Persistence", transient)]
-pub(super) struct MessageReplayed {
+pub struct MessageReplayed {
     #[prost(message, required, tag = 1)]
     pub replay_id: bcl::Guid,
 
@@ -72,14 +55,14 @@ pub(super) struct MessageReplayed {
 
 #[derive(prost::Message, crate::Event, Clone)]
 #[zebus(namespace = "Abc.Zebus.Persistence", transient)]
-pub(super) struct ReplayPhaseEnded {
+pub struct ReplayPhaseEnded {
     #[prost(message, required, tag = 1)]
     pub replay_id: bcl::Guid,
 }
 
 #[derive(prost::Message, crate::Event, Clone)]
 #[zebus(namespace = "Abc.Zebus.Persistence", transient)]
-pub(super) struct SafetyPhaseEnded {
+pub struct SafetyPhaseEnded {
     #[prost(message, required, tag = 1)]
     pub replay_id: bcl::Guid,
 }

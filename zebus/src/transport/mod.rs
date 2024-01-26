@@ -1,5 +1,7 @@
 //! Transport base layer for Zebus peer-to-peer communication
 pub(crate) mod future;
+#[cfg(test)]
+pub(crate) mod memory;
 mod message_execution_completed;
 mod originator_info;
 mod send_context;
