@@ -1,6 +1,6 @@
 use futures_util::FutureExt;
 use prost::Message;
-use std::{borrow::Cow, collections::HashMap, io::Write, thread::JoinHandle};
+use std::{borrow::Cow, collections::HashMap, io::Write, thread::JoinHandle, sync::Arc};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     bus::{BusEvent, BusEventStream},
-    directory::event::PeerEvent,
+    directory::{event::PeerEvent, DirectoryReader},
     sync::stream::{BoxEventStream, EventStream},
     transport::{
         self,
@@ -721,6 +721,7 @@ impl Transport for ZmqTransport {
         &mut self,
         peer_id: PeerId,
         environment: String,
+        _directory: Arc<dyn DirectoryReader>,
         event_rx: EventStream<BusEvent>,
     ) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {

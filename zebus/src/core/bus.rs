@@ -720,9 +720,17 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 // Create event stream for bus events
                 let event = EventStream::new(32);
 
+                // Create directory reader
+                let directory_reader = directory.reader();
+
                 // Configure transport
                 transport
-                    .configure(peer_id.clone(), environment.clone(), event.clone())
+                    .configure(
+                        peer_id.clone(),
+                        environment.clone(),
+                        directory_reader,
+                        event.clone(),
+                    )
                     .map_err(|e| Error::Transport(e.into()))?;
 
                 (
@@ -1015,206 +1023,16 @@ impl<T: Transport, D: Directory> crate::Bus for Bus<T, D> {
 
 #[cfg(test)]
 mod tests {
-    use std::{any::Any, time::Duration};
+    use std::time::Duration;
 
     use super::*;
     use crate::bus::CommandError;
-    use crate::directory::commands::PingPeerCommand;
-    use crate::directory::events::PeerSubscriptionsForTypeUpdated;
-    use crate::directory::{
-        PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
-    };
+    use crate::directory::commands::{RegisterPeerCommand, RegisterPeerResponse};
+    use crate::directory::memory::MemoryDirectory;
     use crate::dispatch::router::{RouteHandler, Router};
-    use crate::inject::{self, State};
+    use crate::inject::{self};
     use crate::message_type_id::MessageTypeId;
     use crate::transport::memory::MemoryTransport;
-    use crate::{
-        directory::{
-            commands::{RegisterPeerCommand, RegisterPeerResponse},
-            event::PeerEvent,
-            DirectoryReader,
-        },
-        MessageDescriptor,
-    };
-    use tokio::sync::broadcast;
-
-    /// State of the memory directory
-    struct MemoryDirectoryState {
-        /// Sender channel for peer events
-        events_tx: broadcast::Sender<PeerEvent>,
-
-        /// Collection of messages that have been handled by the directory, indexed by their
-        /// message type
-        messages: HashMap<&'static str, Vec<Arc<dyn Any + Send + Sync>>>,
-
-        /// Collection of peers that have been configured to handle a type of message
-        peers: HashMap<&'static str, Vec<Peer>>,
-    }
-
-    impl MemoryDirectoryState {
-        fn new() -> Self {
-            let (events_tx, _events_rx) = broadcast::channel(128);
-            Self {
-                events_tx,
-                messages: HashMap::new(),
-                peers: HashMap::new(),
-            }
-        }
-
-        fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
-            self.events_tx.subscribe()
-        }
-
-        /// Ad a `message` to the list of handled messages by the directory
-        fn add_handled<M: MessageDescriptor + Send + Sync + 'static>(&mut self, message: M) {
-            let entry = self.messages.entry(M::name()).or_insert(Vec::new());
-            entry.push(Arc::new(message));
-        }
-
-        fn add_peer_for<M: MessageDescriptor>(&mut self, peer: Peer) {
-            self.peers.entry(M::name()).or_insert(vec![]).push(peer);
-        }
-    }
-
-    /// A [`Directory`] that stores state in memory and has simplified
-    /// logic for test purposes
-    struct MemoryDirectory {
-        state: Arc<Mutex<MemoryDirectoryState>>,
-    }
-
-    impl MemoryDirectory {
-        /// Get a list of messages handled by the directory
-        fn get_handled<M: MessageDescriptor + Send + Sync + 'static>(&self) -> Vec<Arc<M>> {
-            let state = self.state.lock().unwrap();
-
-            match state.messages.get(M::name()) {
-                Some(entry) => entry
-                    .iter()
-                    .filter_map(|m| m.clone().downcast::<M>().ok())
-                    .collect(),
-                None => vec![],
-            }
-        }
-
-        /// Add a list of [`peers`] that should handle the message of type [`M`]
-        fn add_peers_for<M: MessageDescriptor>(
-            &self,
-            peers: impl IntoIterator<Item = Peer>,
-        ) -> &Self {
-            for peer in peers {
-                self.add_peer_for::<M>(peer);
-            }
-            self
-        }
-
-        /// Add a peer that should hande the `Message`
-        fn add_peer_for<M: MessageDescriptor>(&self, peer: Peer) -> &Self {
-            let mut state = self.state.lock().unwrap();
-            state.add_peer_for::<M>(peer);
-            self
-        }
-    }
-
-    impl DirectoryReader for MemoryDirectory {
-        fn get(&self, _peer_id: &PeerId) -> Option<Peer> {
-            None
-        }
-
-        fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
-            let state = self.state.lock().unwrap();
-            if let Some(peers) = state.peers.get(message.name()) {
-                peers.clone()
-            } else {
-                vec![]
-            }
-        }
-    }
-
-    async fn peer_started(
-        msg: PeerStarted,
-        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
-    ) {
-        state.lock().unwrap().add_handled(msg)
-    }
-
-    async fn peer_stopped(
-        msg: PeerStopped,
-        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
-    ) {
-        state.lock().unwrap().add_handled(msg)
-    }
-
-    async fn peer_decommissioned(
-        msg: PeerDecommissioned,
-        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
-    ) {
-        state.lock().unwrap().add_handled(msg)
-    }
-
-    async fn peer_not_responding(
-        msg: PeerNotResponding,
-        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
-    ) {
-        state.lock().unwrap().add_handled(msg)
-    }
-
-    async fn peer_responding(
-        msg: PeerResponding,
-        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
-    ) {
-        state.lock().unwrap().add_handled(msg)
-    }
-
-    async fn ping_peer(
-        msg: PingPeerCommand,
-        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
-    ) {
-        state.lock().unwrap().add_handled(msg)
-    }
-
-    async fn peer_subscriptions_for_type_updated(
-        msg: PeerSubscriptionsForTypeUpdated,
-        inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
-    ) {
-        state.lock().unwrap().add_handled(msg)
-    }
-
-    impl Directory for MemoryDirectory {
-        type EventStream = crate::sync::stream::BroadcastStream<PeerEvent>;
-        type Handler = Router<Arc<Mutex<MemoryDirectoryState>>>;
-
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                state: Arc::new(Mutex::new(MemoryDirectoryState::new())),
-            })
-        }
-        fn subscribe(&self) -> Self::EventStream {
-            let state = self.state.lock().unwrap();
-            state.subscribe().into()
-        }
-
-        fn handle_registration(&self, response: RegisterPeerResponse) {
-            let mut state = self.state.lock().unwrap();
-            state.add_handled(response);
-        }
-
-        fn handler(&self) -> Self::Handler {
-            Router::with_state(Arc::clone(&self.state))
-                .handles(peer_started.into_handler())
-                .handles(peer_stopped.into_handler())
-                .handles(peer_decommissioned.into_handler())
-                .handles(peer_not_responding.into_handler())
-                .handles(peer_responding.into_handler())
-                .handles(ping_peer.into_handler())
-                .handles(peer_subscriptions_for_type_updated.into_handler())
-        }
-
-        fn reader(&self) -> Arc<dyn DirectoryReader> {
-            Arc::new(Self {
-                state: Arc::clone(&self.state),
-            })
-        }
-    }
 
     struct Fixture {
         peer: Peer,

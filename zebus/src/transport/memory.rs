@@ -8,8 +8,8 @@ use thiserror::Error;
 use tokio::sync::{broadcast, Notify};
 
 use crate::{
-    bus::BusEvent, core::MessagePayload, message_type_id::MessageType, sync::stream::EventStream,
-    Message, MessageDescriptor, Peer, PeerId,
+    bus::BusEvent, core::MessagePayload, directory::DirectoryReader, message_type_id::MessageType,
+    sync::stream::EventStream, Message, MessageDescriptor, Peer, PeerId,
 };
 
 use super::{SendContext, Transport, TransportMessage};
@@ -198,6 +198,7 @@ impl Transport for MemoryTransport {
         &mut self,
         peer_id: PeerId,
         environment: String,
+        _directory: Arc<dyn DirectoryReader>,
         _event_rx: EventStream<BusEvent>,
     ) -> Result<(), MemoryTransportError> {
         let mut inner = self.inner.lock().unwrap();

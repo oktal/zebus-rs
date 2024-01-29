@@ -9,12 +9,12 @@ mod transport_message;
 pub mod zmq;
 
 use crate::{
-    bus::BusEvent, persistence::transport::PersistentTransport, sync::stream::EventStream,
-    BoxError, BusConfiguration, Message, Peer, PeerId,
+    bus::BusEvent, directory::DirectoryReader, persistence::transport::PersistentTransport,
+    sync::stream::EventStream, BoxError, BusConfiguration, Message, Peer, PeerId,
 };
 use futures_core::{future::BoxFuture, Future, Stream};
 use futures_util::FutureExt;
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 pub use message_execution_completed::MessageExecutionCompleted;
 pub use originator_info::OriginatorInfo;
@@ -54,6 +54,7 @@ pub trait Transport: Send + Sync + 'static {
         &mut self,
         peer_id: PeerId,
         environment: String,
+        directory: Arc<dyn DirectoryReader>,
         event: EventStream<BusEvent>,
     ) -> Result<(), Self::Err>;
 

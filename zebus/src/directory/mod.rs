@@ -3,6 +3,9 @@ pub(crate) mod descriptor;
 pub(crate) mod event;
 pub mod events;
 
+#[cfg(test)]
+pub(crate) mod memory;
+
 mod client;
 pub(crate) use client::Client;
 

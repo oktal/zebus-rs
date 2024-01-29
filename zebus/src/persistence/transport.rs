@@ -1,10 +1,11 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     bus::BusEvent,
+    directory::DirectoryReader,
     sync::stream::EventStream,
     transport::{self, future::SendFuture, Transport, TransportMessage},
     BusConfiguration, PeerId,
@@ -99,6 +100,7 @@ where
         &mut self,
         peer_id: PeerId,
         environment: String,
+        directory: Arc<dyn DirectoryReader>,
         event: EventStream<BusEvent>,
     ) -> Result<(), Self::Err> {
         let (inner, res) = match self.inner.take() {
@@ -108,7 +110,12 @@ where
             }) => {
                 // Configure the inner transport
                 inner
-                    .configure(peer_id.clone(), environment.clone(), event.clone())
+                    .configure(
+                        peer_id.clone(),
+                        environment.clone(),
+                        Arc::clone(&directory),
+                        event.clone(),
+                    )
                     .map_err(Into::into)?;
 
                 // Transition to Configured state
@@ -253,7 +260,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use futures_util::pin_mut;
     use tokio_stream::StreamExt;
@@ -261,7 +268,7 @@ mod tests {
     use crate::{
         bus::BusEvent,
         core::MessagePayload,
-        directory::PeerDescriptor,
+        directory::{memory::MemoryDirectory, Directory, PeerDescriptor},
         persistence::{
             command::StartMessageReplayCommand,
             event::{ReplayPhaseEnded, SafetyPhaseEnded},
@@ -286,6 +293,7 @@ mod tests {
 
         events: EventStream<BusEvent>,
 
+        directory: Arc<MemoryDirectory>,
         inner: MemoryTransport,
 
         transport: PersistentTransport<MemoryTransport>,
@@ -309,6 +317,7 @@ mod tests {
                 peer,
                 persistence_peer,
                 environment,
+                directory: MemoryDirectory::new(),
                 inner: inner.clone(),
                 events,
                 transport: inner.persistent(configuration),
@@ -329,6 +338,7 @@ mod tests {
             self.transport.configure(
                 self.peer.id.clone(),
                 self.environment.clone(),
+                self.directory.reader(),
                 self.events.clone(),
             )
         }
