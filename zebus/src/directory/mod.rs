@@ -38,7 +38,7 @@ pub trait DirectoryReader: Send + Sync + 'static {
 
 // TODO(oktal): can we relax `Sync` here ?
 /// A description trait for a directory
-pub(crate) trait Directory: DirectoryReader {
+pub(crate) trait Directory: Send + Sync + 'static {
     /// Type of [`PeerEvent`] [`Stream`] that the directory will yield
     type EventStream: Stream<Item = PeerEvent> + Unpin + Send + Sync + 'static;
 
@@ -57,4 +57,7 @@ pub(crate) trait Directory: DirectoryReader {
 
     /// Create a new instance of a [`Self::Handler`]
     fn handler(&self) -> Self::Handler;
+
+    /// Create a [`DirectoryReader`] reader
+    fn reader(&self) -> Arc<dyn DirectoryReader>;
 }

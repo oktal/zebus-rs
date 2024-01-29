@@ -7,9 +7,9 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use dyn_clone::clone_box;
+use futures_util::StreamExt;
 use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tower_service::Service;
 use tracing::{error, info};
@@ -17,7 +17,7 @@ use tracing::{error, info};
 use crate::{
     bus::{BusEvent, CommandResult, Error, RegistrationError, Result, SendError},
     core::{MessagePayload, SubscriptionMode},
-    directory::{self, Directory, PeerDescriptor, Registration},
+    directory::{self, Directory, DirectoryReader, PeerDescriptor, Registration},
     dispatch::{
         self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, MessageDispatcher,
     },
@@ -28,11 +28,11 @@ use crate::{
     Peer, PeerId, Subscription,
 };
 
-struct Core<T: Transport, D: Directory> {
+struct Core<T: Transport> {
     self_peer: Peer,
     environment: String,
 
-    directory: Arc<D>,
+    directory: Arc<dyn DirectoryReader>,
 
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
     snd_tx: mpsc::Sender<SendEntry>,
@@ -61,7 +61,7 @@ enum State<T: Transport, D: Directory> {
     },
 
     Started {
-        core: Arc<Core<T, D>>,
+        core: Arc<Core<T>>,
 
         configuration: BusConfiguration,
         event_tx: EventStream<BusEvent>,
@@ -253,22 +253,22 @@ struct RxHandle {
     dispatcher: MessageDispatcher,
 }
 
-struct Receiver<T: Transport, D: Directory> {
+struct Receiver<T: Transport> {
     rcv_rx: T::MessageStream,
     dispatch_rx: mpsc::Receiver<LocalDispatchRequest>,
     tx: mpsc::Sender<SendEntry>,
     self_peer: Peer,
     environment: String,
     pending_commands: Arc<Mutex<HashMap<uuid::Uuid, oneshot::Sender<CommandResult>>>>,
-    directory: Arc<D>,
-    directory_rx: D::EventStream,
+    directory: Arc<dyn DirectoryReader>,
+    directory_rx: directory::EventStream,
     event_tx: EventStream<BusEvent>,
     dispatcher: MessageDispatcher,
     cancellation: CancellationToken,
 }
 
-impl<T: Transport, D: Directory> Receiver<T, D> {
-    fn new(
+impl<T: Transport> Receiver<T> {
+    fn new<D: Directory>(
         transport_rx: T::MessageStream,
         tx: mpsc::Sender<SendEntry>,
         self_peer: Peer,
@@ -285,7 +285,8 @@ impl<T: Transport, D: Directory> Receiver<T, D> {
         let pending_commands = Arc::new(Mutex::new(HashMap::new()));
         let (dispatch_tx, dispatch_rx) = mpsc::channel(128);
 
-        let directory_rx = directory.subscribe();
+        let directory_rx = Box::pin(directory.subscribe());
+        let directory = directory.reader();
 
         (
             Self {
@@ -519,7 +520,7 @@ fn get_startup_subscriptions<D: DispatchService>(
     Ok(subscriptions)
 }
 
-impl<T: Transport, D: Directory> Core<T, D> {
+impl<T: Transport> Core<T> {
     async fn send(&self, command: &dyn Command) -> CommandResult {
         // Retrieve the list of peers handling the command from the directory
         let peers = self.directory.get_peers_handling(command.up());
@@ -657,7 +658,7 @@ impl<T: Transport, D: Directory> Core<T, D> {
 }
 
 #[async_trait]
-impl<T: Transport, D: Directory> crate::Bus for Core<T, D> {
+impl<T: Transport> crate::Bus for Core<T> {
     async fn configure(&self, _peer_id: PeerId, _environment: String) -> Result<()> {
         Err(Error::InvalidOperation)
     }
@@ -836,7 +837,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                     Sender::new(transport, configuration.clone(), cancellation.clone());
 
                 // Create receiver
-                let (receiver, dispatch_tx, pending_commands) = Receiver::<T, D>::new(
+                let (receiver, dispatch_tx, pending_commands) = Receiver::<T>::new(
                     rcv_rx,
                     snd_tx.clone(),
                     self_peer.clone(),
@@ -848,10 +849,10 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 );
 
                 // Create Core
-                let core = Arc::new(Core::<T, D> {
+                let core = Arc::new(Core::<T> {
                     self_peer,
                     environment: environment.clone(),
-                    directory: Arc::clone(&directory),
+                    directory: directory.reader(),
                     pending_commands,
                     snd_tx,
                     dispatch_tx,
@@ -976,7 +977,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
         core.publish(event).await
     }
 
-    async fn core(&self) -> Result<Arc<Core<T, D>>> {
+    async fn core(&self) -> Result<Arc<Core<T>>> {
         let inner = self.inner.lock().await;
         match inner.as_ref() {
             Some(State::Started { core, .. }) => Ok(core.clone()),
@@ -1206,6 +1207,12 @@ mod tests {
                 .handles(peer_responding.into_handler())
                 .handles(ping_peer.into_handler())
                 .handles(peer_subscriptions_for_type_updated.into_handler())
+        }
+
+        fn reader(&self) -> Arc<dyn DirectoryReader> {
+            Arc::new(Self {
+                state: Arc::clone(&self.state),
+            })
         }
     }
 

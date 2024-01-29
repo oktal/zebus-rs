@@ -474,6 +474,12 @@ impl Directory for Client {
             .handles(ping_peer.into_handler())
             .handles(peer_subscriptions_for_type_updated.into_handler())
     }
+
+    fn reader(&self) -> Arc<dyn DirectoryReader> {
+        Arc::new(Self {
+            state: Arc::clone(&self.state),
+        })
+    }
 }
 
 impl Clone for Client {
