@@ -91,7 +91,7 @@ fn message_binding(
     ident: &syn::Ident,
     routing_fields: &[RoutingField],
 ) -> proc_macro2::TokenStream {
-    // Generate the type that will be associated with the `Binding` type of `MessageBinding` trait
+    // Generate the type that will be associated with the `Binding` type of `BindingExpression` trait
     let (message_binding_struct_expanded, name) = {
         let name = syn::Ident::new(&format!("{}Binding", ident.to_string()), ident.span());
         let fields = routing_fields
@@ -146,7 +146,7 @@ fn message_binding(
         };
 
         quote! {
-            impl ::zebus_core::MessageBinding for #ident {
+            impl ::zebus_core::BindingExpression for #ident {
                 type Binding = #name;
 
                 fn bind(binding: Self::Binding) -> ::zebus_core::BindingKey {

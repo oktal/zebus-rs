@@ -15,7 +15,7 @@ use zebus_core::{HandlerDescriptor, MessageTypeDescriptor};
 
 use crate::{
     inject::{self, Extract},
-    BindingKey, IntoResponse, Message, MessageBinding, MessageDescriptor, Response,
+    BindingExpression, BindingKey, IntoResponse, Message, MessageDescriptor, Response,
     SubscriptionMode,
 };
 
@@ -103,8 +103,8 @@ where
 
 fn bind<M, F>(bind_fn: F) -> BindingKey
 where
-    M: MessageBinding,
-    F: FnOnce(&mut <M as MessageBinding>::Binding),
+    M: BindingExpression,
+    F: FnOnce(&mut <M as BindingExpression>::Binding),
 {
     let mut binding = M::Binding::default();
     bind_fn(&mut binding);
@@ -143,8 +143,8 @@ where
 
     pub fn bind<F>(mut self, bind_fn: F) -> Self
     where
-        H::Message: MessageBinding,
-        F: FnOnce(&mut <H::Message as MessageBinding>::Binding),
+        H::Message: BindingExpression,
+        F: FnOnce(&mut <H::Message as BindingExpression>::Binding),
     {
         self.descriptor
             .bindings

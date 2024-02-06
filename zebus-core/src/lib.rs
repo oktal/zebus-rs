@@ -181,9 +181,12 @@ pub trait Message: Any {
     fn as_any(&self) -> &dyn Any;
 }
 
-pub trait MessageBinding {
+/// An interface to create a binding for a [`Message`]
+pub trait BindingExpression {
+    /// Associated type to use to generate binding for this expression
     type Binding: Default;
 
+    /// Generate the [`BindingKey`] for the [`Binding`]
     fn bind(binding: Self::Binding) -> BindingKey;
 }
 
