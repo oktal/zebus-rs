@@ -16,8 +16,8 @@ use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
     events::PeerSubscriptionsForTypeUpdated,
-    Directory, DirectoryReader, PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted,
-    PeerStopped,
+    Directory, DirectoryReader, MessageBinding, PeerDecommissioned, PeerNotResponding,
+    PeerResponding, PeerStarted, PeerStopped,
 };
 
 /// State of the memory directory
@@ -102,9 +102,9 @@ impl DirectoryReader for MemoryDirectory {
         None
     }
 
-    fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
+    fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer> {
         let state = self.state.lock().unwrap();
-        if let Some(peers) = state.peers.get(message.name()) {
+        if let Some(peers) = state.peers.get(binding.descriptor().full_name) {
             peers.clone()
         } else {
             vec![]

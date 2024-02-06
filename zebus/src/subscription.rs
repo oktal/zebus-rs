@@ -1,3 +1,4 @@
+use crate::directory::binding::MessageBinding;
 use crate::proto::IntoProtobuf;
 use crate::{BindingExpression, MessageDescriptor};
 use crate::{BindingKey, MessageTypeDescriptor, MessageTypeId};
@@ -60,6 +61,12 @@ impl Subscription {
 
     pub(crate) fn message_type(&self) -> &MessageTypeId {
         &self.message_type_id
+    }
+}
+
+impl From<MessageBinding> for Subscription {
+    fn from(value: MessageBinding) -> Self {
+        Subscription::new(value.descriptor, value.key)
     }
 }
 

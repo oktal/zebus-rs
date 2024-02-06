@@ -17,7 +17,9 @@ use tracing::{error, info};
 use crate::{
     bus::{BusEvent, CommandResult, Error, RegistrationError, Result, SendError},
     core::{MessagePayload, SubscriptionMode},
-    directory::{self, Directory, DirectoryReader, PeerDescriptor, Registration},
+    directory::{
+        self, Directory, DirectoryReader, DirectoryReaderExt, PeerDescriptor, Registration,
+    },
     dispatch::{
         self, DispatchOutput, DispatchRequest, DispatchService, Dispatched, MessageDispatcher,
     },
@@ -415,7 +417,7 @@ impl<T: Transport> Receiver<T> {
     }
 
     async fn send(&mut self, message: &dyn Message) {
-        let dst_peers = self.directory.get_peers_handling(message);
+        let dst_peers = self.directory.get_peers_handling_message_val(message);
         if !dst_peers.is_empty() {
             self.send_to(message, dst_peers).await;
         }
@@ -523,7 +525,7 @@ fn get_startup_subscriptions<D: DispatchService>(
 impl<T: Transport> Core<T> {
     async fn send(&self, command: &dyn Command) -> CommandResult {
         // Retrieve the list of peers handling the command from the directory
-        let peers = self.directory.get_peers_handling(command.up());
+        let peers = self.directory.get_peers_handling_message_val(command.up());
 
         let self_dst_peer = peers.iter().find(|&p| p.id == self.self_peer.id);
         // TODO(oktal): add local dispatch toggling
@@ -591,7 +593,7 @@ impl<T: Transport> Core<T> {
 
     async fn publish(&self, event: &dyn Event) -> Result<()> {
         // Retrieve the list of peers handling the event from the directory
-        let peers = self.directory.get_peers_handling(event.up());
+        let peers = self.directory.get_peers_handling_message_val(event.up());
         let len = peers.len();
 
         let name = event.name();

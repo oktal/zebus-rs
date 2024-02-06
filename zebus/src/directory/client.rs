@@ -17,6 +17,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use super::MessageBinding;
 use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
@@ -342,10 +343,9 @@ impl DirectoryState {
         }
     }
 
-    fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
-        let message_type = MessageType::of_val(message);
-        let binding_key = BindingKey::create(message);
-        self.subscriptions.get(&message_type, &binding_key)
+    fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer> {
+        let message_type = MessageType::from(binding.descriptor().clone());
+        self.subscriptions.get(&message_type, binding.key())
     }
 
     fn update_with(
@@ -436,9 +436,9 @@ impl DirectoryReader for Client {
         inner.entry(peer_id, None).map(|e| e.peer.clone())
     }
 
-    fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer> {
+    fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer> {
         let inner = self.state.lock().unwrap();
-        inner.get_peers_handling(message)
+        inner.get_peers_handling(binding)
     }
 }
 
@@ -557,6 +557,7 @@ mod tests {
 
     use super::*;
     use crate::bus::NoopBus;
+    use crate::directory::DirectoryReaderExt;
     use crate::dispatch::InvokerService;
     use crate::proto::{IntoProtobuf, Subscription};
     use crate::{Message, MessageDescriptor, MessageTypeId};
@@ -740,11 +741,11 @@ mod tests {
             peers: vec![peer_desc_1.clone(), peer_desc_2.clone()],
         });
 
-        let peer_1 = fixture.client.get_peers_handling(&command_1);
+        let peer_1 = fixture.client.get_peers_handling_message(&command_1);
         assert_eq!(peer_1, vec![peer_desc_1.peer]);
-        let peer_2 = fixture.client.get_peers_handling(&command_2);
+        let peer_2 = fixture.client.get_peers_handling_message(&command_2);
         assert_eq!(peer_2, vec![peer_desc_2.peer]);
-        let peer_3 = fixture.client.get_peers_handling(&command_3);
+        let peer_3 = fixture.client.get_peers_handling_message(&command_3);
         assert_eq!(peer_3, vec![]);
     }
 
@@ -774,9 +775,9 @@ mod tests {
             peers: descriptors.clone(),
         });
 
-        let peers_1 = fixture.client.get_peers_handling(&event_1);
+        let peers_1 = fixture.client.get_peers_handling_message(&event_1);
         assert_eq!(peers_1, peers);
-        let peers_2 = fixture.client.get_peers_handling(&event_2);
+        let peers_2 = fixture.client.get_peers_handling_message(&event_2);
         assert_eq!(peers_2, peers);
     }
 
@@ -822,9 +823,9 @@ mod tests {
             peers: descriptors.clone(),
         });
 
-        let peers_1 = fixture.client.get_peers_handling(&event_1);
+        let peers_1 = fixture.client.get_peers_handling_message(&event_1);
         assert_eq!(peers_1, descriptor_peers_1);
-        let peers_2 = fixture.client.get_peers_handling(&event_2);
+        let peers_2 = fixture.client.get_peers_handling_message(&event_2);
         assert_eq!(peers_2, descriptor_peers_2);
     }
 
@@ -980,11 +981,11 @@ mod tests {
                 is_responding: true
             })
         );
-        let peers_1 = fixture.client.get_peers_handling(&command_1);
+        let peers_1 = fixture.client.get_peers_handling_message(&command_1);
         assert_eq!(peers_1, vec![]);
-        let peers_2 = fixture.client.get_peers_handling(&command_2);
+        let peers_2 = fixture.client.get_peers_handling_message(&command_2);
         assert_eq!(peers_2, vec![test_peer.clone()]);
-        let peers_3 = fixture.client.get_peers_handling(&command_3);
+        let peers_3 = fixture.client.get_peers_handling_message(&command_3);
         assert_eq!(peers_3, vec![]);
 
         assert_eq!(
@@ -1038,9 +1039,9 @@ mod tests {
             .await
             .unwrap();
 
-        let peers_1 = fixture.client.get_peers_handling(&command_1);
+        let peers_1 = fixture.client.get_peers_handling_message(&command_1);
         assert_eq!(peers_1, vec![fixture.peer()]);
-        let peers_2 = fixture.client.get_peers_handling(&command_2);
+        let peers_2 = fixture.client.get_peers_handling_message(&command_2);
         assert!(peers_2.is_empty());
 
         let events = fixture.try_recv_n(2).await;
@@ -1105,9 +1106,9 @@ mod tests {
             .await
             .unwrap();
 
-        let peers_1 = fixture.client.get_peers_handling(&command_1);
+        let peers_1 = fixture.client.get_peers_handling_message(&command_1);
         assert_eq!(peers_1, vec![fixture.peer()]);
-        let peers_2 = fixture.client.get_peers_handling(&command_2);
+        let peers_2 = fixture.client.get_peers_handling_message(&command_2);
         assert!(peers_2.is_empty());
         assert_eq!(
             fixture.try_recv_n(3).await,

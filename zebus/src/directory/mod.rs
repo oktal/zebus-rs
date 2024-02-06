@@ -1,27 +1,23 @@
+pub(crate) mod binding;
+mod client;
 pub(crate) mod commands;
 pub(crate) mod descriptor;
 pub(crate) mod event;
 pub mod events;
-
 #[cfg(test)]
 pub(crate) mod memory;
-
-mod client;
-pub(crate) use client::Client;
-
-use futures_core::Stream;
-use std::{pin::Pin, sync::Arc};
-
-pub use events::{PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped};
-
 pub(crate) mod registration;
+
+pub use binding::MessageBinding;
+pub(crate) use client::Client;
+pub use descriptor::PeerDescriptor;
+pub use events::{PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped};
 pub(crate) use registration::{Registration, RegistrationError};
 
-pub use descriptor::PeerDescriptor;
-
 use self::{commands::RegisterPeerResponse, event::PeerEvent};
-
-use crate::{dispatch::InvokerService, Message, Peer, PeerId};
+use crate::{dispatch::InvokerService, Message, MessageDescriptor, Peer, PeerId};
+use futures_core::Stream;
+use std::{pin::Pin, sync::Arc};
 
 /// Alias for the [`Directory`] [`PeerEvent`] [`Stream`]
 pub(crate) type EventStream = Pin<Box<dyn Stream<Item = PeerEvent> + Send + Sync + 'static>>;
@@ -34,10 +30,26 @@ pub trait DirectoryReader: Send + Sync + 'static {
     /// Returns `Some` if the peer exists and has been found or `None` otherwise
     fn get(&self, peer_id: &PeerId) -> Option<Peer>;
 
-    /// Get the list of [`Peer`] peers handling a [`crate::Message`] message based on the
-    /// subscriptions of the peers
-    fn get_peers_handling(&self, message: &dyn Message) -> Vec<Peer>;
+    /// Get the list of [`Peer`] peers handling a [`Message`] with specifing [`crate::BindingKey`] binding
+    fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer>;
 }
+
+/// Extension trait for [`DirectoryReader`]
+pub trait DirectoryReaderExt: DirectoryReader {
+    /// Get the list of [`Peer`] peers handling a [`Message`]
+    fn get_peers_handling_message<M>(&self, msg: &M) -> Vec<Peer>
+    where
+        M: Message + MessageDescriptor + 'static,
+    {
+        self.get_peers_handling(&MessageBinding::of(msg))
+    }
+
+    fn get_peers_handling_message_val(&self, msg: &dyn Message) -> Vec<Peer> {
+        self.get_peers_handling(&MessageBinding::of_val(msg))
+    }
+}
+
+impl<D> DirectoryReaderExt for D where D: DirectoryReader + ?Sized {}
 
 // TODO(oktal): can we relax `Sync` here ?
 /// A description trait for a directory
