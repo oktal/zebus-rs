@@ -1,7 +1,7 @@
 use crate::directory::binding::MessageBinding;
-use crate::proto::IntoProtobuf;
+use crate::proto::{FromProtobuf, IntoProtobuf};
 use crate::{BindingExpression, MessageDescriptor};
-use crate::{BindingKey, MessageTypeDescriptor, MessageTypeId};
+use crate::{BindingKey, MessageTypeId};
 
 pub(crate) mod proto {
     #[derive(Clone, prost::Message)]
@@ -16,8 +16,8 @@ pub(crate) mod proto {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Subscription {
-    message_type_id: MessageTypeId,
-    binding_key: BindingKey,
+    pub(crate) message_type_id: MessageTypeId,
+    pub(crate) binding_key: BindingKey,
 }
 
 impl Subscription {
@@ -43,7 +43,7 @@ impl Subscription {
     }
 
     pub fn with_binding<M: MessageDescriptor + 'static>(binding_key: BindingKey) -> Self {
-        let message_type_id = MessageTypeId::from_descriptor(MessageTypeDescriptor::of::<M>());
+        let message_type_id = MessageTypeId::of::<M>();
 
         Self {
             message_type_id,
@@ -77,6 +77,20 @@ impl IntoProtobuf for Subscription {
         proto::Subscription {
             message_type_id: self.message_type_id.into_protobuf(),
             binding_key: self.binding_key.into_protobuf(),
+        }
+    }
+}
+
+impl FromProtobuf for Subscription {
+    type Input = proto::Subscription;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        let message_type_id = MessageTypeId::from_protobuf(input.message_type_id);
+        let binding_key = BindingKey::from_protobuf(input.binding_key);
+
+        Subscription {
+            message_type_id,
+            binding_key,
         }
     }
 }

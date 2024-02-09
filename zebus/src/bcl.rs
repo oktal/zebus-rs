@@ -120,9 +120,25 @@ impl IntoProtobuf for chrono::DateTime<chrono::Utc> {
     fn into_protobuf(self) -> Self::Output {
         Self::Output {
             // 100-ns ticks
-            value: (self.timestamp_nanos() / 100),
+            value: (self.timestamp_nanos_opt().unwrap_or(0) / 100),
             scale: TimeSpanScale::Ticks as i32,
             kind: DateTimeKind::Utc as i32,
         }
+    }
+}
+
+impl FromProtobuf for chrono::DateTime<chrono::Utc> {
+    type Input = DateTime;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        const NANOSECONDS_IN_SECOND: i64 = 1_000_000_000;
+
+        let nanos = input.value * 100;
+        let secs = nanos / NANOSECONDS_IN_SECOND;
+        let Some(nsecs) = (nanos % NANOSECONDS_IN_SECOND).try_into().ok() else {
+            return Self::UNIX_EPOCH;
+        };
+
+        Self::from_timestamp(secs, nsecs).unwrap_or(Self::UNIX_EPOCH)
     }
 }

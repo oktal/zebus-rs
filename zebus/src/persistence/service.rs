@@ -136,8 +136,8 @@ where
                                 State::Init { mut peers, descriptor } => {
                                     // A persistence service peer started but we are still in the
                                     // initialization stage, add it to our list of persistence peers
-                                    if peer.id.is_persistence() && peer.is_up {
-                                        peers.push(peer)
+                                    if peer.id().is_persistence() && peer.peer.is_up {
+                                        peers.push(peer.peer)
                                     }
 
                                     State::Init { peers, descriptor }
@@ -147,9 +147,9 @@ where
                                     // persistence service peer, switch to the `PersistenceReady`
                                     // state.
                                     // Otherwise, keep waiting for the persistence service to start
-                                    if peer.id.is_persistence() && peer.is_up {
-                                        debug!("discovered persistence peer {peer}");
-                                        State::PersistenceReady { peers: vec![peer], descriptor }
+                                    if peer.id().is_persistence() && peer.peer.is_up {
+                                        debug!("discovered persistence peer {}", peer.peer);
+                                        State::PersistenceReady { peers: vec![peer.peer], descriptor }
                                     } else {
                                         State::Registered { descriptor }
                                     }
@@ -277,7 +277,7 @@ where
                                                 if let Some(msg_type_id) = descriptor.subscriptions.iter().find_map(|s| {
                                                     (s.full_name() == msg_type).then_some(s.message_type())
                                                 }) {
-                                                    if msg_type_id.is_infrastructure() {
+                                                    if let Some(true) = msg_type_id.is_infrastructure() {
                                                         let _ = forward_tx.send(msg);
                                                     }
                                                     else

@@ -1,5 +1,11 @@
-use crate::{proto::IntoProtobuf, Message, MessageDescriptor, MessageTypeDescriptor};
-use std::any::TypeId;
+use crate::{
+    proto::{FromProtobuf, IntoProtobuf},
+    Message, MessageDescriptor, MessageTypeDescriptor,
+};
+use std::{
+    any::TypeId,
+    hash::{Hash, Hasher},
+};
 
 pub(crate) mod proto {
     use crate::{Message, MessageDescriptor};
@@ -30,107 +36,87 @@ pub(crate) mod proto {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum Repr {
+    /// A message type with is associated complete [`MessageTypeDescriptor`]
+    Descriptor(MessageTypeDescriptor),
+
+    /// Name of the message
+    Name(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageTypeId {
-    descriptor: MessageTypeDescriptor,
+    repr: Repr,
+}
+
+impl Hash for MessageTypeId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        println!("Hashing {:?} to {}", self, self.full_name());
+        self.full_name().hash(state);
+    }
 }
 
 impl From<MessageTypeDescriptor> for MessageTypeId {
     fn from(value: MessageTypeDescriptor) -> Self {
-        Self { descriptor: value }
+        Self {
+            repr: Repr::Descriptor(value),
+        }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct MessageType(String);
-
-impl AsRef<str> for MessageType {
+impl AsRef<str> for MessageTypeId {
     fn as_ref(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl MessageType {
-    pub fn of<M: MessageDescriptor>() -> Self {
-        Self(M::name().to_string())
-    }
-
-    pub fn of_val(message: &dyn Message) -> Self {
-        Self(message.name().to_string())
-    }
-
-    pub fn is<M: MessageDescriptor>(&self) -> bool {
-        self.0 == M::name()
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl From<String> for MessageType {
-    fn from(str: String) -> Self {
-        Self(str)
-    }
-}
-
-impl From<MessageTypeId> for MessageType {
-    fn from(id: MessageTypeId) -> Self {
-        Self(id.descriptor.full_name.to_string())
-    }
-}
-
-impl From<MessageTypeDescriptor> for MessageType {
-    fn from(descriptor: MessageTypeDescriptor) -> Self {
-        Self(descriptor.full_name.to_string())
-    }
-}
-
-impl From<proto::MessageTypeId> for MessageType {
-    fn from(id: proto::MessageTypeId) -> Self {
-        Self(id.full_name)
+        self.full_name()
     }
 }
 
 impl MessageTypeId {
-    pub(crate) fn from_descriptor(descriptor: MessageTypeDescriptor) -> Self {
-        Self { descriptor }
-    }
-
     pub fn of<M: MessageDescriptor + 'static>() -> Self {
-        Self::from_descriptor(MessageTypeDescriptor::of::<M>())
+        Self::from(MessageTypeDescriptor::of::<M>())
     }
 
     pub fn of_val(message: &dyn Message) -> Self {
-        Self::from_descriptor(MessageTypeDescriptor::of_val(message.up()))
+        Self::from(MessageTypeDescriptor::of_val(message.up()))
     }
 
     pub fn is<M: MessageDescriptor>(&self) -> bool {
-        self.descriptor.full_name == M::name()
+        self.full_name() == M::name()
     }
 
     /// Returns the fully qualified name of this message type
     pub fn full_name(&self) -> &str {
-        &self.descriptor.full_name
+        match &self.repr {
+            Repr::Descriptor(desc) => &desc.full_name,
+            Repr::Name(name) => name.as_str(),
+        }
     }
 
     /// Returns the Rust [`TypeId`] type representation of this message type
-    pub fn type_id(&self) -> TypeId {
-        self.descriptor.r#type
+    pub fn type_id(&self) -> Option<TypeId> {
+        self.descriptor().map(|d| d.r#type)
     }
 
     /// Returns `true` if this message type is an infrastucture message
-    pub fn is_infrastructure(&self) -> bool {
-        self.descriptor.is_infrastructure
+    pub fn is_infrastructure(&self) -> Option<bool> {
+        self.descriptor().map(|d| d.is_infrastructure)
     }
 
     /// Returns `true` if this message type is persistent
-    pub fn is_persistent(&self) -> bool {
-        self.descriptor.is_persistent
+    pub fn is_persistent(&self) -> Option<bool> {
+        self.descriptor().map(|d| d.is_persistent)
     }
 
-    pub(crate) fn into_protobuf(self) -> proto::MessageTypeId {
-        proto::MessageTypeId {
-            full_name: self.descriptor.full_name.to_string(),
+    fn descriptor(&self) -> Option<&MessageTypeDescriptor> {
+        match &self.repr {
+            Repr::Descriptor(descriptor) => Some(descriptor),
+            Repr::Name(_) => None,
+        }
+    }
+
+    pub(crate) fn into_name(self) -> String {
+        match self.repr {
+            Repr::Descriptor(desc) => desc.full_name.to_string(),
+            Repr::Name(n) => n,
         }
     }
 }
@@ -139,8 +125,48 @@ impl IntoProtobuf for MessageTypeId {
     type Output = proto::MessageTypeId;
 
     fn into_protobuf(self) -> Self::Output {
-        proto::MessageTypeId {
-            full_name: self.descriptor.full_name.to_string(),
+        let full_name = self.full_name().to_string();
+        proto::MessageTypeId { full_name }
+    }
+}
+
+impl FromProtobuf for MessageTypeId {
+    type Input = proto::MessageTypeId;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        Self {
+            repr: Repr::Name(input.full_name),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::hash_map::DefaultHasher;
+
+    use super::*;
+    use crate::{Event, MessageTypeId};
+
+    #[derive(Event)]
+    #[zebus(namespace = "Abc.Test")]
+    struct TestEvent {}
+
+    fn calculate_hash<T: Hash>(t: &T) -> u64 {
+        let mut s = DefaultHasher::new();
+        t.hash(&mut s);
+        s.finish()
+    }
+
+    #[test]
+    fn hash() {
+        let type_id_descriptor = MessageTypeId::of::<TestEvent>();
+        let type_id_name = MessageTypeId::from_protobuf(proto::MessageTypeId {
+            full_name: type_id_descriptor.full_name().to_string(),
+        });
+
+        assert_eq!(
+            calculate_hash(&type_id_descriptor),
+            calculate_hash(&type_id_name)
+        );
     }
 }

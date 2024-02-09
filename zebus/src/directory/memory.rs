@@ -9,15 +9,15 @@ use tokio::sync::broadcast;
 use crate::{
     dispatch::{RouteHandler, Router},
     inject::{self, State},
-    Message, MessageDescriptor, Peer, PeerId,
+    MessageDescriptor, Peer, PeerId,
 };
 
 use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
     events::PeerSubscriptionsForTypeUpdated,
-    Directory, DirectoryReader, MessageBinding, PeerDecommissioned, PeerNotResponding,
-    PeerResponding, PeerStarted, PeerStopped,
+    Directory, DirectoryReader, MessageBinding, PeerDecommissioned, PeerDescriptor,
+    PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
 };
 
 /// State of the memory directory
@@ -98,7 +98,7 @@ impl MemoryDirectory {
 }
 
 impl DirectoryReader for MemoryDirectory {
-    fn get(&self, _peer_id: &PeerId) -> Option<Peer> {
+    fn get(&self, _peer_id: &PeerId) -> Option<PeerDescriptor> {
         None
     }
 

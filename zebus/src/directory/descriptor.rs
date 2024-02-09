@@ -1,6 +1,9 @@
 use chrono::Utc;
 
-use crate::{proto::IntoProtobuf, Peer, PeerId, Subscription};
+use crate::{
+    proto::{FromProtobuf, IntoProtobuf},
+    Peer, PeerId, Subscription,
+};
 
 pub(crate) mod proto {
     #[derive(Clone, prost::Message)]
@@ -23,7 +26,7 @@ pub(crate) mod proto {
 }
 
 /// Description of a [`Peer`]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct PeerDescriptor {
     /// The [`Peer`] this descriptor belongs to
     pub peer: Peer,
@@ -47,6 +50,10 @@ impl PeerDescriptor {
     pub fn id(&self) -> &PeerId {
         &self.peer.id
     }
+
+    pub fn peer(&self) -> &Peer {
+        &self.peer
+    }
 }
 
 impl IntoProtobuf for PeerDescriptor {
@@ -59,6 +66,28 @@ impl IntoProtobuf for PeerDescriptor {
             is_persistent: self.is_persistent,
             timestamp_utc: self.timestamp_utc.into_protobuf(),
             has_debugger_attached: self.has_debugger_attached.clone(),
+        }
+    }
+}
+
+impl FromProtobuf for PeerDescriptor {
+    type Input = proto::PeerDescriptor;
+
+    fn from_protobuf(input: Self::Input) -> Self {
+        let subscriptions = input
+            .subscriptions
+            .into_iter()
+            .map(Subscription::from_protobuf)
+            .collect();
+
+        let timestamp_utc = input.timestamp_utc.map(FromProtobuf::from_protobuf);
+
+        PeerDescriptor {
+            peer: input.peer,
+            subscriptions,
+            is_persistent: input.is_persistent,
+            timestamp_utc,
+            has_debugger_attached: input.has_debugger_attached,
         }
     }
 }

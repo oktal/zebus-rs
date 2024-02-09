@@ -207,7 +207,7 @@ impl<'a, M: Message + 'a> UpcastFrom<M> for dyn Message + 'a {
 
 /// Enum representing the type of a [`Message`]
 /// A [`Message`] can either be a [`Command`] command or [`Event`] event
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum MessageKind {
     /// Message of type [`Command`]
     Command,
@@ -255,7 +255,7 @@ pub enum SubscriptionMode {
     Manual,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MessageTypeDescriptor {
     /// Fully-qualified name of the message
     pub full_name: &'static str,

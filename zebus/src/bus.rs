@@ -12,9 +12,9 @@ use crate::{
     directory::{self, event::PeerEvent, PeerDescriptor},
     dispatch,
     persistence::event::MessageReplayed,
-    proto::IntoProtobuf,
+    proto::{FromProtobuf, IntoProtobuf},
     transport::{MessageExecutionCompleted, TransportMessage},
-    BoxError, MessageType, Peer, PeerId,
+    BoxError, MessageTypeId, Peer, PeerId,
 };
 
 /// Error raised when failing to register with the directory
@@ -131,7 +131,7 @@ pub enum CommandError {
 }
 
 /// Execution result of a [`Command`]
-pub type CommandResult = std::result::Result<Option<RawMessage<MessageType>>, CommandError>;
+pub type CommandResult = std::result::Result<Option<RawMessage<MessageTypeId>>, CommandError>;
 
 impl MessagePayload for CommandResult {
     fn message_type(&self) -> Option<&str> {
@@ -158,7 +158,10 @@ impl From<MessageExecutionCompleted> for CommandResult {
             })
         } else {
             let response = match (message.payload_type_id, message.payload) {
-                (Some(message_type), Some(payload)) => Some(RawMessage::new(message_type, payload)),
+                (Some(message_type), Some(payload)) => Some(RawMessage::new(
+                    MessageTypeId::from_protobuf(message_type),
+                    payload,
+                )),
                 _ => None,
             };
 

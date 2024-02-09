@@ -1034,6 +1034,7 @@ mod tests {
     use crate::dispatch::router::{RouteHandler, Router};
     use crate::inject::{self};
     use crate::message_type_id::MessageTypeId;
+    use crate::proto::IntoProtobuf;
     use crate::transport::memory::MemoryTransport;
 
     struct Fixture {

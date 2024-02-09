@@ -1,4 +1,5 @@
-use crate::{Peer, PeerId};
+use crate::PeerId;
+use super::PeerDescriptor;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PeerEventKind {
@@ -22,26 +23,30 @@ impl PeerEventKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PeerEvent {
     /// A new peer as been started
-    Started(Peer),
+    Started(PeerDescriptor),
 
     /// Peer been stopped
-    Stopped(Peer),
+    Stopped(PeerDescriptor),
 
     /// Peer has been updated
-    Updated(Peer),
+    Updated(PeerDescriptor),
 
     /// Peer has been decomissionned
-    Decomissionned(Peer),
+    Decomissionned(PeerDescriptor),
 }
 
 impl PeerEvent {
-    pub(crate) fn peer_id(&self) -> &PeerId {
+    pub(crate) fn descriptor(&self) -> &PeerDescriptor {
         match self {
-            PeerEvent::Started(peer)
-            | PeerEvent::Stopped(peer)
-            | PeerEvent::Updated(peer)
-            | PeerEvent::Decomissionned(peer) => &peer.id,
+            PeerEvent::Started(descriptor)
+            | PeerEvent::Stopped(descriptor)
+            | PeerEvent::Updated(descriptor)
+            | PeerEvent::Decomissionned(descriptor) => descriptor,
         }
+    }
+
+    pub(crate) fn peer_id(&self) -> &PeerId {
+        &self.descriptor().peer.id
     }
 
     pub fn kind(&self) -> PeerEventKind {

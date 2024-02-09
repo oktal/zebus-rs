@@ -8,8 +8,8 @@ use thiserror::Error;
 use tokio::sync::{broadcast, Notify};
 
 use crate::{
-    bus::BusEvent, core::MessagePayload, directory::DirectoryReader, message_type_id::MessageType,
-    sync::stream::EventStream, Message, MessageDescriptor, Peer, PeerId,
+    bus::BusEvent, core::MessagePayload, directory::DirectoryReader, proto::FromProtobuf,
+    sync::stream::EventStream, Message, MessageDescriptor, MessageTypeId, Peer, PeerId,
 };
 
 use super::{SendContext, Transport, TransportMessage};
@@ -35,7 +35,7 @@ struct MemoryTransportInner {
     tx_queue: Vec<(TransportMessage, Vec<Peer>)>,
 
     /// Waiting transmission queue
-    tx_wait_queue: HashMap<MessageType, Arc<Notify>>,
+    tx_wait_queue: HashMap<String, Arc<Notify>>,
 
     /// Reception queue
     /// Messages that should be "sent" back as a response to a transport message will be stored
@@ -130,7 +130,7 @@ impl MemoryTransport {
     }
 
     /// Wait for [`count`] messages of type `M` to be sent through the transport
-    pub(crate) async fn wait_for<M: MessageDescriptor + prost::Message + Default>(
+    pub(crate) async fn wait_for<M: MessageDescriptor + prost::Message + Default + 'static>(
         &self,
         count: usize,
     ) -> Vec<(M, Vec<Peer>)> {
@@ -143,13 +143,15 @@ impl MemoryTransport {
                 return tx_messages;
             }
 
+            let message_type = MessageTypeId::of::<M>();
+
             // We need to wait for more messages to be sent through the transport
             let notify = {
                 let mut inner = self.inner.lock().unwrap();
 
                 inner
                     .tx_wait_queue
-                    .entry(MessageType::of::<M>())
+                    .entry(message_type.into_name())
                     .or_insert(Arc::new(Notify::new()))
                     .clone()
             };
@@ -267,11 +269,11 @@ impl Transport for MemoryTransport {
             }
         }
 
-        let msg_type = MessageType::from(message.message_type_id.clone());
+        let msg_type = MessageTypeId::from_protobuf(message.message_type_id.clone());
         inner.tx_queue.push((message, peers));
 
         // Notify any waiter that some messages have been sent
-        if let Some(notify) = inner.tx_wait_queue.get(&msg_type) {
+        if let Some(notify) = inner.tx_wait_queue.get(msg_type.full_name()) {
             notify.notify_waiters();
         }
 

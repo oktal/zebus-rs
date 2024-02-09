@@ -28,7 +28,7 @@ pub use peer::Peer;
 pub use peer_id::PeerId;
 pub use subscription::Subscription;
 
-use message_type_id::{MessageType, MessageTypeId};
+pub use message_type_id::MessageTypeId;
 
 pub use routing::BindingKey;
 pub use zebus_core::{

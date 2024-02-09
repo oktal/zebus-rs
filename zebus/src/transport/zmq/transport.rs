@@ -1,6 +1,6 @@
 use futures_util::FutureExt;
 use prost::Message;
-use std::{borrow::Cow, collections::HashMap, io::Write, thread::JoinHandle, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, io::Write, sync::Arc, thread::JoinHandle};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -573,13 +573,13 @@ impl OutboundWorker {
             }
 
             match peer_event {
-                PeerEvent::Decomissionned(peer) if !peer.id.is_persistence() => {
-                    self.disconnect::<TerminateConnection>(&peer.id, encode_buf)
+                PeerEvent::Decomissionned(descriptor) if !descriptor.id().is_persistence() => {
+                    self.disconnect::<TerminateConnection>(descriptor.id(), encode_buf)
                 }
                 // If a previously existing peer starts up with a new endpoint, make sure to disconnect
                 // the previous socket to avoid keeping stale sockets
-                PeerEvent::Started(peer) => {
-                    self.disconnect::<TerminateConnection>(&peer.id, encode_buf)
+                PeerEvent::Started(descriptor) => {
+                    self.disconnect::<TerminateConnection>(descriptor.id(), encode_buf)
                 }
                 _ => Ok(()),
             }

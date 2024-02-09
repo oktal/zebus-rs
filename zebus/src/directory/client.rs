@@ -4,20 +4,18 @@ use tokio::sync::broadcast;
 use tracing::debug;
 
 use crate::dispatch::router::{RouteHandler, Router};
-use crate::inject;
+use crate::message_type_id::MessageTypeId;
+use crate::proto::FromProtobuf;
 use crate::{
-    core::MessagePayload,
-    proto::{self, PeerDescriptor},
-    routing::tree::PeerSubscriptionTree,
-    transport::TransportMessage,
-    BindingKey, Message, MessageType, Peer, PeerId,
+    core::MessagePayload, routing::tree::PeerSubscriptionTree, transport::TransportMessage,
+    BindingKey, Peer, PeerId,
 };
+use crate::{inject, Subscription};
 use std::{
     collections::{hash_map, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-use super::MessageBinding;
 use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
@@ -25,9 +23,10 @@ use super::{
     Directory, DirectoryReader, PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted,
     PeerStopped,
 };
+use super::{MessageBinding, PeerDescriptor};
 
 #[derive(Debug)]
-struct SubscriptionIndex(HashMap<MessageType, PeerSubscriptionTree>);
+struct SubscriptionIndex(HashMap<String, PeerSubscriptionTree>);
 
 impl SubscriptionIndex {
     fn new() -> Self {
@@ -36,21 +35,23 @@ impl SubscriptionIndex {
 
     fn add<'a>(
         &mut self,
-        message_type: impl Into<MessageType>,
+        message_type: impl Into<MessageTypeId>,
         peer: &Peer,
         bindings: impl Iterator<Item = &'a BindingKey>,
     ) {
+        let message_type = message_type.into();
+
         let tree = self
             .0
-            .entry(message_type.into())
+            .entry(message_type.into_name())
             .or_insert(PeerSubscriptionTree::new());
         for key in bindings {
             tree.add(peer.clone(), key);
         }
     }
 
-    fn get(&self, message_type: &MessageType, binding: &BindingKey) -> Vec<Peer> {
-        match self.0.get(message_type) {
+    fn get(&self, message_type: &MessageTypeId, binding: &BindingKey) -> Vec<Peer> {
+        match self.0.get(message_type.full_name()) {
             Some(tree) => tree.get_peers(binding),
             None => vec![],
         }
@@ -58,11 +59,11 @@ impl SubscriptionIndex {
 
     fn remove<'a>(
         &mut self,
-        message_type: &MessageType,
+        message_type: &MessageTypeId,
         peer: &Peer,
         bindings: impl Iterator<Item = &'a BindingKey>,
     ) {
-        if let Some(tree) = self.0.get_mut(&message_type) {
+        if let Some(tree) = self.0.get_mut(message_type.full_name()) {
             for key in bindings {
                 tree.remove(peer, key);
             }
@@ -80,25 +81,18 @@ struct SubscriptionEntry {
 /// Entry representing a peer from the directory
 #[derive(Debug, Default)]
 struct PeerEntry {
-    peer: Peer,
-    _is_persistent: bool,
+    descriptor: PeerDescriptor,
     timestamp_utc: chrono::DateTime<chrono::Utc>,
-    has_debugger_attached: bool,
-    subscriptions: HashMap<MessageType, SubscriptionEntry>,
+    subscriptions: HashMap<MessageTypeId, SubscriptionEntry>,
 }
 
 impl PeerEntry {
     fn new(descriptor: PeerDescriptor) -> Self {
-        let timestamp_utc = descriptor
-            .timestamp_utc
-            .and_then(|v| v.try_into().ok())
-            .unwrap_or(chrono::Utc::now());
+        let timestamp_utc = descriptor.timestamp_utc.unwrap_or(chrono::Utc::now());
 
         Self {
-            peer: descriptor.peer,
-            _is_persistent: descriptor.is_persistent,
+            descriptor,
             timestamp_utc,
-            has_debugger_attached: descriptor.has_debugger_attached.unwrap_or(false),
             subscriptions: HashMap::new(),
         }
     }
@@ -117,17 +111,16 @@ impl PeerEntry {
             .and_then(|v| v.try_into().ok())
             .unwrap_or(chrono::Utc::now());
 
-        self.peer.endpoint = descriptor.peer.endpoint.clone();
-        self.peer.is_up = descriptor.peer.is_up;
-        self.peer.is_responding = descriptor.peer.is_responding;
+        self.descriptor.peer.endpoint = descriptor.peer.endpoint.clone();
+        self.descriptor.peer.is_up = descriptor.peer.is_up;
+        self.descriptor.peer.is_responding = descriptor.peer.is_responding;
         self.timestamp_utc = timestamp_utc;
-        self.has_debugger_attached = descriptor.has_debugger_attached.unwrap_or(false);
     }
 
     fn set_subscriptions(
         &mut self,
         index: &mut SubscriptionIndex,
-        subscriptions: Vec<proto::Subscription>,
+        subscriptions: Vec<Subscription>,
         timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
     ) {
         let subscription_bindings = subscriptions
@@ -136,8 +129,7 @@ impl PeerEntry {
             .into_group_map();
 
         for (message_type, bindings) in subscription_bindings {
-            let message_type = MessageType::from(message_type.full_name);
-            let binding_keys = bindings.into_iter().map(Into::into).collect::<HashSet<_>>();
+            let binding_keys = bindings.into_iter().collect::<HashSet<_>>();
             self.set_message_subscriptions(index, message_type, binding_keys, timestamp_utc);
         }
     }
@@ -149,11 +141,11 @@ impl PeerEntry {
         timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
     ) {
         for subscription in subscriptions {
-            let message_type = MessageType::from(subscription.message_type);
+            let message_type = MessageTypeId::from_protobuf(subscription.message_type);
             let binding_keys = subscription
                 .bindings
                 .into_iter()
-                .map(Into::into)
+                .map(FromProtobuf::from_protobuf)
                 .collect::<HashSet<_>>();
             self.set_message_subscriptions(index, message_type, binding_keys, timestamp_utc);
         }
@@ -162,7 +154,7 @@ impl PeerEntry {
     fn set_message_subscriptions(
         &mut self,
         index: &mut SubscriptionIndex,
-        message_type: MessageType,
+        message_type: MessageTypeId,
         binding_keys: HashSet<BindingKey>,
         timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
     ) {
@@ -173,14 +165,18 @@ impl PeerEntry {
                 let to_remove = entry.binding_keys.difference(&binding_keys);
                 let to_add = binding_keys.difference(&entry.binding_keys);
 
-                index.add(message_type.clone(), &self.peer, to_add);
-                index.remove(&message_type, &self.peer, to_remove);
+                index.add(message_type.clone(), &self.descriptor.peer, to_add);
+                index.remove(&message_type, &self.descriptor.peer, to_remove);
 
                 entry.timestamp_utc = timestamp_utc;
                 entry.binding_keys.retain(|b| binding_keys.contains(&b));
             }
             hash_map::Entry::Vacant(e) => {
-                index.add(message_type.clone(), &self.peer, binding_keys.iter());
+                index.add(
+                    message_type.clone(),
+                    &self.descriptor.peer,
+                    binding_keys.iter(),
+                );
                 e.insert(SubscriptionEntry {
                     binding_keys,
                     timestamp_utc,
@@ -191,13 +187,13 @@ impl PeerEntry {
 }
 
 struct PeerUpdate {
-    peer: Peer,
+    descriptor: PeerDescriptor,
     events_tx: broadcast::Sender<PeerEvent>,
 }
 
 impl PeerUpdate {
-    fn raise(self, event_fn: impl FnOnce(Peer) -> PeerEvent) {
-        let _ = self.events_tx.send(event_fn(self.peer));
+    fn raise(self, event_fn: impl FnOnce(PeerDescriptor) -> PeerEvent) {
+        let _ = self.events_tx.send(event_fn(self.descriptor));
     }
 
     fn forget(self) {}
@@ -222,7 +218,7 @@ impl DirectoryState {
     }
 
     fn peer_started(&mut self, message: PeerStarted) {
-        self.add_or_update(message.descriptor)
+        self.add_or_update(PeerDescriptor::from_protobuf(message.descriptor))
             .raise(PeerEvent::Started);
     }
 
@@ -231,8 +227,8 @@ impl DirectoryState {
 
         let update = self.update_with(&message.id, Some(timestamp_utc), |e| {
             e.timestamp_utc = timestamp_utc;
-            e.peer.is_up = false;
-            e.peer.is_responding = false;
+            e.descriptor.peer.is_up = false;
+            e.descriptor.peer.is_responding = false;
         });
 
         if let Some(update) = update {
@@ -249,7 +245,7 @@ impl DirectoryState {
 
     fn peer_not_responding(&mut self, message: PeerNotResponding) {
         let update = self.update_with(&message.id, None, |e| {
-            e.peer.is_responding = false;
+            e.descriptor.peer.is_responding = false;
         });
 
         if let Some(update) = update {
@@ -259,7 +255,7 @@ impl DirectoryState {
 
     fn peer_responding(&mut self, message: PeerResponding) {
         let update = self.update_with(&message.id, None, |e| {
-            e.peer.is_responding = true;
+            e.descriptor.peer.is_responding = true;
         });
 
         if let Some(update) = update {
@@ -289,23 +285,20 @@ impl DirectoryState {
     }
 
     fn add_or_update(&mut self, descriptor: PeerDescriptor) -> PeerUpdate {
-        let peer = descriptor.peer.clone();
-        let peer_id = peer.id.clone();
-        let subscriptions = descriptor.subscriptions.clone();
-        let timestamp_utc = descriptor.timestamp_utc.clone();
+        let peer_id = descriptor.peer.id.clone();
 
         let peer_entry = self
             .peers
             .entry(peer_id)
             .and_modify(|e| e.update(&descriptor))
-            .or_insert_with(|| PeerEntry::new(descriptor));
+            .or_insert_with(|| PeerEntry::new(descriptor.clone()));
 
         let index = &mut self.subscriptions;
-        let timestamp_utc = timestamp_utc.and_then(|t| t.try_into().ok());
-        peer_entry.set_subscriptions(index, subscriptions, timestamp_utc);
+        let timestamp_utc = descriptor.timestamp_utc.and_then(|t| t.try_into().ok());
+        peer_entry.set_subscriptions(index, descriptor.subscriptions.clone(), timestamp_utc);
 
         PeerUpdate {
-            peer,
+            descriptor,
             events_tx: self.events_tx.clone(),
         }
     }
@@ -325,7 +318,7 @@ impl DirectoryState {
                         timestamp_utc,
                     );
                     Some(PeerUpdate {
-                        peer: entry.peer.clone(),
+                        descriptor: entry.descriptor.clone(),
                         events_tx: self.events_tx.clone(),
                     })
                 } else {
@@ -334,7 +327,7 @@ impl DirectoryState {
             } else {
                 entry.set_subscriptions_for(&mut self.subscriptions, subscriptions, timestamp_utc);
                 Some(PeerUpdate {
-                    peer: entry.peer.clone(),
+                    descriptor: entry.descriptor.clone(),
                     events_tx: self.events_tx.clone(),
                 })
             }
@@ -344,7 +337,8 @@ impl DirectoryState {
     }
 
     fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer> {
-        let message_type = MessageType::from(binding.descriptor().clone());
+        // TODO(oktal):  avoid allocating a MessageTypeId
+        let message_type = MessageTypeId::from(binding.descriptor().clone());
         self.subscriptions.get(&message_type, binding.key())
     }
 
@@ -357,16 +351,15 @@ impl DirectoryState {
         let entry = self.entry_mut(peer_id, timestamp)?;
         f(entry);
         Some(PeerUpdate {
-            peer: entry.peer.clone(),
+            descriptor: entry.descriptor.clone(),
             events_tx: self.events_tx.clone(),
         })
     }
 
     fn remove(&mut self, peer_id: &PeerId) -> Option<PeerUpdate> {
         let entry = self.peers.remove(peer_id)?;
-        let peer = entry.peer;
         Some(PeerUpdate {
-            peer,
+            descriptor: entry.descriptor,
             events_tx: self.events_tx.clone(),
         })
     }
@@ -431,9 +424,9 @@ impl Client {
 }
 
 impl DirectoryReader for Client {
-    fn get(&self, peer_id: &PeerId) -> Option<Peer> {
+    fn get(&self, peer_id: &PeerId) -> Option<PeerDescriptor> {
         let inner = self.state.lock().unwrap();
-        inner.entry(peer_id, None).map(|e| e.peer.clone())
+        inner.entry(peer_id, None).map(|e| e.descriptor.clone())
     }
 
     fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer> {
@@ -460,7 +453,9 @@ impl Directory for Client {
     fn handle_registration(&self, response: RegisterPeerResponse) {
         let mut inner = self.state.lock().unwrap();
         for descriptor in response.peers {
-            inner.add_or_update(descriptor).forget();
+            inner
+                .add_or_update(PeerDescriptor::from_protobuf(descriptor))
+                .forget();
         }
     }
 
@@ -553,13 +548,15 @@ async fn peer_subscriptions_for_type_updated(
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
+    use futures_util::FutureExt;
     use tokio_stream::StreamExt;
 
     use super::*;
     use crate::bus::NoopBus;
+    use crate::directory::event::PeerEventKind;
     use crate::directory::DirectoryReaderExt;
     use crate::dispatch::InvokerService;
-    use crate::proto::{IntoProtobuf, Subscription};
+    use crate::proto::IntoProtobuf;
     use crate::{Message, MessageDescriptor, MessageTypeId};
 
     #[derive(Clone, crate::Command, prost::Message)]
@@ -613,9 +610,12 @@ mod tests {
             }
         }
 
-        async fn try_recv_n(self, n: usize) -> Vec<Option<PeerEvent>> {
-            use crate::sync::stream::StreamExt;
-            self.events_rx.take_exact(n).collect().await
+        async fn recv(&mut self) -> Option<PeerEvent> {
+            self.events_rx.next().await
+        }
+
+        async fn try_recv(&mut self) -> Option<PeerEvent> {
+            self.events_rx.next().now_or_never().flatten()
         }
 
         fn peer_id(&self) -> PeerId {
@@ -631,12 +631,11 @@ mod tests {
         }
 
         fn create_descriptor() -> PeerDescriptor {
-            let timestamp_utc = chrono::Utc::now();
             PeerDescriptor {
                 peer: Peer::test(),
                 subscriptions: vec![],
                 is_persistent: true,
-                timestamp_utc: Some(timestamp_utc.into_protobuf()),
+                timestamp_utc: Some(chrono::Utc::now()),
                 has_debugger_attached: Some(false),
             }
         }
@@ -653,12 +652,7 @@ mod tests {
         }
 
         fn create_subscription(message: &dyn Message) -> Subscription {
-            let message_type_id = MessageTypeId::of_val(message).into_protobuf();
-            let binding_key = BindingKey::create(message).into_protobuf();
-            Subscription {
-                message_type_id,
-                binding_key,
-            }
+            MessageBinding::of_val(message).into()
         }
 
         fn create_subscription_for<M: MessageDescriptor + 'static>(
@@ -674,6 +668,14 @@ mod tests {
                 bindings,
             }
         }
+
+        fn assert_event(event: Option<PeerEvent>, kind: PeerEventKind, peer: Peer) {
+            assert!(event.is_some());
+            let event = event.unwrap();
+
+            assert_eq!(event.kind(), kind);
+            assert_eq!(event.descriptor().peer().clone(), peer);
+        }
     }
 
     #[tokio::test]
@@ -681,29 +683,29 @@ mod tests {
         let fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
         fixture.client.handle_registration(RegisterPeerResponse {
-            peers: descriptors.clone(),
+            peers: descriptors.clone().into_protobuf(),
         });
 
         for descriptor in &descriptors {
             let peer = &descriptor.peer;
 
-            assert_eq!(fixture.client.get(&peer.id), Some(peer.clone()));
+            assert_eq!(
+                fixture.client.get(&peer.id).as_ref().map(|p| p.peer()),
+                Some(peer)
+            );
         }
         assert_eq!(fixture.client.get(&PeerId::new("Test.Peer.0")), None);
     }
 
     #[tokio::test]
     async fn handle_registration_does_not_raise_peer_started_event() {
-        let fixture = Fixture::new();
+        let mut fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
         fixture.client.handle_registration(RegisterPeerResponse {
-            peers: descriptors.clone(),
+            peers: descriptors.into_protobuf(),
         });
 
-        assert_eq!(
-            fixture.try_recv_n(5).await,
-            vec![None, None, None, None, None]
-        );
+        assert_eq!(fixture.try_recv().await, None);
     }
 
     #[tokio::test]
@@ -738,7 +740,10 @@ mod tests {
         };
 
         fixture.client.handle_registration(RegisterPeerResponse {
-            peers: vec![peer_desc_1.clone(), peer_desc_2.clone()],
+            peers: vec![
+                peer_desc_1.clone().into_protobuf(),
+                peer_desc_2.clone().into_protobuf(),
+            ],
         });
 
         let peer_1 = fixture.client.get_peers_handling_message(&command_1);
@@ -758,10 +763,7 @@ mod tests {
         let event_2 = TestEvent {
             _outcome: "Failure".to_string(),
         };
-        let subscription = Subscription {
-            message_type_id: MessageTypeId::of::<TestEvent>().into_protobuf(),
-            binding_key: BindingKey::empty().into_protobuf(),
-        };
+        let subscription = Subscription::with_binding::<TestEvent>(BindingKey::empty());
         let descriptors = Fixture::create_descriptors_with(5, |_| PeerDescriptor {
             peer: Peer::test(),
             subscriptions: vec![subscription.clone()],
@@ -772,7 +774,7 @@ mod tests {
         let peers: Vec<_> = descriptors.iter().cloned().map(|d| d.peer).collect();
 
         fixture.client.handle_registration(RegisterPeerResponse {
-            peers: descriptors.clone(),
+            peers: descriptors.clone().into_protobuf(),
         });
 
         let peers_1 = fixture.client.get_peers_handling_message(&event_1);
@@ -820,7 +822,7 @@ mod tests {
             .collect_vec();
 
         fixture.client.handle_registration(RegisterPeerResponse {
-            peers: descriptors.clone(),
+            peers: descriptors.into_protobuf(),
         });
 
         let peers_1 = fixture.client.get_peers_handling_message(&event_1);
@@ -836,18 +838,22 @@ mod tests {
 
         fixture
             .service
-            .invoke(PeerStarted { descriptor }, fixture.bus())
+            .invoke(
+                PeerStarted {
+                    descriptor: descriptor.clone().into_protobuf(),
+                },
+                fixture.bus(),
+            )
             .await
             .unwrap();
 
-        let peer = fixture.peer();
+        let peer_descriptor = fixture.client.get(&fixture.peer_id());
+        let peer = peer_descriptor.as_ref().map(|p| p.peer());
 
-        assert_eq!(fixture.client.get(&fixture.peer_id()), Some(fixture.peer()));
+        assert_eq!(peer, Some(&fixture.peer()));
         assert_eq!(fixture.client.get(&PeerId::new("Test.Peer.0")), None);
-        assert_eq!(
-            fixture.try_recv_n(1).await,
-            vec![Some(PeerEvent::Started(peer))]
-        );
+
+        Fixture::assert_event(fixture.recv().await, PeerEventKind::Started, fixture.peer());
     }
 
     #[tokio::test]
@@ -861,7 +867,12 @@ mod tests {
 
         fixture
             .service
-            .invoke(PeerStarted { descriptor }, fixture.bus())
+            .invoke(
+                PeerStarted {
+                    descriptor: descriptor.clone().into_protobuf(),
+                },
+                fixture.bus(),
+            )
             .await
             .unwrap();
 
@@ -878,7 +889,7 @@ mod tests {
             .await
             .unwrap();
 
-        let peer_stopped = fixture.client.get(&peer_id);
+        let peer_stopped = fixture.client.get(&peer_id).map(|d| d.peer);
         assert_eq!(
             peer_stopped,
             Some(Peer {
@@ -889,15 +900,13 @@ mod tests {
             })
         );
 
-        let events = fixture.try_recv_n(2).await;
-        assert_eq!(
-            events,
-            vec![
-                Some(PeerEvent::Started(peer.clone())),
-                Some(PeerEvent::Stopped(
-                    peer.clone().set_down().set_not_responding()
-                ))
-            ]
+        let peer = fixture.peer();
+
+        Fixture::assert_event(fixture.recv().await, PeerEventKind::Started, peer.clone());
+        Fixture::assert_event(
+            fixture.recv().await,
+            PeerEventKind::Stopped,
+            peer.set_down().set_not_responding(),
         );
     }
 
@@ -934,13 +943,11 @@ mod tests {
             has_debugger_attached: Some(false),
         };
 
-        let peer = fixture.peer();
-
         fixture
             .service
             .invoke(
                 PeerStarted {
-                    descriptor: peer_desc_1.clone(),
+                    descriptor: peer_desc_1.clone().into_protobuf(),
                 },
                 fixture.bus(),
             )
@@ -964,14 +971,14 @@ mod tests {
             .service
             .invoke(
                 PeerStarted {
-                    descriptor: peer_desc_2.clone(),
+                    descriptor: peer_desc_2.clone().into_protobuf(),
                 },
                 fixture.bus(),
             )
             .await
             .unwrap();
 
-        let peer_1 = fixture.client.get(&test_peer.id);
+        let peer_1 = fixture.client.get(&test_peer.id).map(|p| p.peer);
         assert_eq!(
             peer_1,
             Some(Peer {
@@ -988,17 +995,22 @@ mod tests {
         let peers_3 = fixture.client.get_peers_handling_message(&command_3);
         assert_eq!(peers_3, vec![]);
 
-        assert_eq!(
-            fixture.try_recv_n(4).await,
-            vec![
-                Some(PeerEvent::Started(test_peer.clone())),
-                Some(PeerEvent::Stopped(
-                    test_peer.clone().set_not_responding().set_down()
-                )),
-                Some(PeerEvent::Started(test_peer.clone())),
-                None,
-            ]
+        Fixture::assert_event(
+            fixture.recv().await,
+            PeerEventKind::Started,
+            test_peer.clone(),
         );
+        Fixture::assert_event(
+            fixture.recv().await,
+            PeerEventKind::Stopped,
+            test_peer.clone().set_not_responding().set_down(),
+        );
+        Fixture::assert_event(
+            fixture.recv().await,
+            PeerEventKind::Started,
+            test_peer.clone(),
+        );
+        assert_eq!(fixture.try_recv().await, None);
     }
 
     #[tokio::test]
@@ -1018,11 +1030,15 @@ mod tests {
 
         fixture
             .service
-            .invoke(PeerStarted { descriptor }, fixture.bus())
+            .invoke(
+                PeerStarted {
+                    descriptor: descriptor.clone().into_protobuf(),
+                },
+                fixture.bus(),
+            )
             .await
             .unwrap();
 
-        let peer = fixture.peer();
         let peer_id = fixture.peer_id();
         let now = chrono::Utc::now();
 
@@ -1044,14 +1060,8 @@ mod tests {
         let peers_2 = fixture.client.get_peers_handling_message(&command_2);
         assert!(peers_2.is_empty());
 
-        let events = fixture.try_recv_n(2).await;
-        assert_eq!(
-            events,
-            vec![
-                Some(PeerEvent::Started(peer.clone())),
-                Some(PeerEvent::Updated(peer.clone()))
-            ]
-        );
+        Fixture::assert_event(fixture.recv().await, PeerEventKind::Started, fixture.peer());
+        Fixture::assert_event(fixture.recv().await, PeerEventKind::Updated, fixture.peer());
     }
 
     #[tokio::test]
@@ -1072,11 +1082,15 @@ mod tests {
 
         fixture
             .service
-            .invoke(PeerStarted { descriptor }, fixture.bus())
+            .invoke(
+                PeerStarted {
+                    descriptor: descriptor.clone().into_protobuf(),
+                },
+                fixture.bus(),
+            )
             .await
             .unwrap();
 
-        let peer = fixture.peer();
         let peer_id = fixture.peer_id();
         let now = chrono::Utc::now();
 
@@ -1110,13 +1124,8 @@ mod tests {
         assert_eq!(peers_1, vec![fixture.peer()]);
         let peers_2 = fixture.client.get_peers_handling_message(&command_2);
         assert!(peers_2.is_empty());
-        assert_eq!(
-            fixture.try_recv_n(3).await,
-            vec![
-                Some(PeerEvent::Started(peer.clone())),
-                Some(PeerEvent::Updated(peer.clone())),
-                None
-            ]
-        );
+
+        Fixture::assert_event(fixture.recv().await, PeerEventKind::Started, fixture.peer());
+        Fixture::assert_event(fixture.recv().await, PeerEventKind::Updated, fixture.peer());
     }
 }
