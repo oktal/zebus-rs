@@ -1,4 +1,4 @@
-mod command;
+pub(crate) mod command;
 pub mod event;
 pub mod future;
 mod service;
@@ -6,9 +6,16 @@ pub mod transport;
 
 use std::time::Duration;
 
+use once_cell::sync::Lazy;
 use thiserror::Error;
 
-use crate::{transport::TransportMessage, BoxError, Peer};
+use crate::{
+    directory::{MessageBinding, PeerDescriptor},
+    transport::TransportMessage,
+    BoxError, Peer,
+};
+
+use self::command::PersistMessageCommand;
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
@@ -77,3 +84,10 @@ enum PersistenceEvent {
 }
 
 type MessageStream = crate::sync::stream::BroadcastStream<TransportMessage>;
+
+const BINDING: Lazy<MessageBinding> = Lazy::new(|| MessageBinding::any::<PersistMessageCommand>());
+
+/// Returns whether the given [`PeerDescriptor`] is a persistence peer
+pub fn is_persistence_peer(descriptor: &PeerDescriptor) -> bool {
+    descriptor.handles(&BINDING)
+}

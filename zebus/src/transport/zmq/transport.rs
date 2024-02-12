@@ -1,4 +1,3 @@
-use futures_util::FutureExt;
 use prost::Message;
 use std::{borrow::Cow, collections::HashMap, io::Write, sync::Arc, thread::JoinHandle};
 use tokio::sync::{broadcast, mpsc};
@@ -9,6 +8,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     bus::{BusEvent, BusEventStream},
     directory::{event::PeerEvent, DirectoryReader},
+    persistence::is_persistence_peer,
     sync::stream::{BoxEventStream, EventStream},
     transport::{
         self,
@@ -573,7 +573,7 @@ impl OutboundWorker {
             }
 
             match peer_event {
-                PeerEvent::Decomissionned(descriptor) if !descriptor.id().is_persistence() => {
+                PeerEvent::Decomissionned(descriptor) if !is_persistence_peer(&descriptor) => {
                     self.disconnect::<TerminateConnection>(descriptor.id(), encode_buf)
                 }
                 // If a previously existing peer starts up with a new endpoint, make sure to disconnect

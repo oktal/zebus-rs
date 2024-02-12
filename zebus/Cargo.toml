@@ -32,6 +32,7 @@ tokio-util = "0.7.10"
 serde = { version = "1.0.195", optional = true }
 config = { version = "0.13.4", optional = true }
 humantime-serde = { version = "1.1.1", optional = true }
+once_cell = "1.19.0"
 
 [features]
 config-provider = ["config", "humantime-serde", "serde"]

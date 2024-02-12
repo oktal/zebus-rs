@@ -7,7 +7,8 @@ use tracing::{debug, error, info};
 use crate::{
     bus::{BusEvent, CommandResult},
     core::MessagePayload,
-    directory::{event::PeerEvent, PeerDescriptor},
+    directory::{event::PeerEvent, MessageBinding, PeerDescriptor},
+    persistence::{command::PersistMessageCommand, is_persistence_peer},
     proto::{FromProtobuf, IntoProtobuf},
     sync::stream::EventStream,
     transport::{
@@ -111,8 +112,8 @@ where
                                 peers.extend(
                                     directory_peers
                                         .iter()
-                                        .filter(|p| p.id.is_persistence() && p.is_up && p.is_responding)
-                                        .cloned(),
+                                        .filter(|p| is_persistence_peer(p) && p.peer.is_up && p.peer.is_responding)
+                                        .map(|p| p.peer.clone())
                                 );
 
                                 // If the persistence is up and running, switch to the
@@ -136,7 +137,7 @@ where
                                 State::Init { mut peers, descriptor } => {
                                     // A persistence service peer started but we are still in the
                                     // initialization stage, add it to our list of persistence peers
-                                    if peer.id().is_persistence() && peer.peer.is_up {
+                                    if is_persistence_peer(&peer) && peer.peer.is_up {
                                         peers.push(peer.peer)
                                     }
 
@@ -147,7 +148,7 @@ where
                                     // persistence service peer, switch to the `PersistenceReady`
                                     // state.
                                     // Otherwise, keep waiting for the persistence service to start
-                                    if peer.id().is_persistence() && peer.peer.is_up {
+                                    if is_persistence_peer(&peer) && peer.peer.is_up {
                                         debug!("discovered persistence peer {}", peer.peer);
                                         State::PersistenceReady { peers: vec![peer.peer], descriptor }
                                     } else {

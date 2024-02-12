@@ -326,7 +326,7 @@ pub enum BusEvent {
 
     /// Event raised when the bus successfully registered to the directory with
     /// the list of current peers received from the directory
-    Registered(Vec<Peer>),
+    Registered(Vec<PeerDescriptor>),
 
     /// Event raised when the bus has started after registering to the directory
     Started,

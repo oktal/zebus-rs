@@ -62,6 +62,11 @@ impl Subscription {
     pub(crate) fn message_type(&self) -> &MessageTypeId {
         &self.message_type_id
     }
+
+    /// Tells whether this subscription matches a given [`MessageBinding`]
+    pub fn matches(&self, binding: &MessageBinding) -> bool {
+        self.full_name() == binding.descriptor().full_name && self.binding() == binding.key()
+    }
 }
 
 impl From<MessageBinding> for Subscription {

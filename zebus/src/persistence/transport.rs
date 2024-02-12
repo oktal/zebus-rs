@@ -262,6 +262,7 @@ where
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use chrono::Utc;
     use futures_util::pin_mut;
     use tokio_stream::StreamExt;
 
@@ -270,7 +271,7 @@ mod tests {
         core::MessagePayload,
         directory::{memory::MemoryDirectory, Directory, PeerDescriptor},
         persistence::{
-            command::StartMessageReplayCommand,
+            command::{PersistMessageCommand, StartMessageReplayCommand},
             event::{ReplayPhaseEnded, SafetyPhaseEnded},
             PersistenceError,
         },
@@ -288,7 +289,7 @@ mod tests {
 
     struct Fixture {
         peer: Peer,
-        persistence_peer: Peer,
+        persistence_peer: PeerDescriptor,
         environment: String,
 
         events: EventStream<BusEvent>,
@@ -302,11 +303,17 @@ mod tests {
     impl Fixture {
         fn new(configuration: BusConfiguration) -> Self {
             let peer = Peer::test();
-            let persistence_peer = Peer {
-                id: PeerId::new("Abc.Zebus.PersistenceService.0"),
-                endpoint: "tcp://localhost:7865".to_string(),
-                is_up: true,
-                is_responding: true,
+            let persistence_peer = PeerDescriptor {
+                peer: Peer {
+                    id: PeerId::new("PersistenceService.0"),
+                    endpoint: "tcp://localhost:7865".to_string(),
+                    is_up: true,
+                    is_responding: true,
+                },
+                subscriptions: vec![Subscription::any::<PersistMessageCommand>()],
+                is_persistent: true,
+                timestamp_utc: Some(Utc::now()),
+                has_debugger_attached: Some(false),
             };
 
             let environment = "test".to_string();
@@ -455,7 +462,7 @@ mod tests {
             .inner
             .message_received(
                 TestCommand {},
-                &fixture.persistence_peer,
+                &fixture.persistence_peer.peer,
                 fixture.environment.clone(),
             )
             .expect("message received should not fail");
@@ -465,7 +472,7 @@ mod tests {
             .inner
             .message_received(
                 message_replayed,
-                &fixture.persistence_peer,
+                &fixture.persistence_peer.peer,
                 fixture.environment.clone(),
             )
             .expect("message received should not fail");

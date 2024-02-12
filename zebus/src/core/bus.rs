@@ -819,7 +819,12 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                 // Handle peer directory response
                 // TODO(oktal): properly handle error
                 if let Ok(response) = registration.result {
-                    let peers = response.peers.clone().into_iter().map(|d| d.peer).collect();
+                    let peers = response
+                        .peers
+                        .clone()
+                        .into_iter()
+                        .map(PeerDescriptor::from_protobuf)
+                        .collect();
 
                     if let Err(e) = event_tx.send(BusEvent::Registered(peers)) {
                         error!("failed to publish {:?}", e.0);

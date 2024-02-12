@@ -5,6 +5,8 @@ use crate::{
     Peer, PeerId, Subscription,
 };
 
+use super::MessageBinding;
+
 pub(crate) mod proto {
     #[derive(Clone, prost::Message)]
     pub struct PeerDescriptor {
@@ -46,13 +48,19 @@ pub struct PeerDescriptor {
 }
 
 impl PeerDescriptor {
-    /// Returns the [`PeerId`] of this peer
+    /// Returns the current [`PeerId`] of this peer
     pub fn id(&self) -> &PeerId {
         &self.peer.id
     }
 
+    /// Returns the current [`Peer`]
     pub fn peer(&self) -> &Peer {
         &self.peer
+    }
+
+    /// Returns whether the current peer handles a given [`MessageBinding`]
+    pub(crate) fn handles(&self, binding: &MessageBinding) -> bool {
+        self.subscriptions.iter().any(|s| s.matches(binding))
     }
 }
 

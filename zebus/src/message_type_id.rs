@@ -37,7 +37,7 @@ pub(crate) mod proto {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Repr {
-    /// A message type with is associated complete [`MessageTypeDescriptor`]
+    /// A message type with its associated complete [`MessageTypeDescriptor`]
     Descriptor(MessageTypeDescriptor),
 
     /// Name of the message
