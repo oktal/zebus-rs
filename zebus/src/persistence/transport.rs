@@ -35,6 +35,9 @@ enum Inner<T> {
         /// Inner transport
         inner: T,
 
+        /// Directory reader
+        directory: Arc<dyn DirectoryReader>,
+
         /// Bus event reception stream
         event_rx: EventStream<BusEvent>,
     },
@@ -124,6 +127,7 @@ where
                         configuration,
                         peer_id,
                         environment,
+                        directory,
                         inner,
                         event_rx: event,
                     }),
@@ -152,6 +156,7 @@ where
                 configuration,
                 peer_id,
                 environment,
+                directory,
                 mut inner,
                 event_rx,
             }) => {
@@ -166,14 +171,17 @@ where
 
                 let shutdown = CancellationToken::new();
 
+                // Spawn a new task for the persistence service
                 let (requests_tx, events_rx, stop) = super::service::spawn(
                     &configuration,
+                    directory,
                     event_rx.stream(),
                     inner,
                     messages_tx.clone(),
                     shutdown.clone(),
                 );
 
+                // Spawn a future that will resolve when the start sequence completes
                 let start = super::future::StartFuture::spawn(events_rx, &configuration);
 
                 // Transition to Started state
@@ -484,7 +492,7 @@ mod tests {
             .expect("stream should not be finished")
             .expect("we should have forwarded a message");
 
-        assert_eq!(cmd.id.value.to_uuid(), message_replayed_id);
+        assert_eq!(cmd.id.value(), message_replayed_id);
         assert_eq!(cmd.decode_as::<TestCommand>(), Some(Ok(TestCommand {})));
 
         // Make sure that we did not forward any more message
@@ -574,7 +582,7 @@ mod tests {
         let (_, mut message_replayed) =
             message_replayed.as_transport(&Peer::test(), fixture.environment.clone());
 
-        message_replayed.was_persisted = Some(false);
+        message_replayed.was_persisted = false;
 
         // Replay message
         fixture
@@ -589,7 +597,7 @@ mod tests {
             .expect("stream should not be finished")
             .expect("we should have forwarded a message");
 
-        assert_eq!(cmd.was_persisted, Some(true));
+        assert_eq!(cmd.was_persisted, true);
     }
 
     #[tokio::test]
@@ -633,7 +641,7 @@ mod tests {
         // Receive normal message
         let (_, mut message) =
             TestCommand {}.as_transport(&Peer::test(), fixture.environment.clone());
-        message.was_persisted = Some(false);
+        message.was_persisted = false;
         fixture
             .inner
             .transport_message_received(message)
@@ -658,7 +666,7 @@ mod tests {
             .expect("stream should not be finished")
             .expect("we should have forwarded a message");
 
-        assert_eq!(cmd.was_persisted, Some(true));
+        assert_eq!(cmd.was_persisted, true);
     }
 
     #[tokio::test]
@@ -712,7 +720,7 @@ mod tests {
         let (_, mut message_replayed) =
             message_replayed.as_transport(&Peer::test(), fixture.environment.clone());
 
-        message_replayed.was_persisted = Some(false);
+        message_replayed.was_persisted = false;
 
         // Replay message
         fixture
@@ -739,6 +747,6 @@ mod tests {
             .expect("stream should not be finished")
             .expect("we should have forwarded a message");
 
-        assert_eq!(cmd.was_persisted, Some(true));
+        assert_eq!(cmd.was_persisted, true);
     }
 }

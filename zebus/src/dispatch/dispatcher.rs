@@ -9,6 +9,7 @@ use super::future::DispatchFuture;
 use super::invoker::{InvokeRequest, InvokerService};
 use super::queue::DispatchQueue;
 use super::{DispatchRequest, DispatchService, Dispatched, MessageInvokerDescriptor};
+use crate::core::MessagePayload;
 use crate::MessageTypeDescriptor;
 
 /// Errors that can be returned by the [`MessageDispatcher`]
@@ -110,13 +111,14 @@ impl InvokerDispatcher {
     fn dispatch(&mut self, request: DispatchRequest) -> DispatchFuture {
         // Retrieve the descriptor for the message we are about to dispatch and
         // return an error'd future if we failed to find it
-        let descriptor = match self.descriptors.get(request.message.message_type()) {
+        let message_type = request
+            .message
+            .message_type()
+            .expect("A dispatch request should have a message type");
+
+        let descriptor = match self.descriptors.get(message_type) {
             Some(descriptor) => descriptor,
-            None => {
-                return super::future::err(Error::UnknownMessage(
-                    request.message.message_type().to_string(),
-                ))
-            }
+            None => return super::future::err(Error::UnknownMessage(message_type.to_string())),
         };
 
         // Create the dispatch context

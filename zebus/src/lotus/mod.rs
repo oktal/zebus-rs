@@ -1,4 +1,4 @@
-use crate::{proto::bcl, transport::TransportMessage};
+use crate::proto::{self, bcl};
 
 /// [`crate::Event`] raised when a [`crate::Handler`] raised an error
 #[derive(prost::Message, crate::Event, Clone)]
@@ -6,7 +6,7 @@ use crate::{proto::bcl, transport::TransportMessage};
 pub struct MessageProcessingFailed {
     /// The [`TransportMessage`] that triggered the error
     #[prost(message, required, tag = 1)]
-    pub transport_message: TransportMessage,
+    pub transport_message: proto::TransportMessage,
 
     /// The JSON representation of the [`TransportMessage`] that triggered the error
     #[prost(string, required, tag = 2)]

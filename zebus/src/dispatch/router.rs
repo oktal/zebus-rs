@@ -385,7 +385,7 @@ where
 
     #[cfg(test)]
     async fn route(&mut self, req: InvokeRequest) -> Option<Response> {
-        if let Some((_, service)) = self.invokers.get_mut(req.dispatch.message().message_type()) {
+        if let Some((_, service)) = self.invokers.get_mut(req.dispatch.message_type()) {
             service.call(req).await.expect("invokers are infaillible")
         } else {
             None
@@ -407,7 +407,7 @@ where
 
     fn call(&mut self, req: InvokeRequest) -> Self::Future {
         self.invokers
-            .get_mut(req.dispatch.message().message_type())
+            .get_mut(req.dispatch.message_type())
             .expect("call should only be called after poll_invoke returns `Some`")
             .1
             .call(req)
@@ -426,11 +426,7 @@ where
         &'a self,
         req: &InvokeRequest,
     ) -> Poll<Option<&'a MessageInvokerDescriptor>> {
-        Poll::Ready(
-            self.invokers
-                .get(req.dispatch.message().message_type())
-                .map(|i| &i.0),
-        )
+        Poll::Ready(self.invokers.get(req.dispatch.message_type()).map(|i| &i.0))
     }
 }
 

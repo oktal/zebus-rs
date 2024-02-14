@@ -1,4 +1,4 @@
-use crate::MessageDescriptor;
+use crate::{Message, MessageDescriptor, MessageTypeId};
 
 /// Trait for types that expose raw content of protobuf-encoded messages
 pub trait MessagePayload {
@@ -26,28 +26,42 @@ pub trait MessagePayload {
     }
 }
 
-/// A raw protobuf-encoded message along with its associated [`MessageType`]
-#[derive(Debug, Eq, PartialEq)]
-pub struct RawMessage<MessageType>(MessageType, Vec<u8>);
+/// A raw protobuf-encoded message along with its associated [`MessageTypeId`]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RawMessage(MessageTypeId, Vec<u8>);
 
-impl<MessageType> Into<(MessageType, Vec<u8>)> for RawMessage<MessageType> {
-    fn into(self) -> (MessageType, Vec<u8>) {
+impl Into<(MessageTypeId, Vec<u8>)> for RawMessage {
+    fn into(self) -> (MessageTypeId, Vec<u8>) {
         (self.0, self.1)
     }
 }
 
-impl<MessageType> RawMessage<MessageType> {
-    pub(crate) fn new(message_type: impl Into<MessageType>, payload: impl Into<Vec<u8>>) -> Self {
+impl RawMessage {
+    pub(crate) fn new(message_type: impl Into<MessageTypeId>, payload: impl Into<Vec<u8>>) -> Self {
         Self(message_type.into(), payload.into())
+    }
+
+    pub(crate) fn encode(msg: &dyn Message) -> Self {
+        // TODO(oktal): reuse buffer
+        let content = msg.encode_to_vec();
+        Self(MessageTypeId::of_val(msg), content)
+    }
+
+    pub fn message_type(&self) -> &MessageTypeId {
+        &self.0
+    }
+
+    pub fn content(&self) -> &[u8] {
+        &self.1
     }
 }
 
-impl<MessageType: AsRef<str>> MessagePayload for RawMessage<MessageType> {
+impl MessagePayload for RawMessage {
     fn message_type(&self) -> Option<&str> {
-        Some(self.0.as_ref())
+        Some(self.0.full_name())
     }
 
     fn content(&self) -> Option<&[u8]> {
-        Some(&self.1[..])
+        Some(self.content())
     }
 }

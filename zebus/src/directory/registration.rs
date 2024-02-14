@@ -16,7 +16,7 @@ use crate::{
     transport::{
         MessageExecutionCompleted, SendContext, Transport, TransportExt, TransportMessage,
     },
-    BoxError, Peer, Subscription,
+    BoxError, Peer,
 };
 
 #[derive(Debug, Error)]

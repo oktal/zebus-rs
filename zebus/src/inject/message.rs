@@ -31,7 +31,7 @@ where
                     .map(Self)
                     .map_err(|e| InternalError(Error::Decode(<M as MessageDescriptor>::name(), e))),
                 None => Err(InternalError(Error::InvalidMessageType {
-                    got: msg.message_type_id.full_name.clone(),
+                    got: req.message_type().to_string(),
                     expected: <M as MessageDescriptor>::name(),
                 })),
             },

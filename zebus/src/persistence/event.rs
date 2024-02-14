@@ -1,4 +1,8 @@
-use crate::{core::MessagePayload, message_id::proto, proto::bcl, transport::TransportMessage};
+use crate::{
+    core::MessagePayload,
+    proto::{self, bcl},
+    transport::TransportMessage,
+};
 
 pub(super) enum TryFromReplayEventError {
     /// [`TransportMessage`] is not a [`ReplayEvent`]
@@ -50,7 +54,7 @@ pub struct MessageReplayed {
     pub replay_id: bcl::Guid,
 
     #[prost(message, required, tag = 2)]
-    pub message: TransportMessage,
+    pub message: proto::TransportMessage,
 }
 
 #[derive(prost::Message, crate::Event, Clone)]

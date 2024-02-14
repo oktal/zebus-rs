@@ -6,7 +6,6 @@ use std::{
 
 use futures_core::{Future, Stream};
 use pin_project::pin_project;
-use prost::Message;
 
 use crate::{core::MessagePayload, transport::TransportMessage, Command, Peer};
 

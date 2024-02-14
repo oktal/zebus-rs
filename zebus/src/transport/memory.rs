@@ -8,8 +8,8 @@ use thiserror::Error;
 use tokio::sync::{broadcast, Notify};
 
 use crate::{
-    bus::BusEvent, core::MessagePayload, directory::DirectoryReader, proto::FromProtobuf,
-    sync::stream::EventStream, Message, MessageDescriptor, MessageTypeId, Peer, PeerId,
+    bus::BusEvent, core::MessagePayload, directory::DirectoryReader, sync::stream::EventStream,
+    Message, MessageDescriptor, MessageTypeId, Peer, PeerId,
 };
 
 use super::{SendContext, Transport, TransportMessage};
@@ -23,7 +23,6 @@ struct MemoryTransportInner {
     environment: Option<String>,
 
     /// Flag indicating whether the transport has been started
-    ///
     started: bool,
 
     /// Sender channel for transport messages
@@ -269,11 +268,14 @@ impl Transport for MemoryTransport {
             }
         }
 
-        let msg_type = MessageTypeId::from_protobuf(message.message_type_id.clone());
+        let msg_type = message
+            .message_type()
+            .expect("a TransportMessage should always have a message type")
+            .to_string();
         inner.tx_queue.push((message, peers));
 
         // Notify any waiter that some messages have been sent
-        if let Some(notify) = inner.tx_wait_queue.get(msg_type.full_name()) {
+        if let Some(notify) = inner.tx_wait_queue.get(&msg_type) {
             notify.notify_waiters();
         }
 

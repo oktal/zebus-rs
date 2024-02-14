@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use futures_core::{stream::BoxStream, Stream};
 use futures_util::{pin_mut, StreamExt};
 use tokio::sync::{broadcast, mpsc};
@@ -7,8 +9,8 @@ use tracing::{debug, error, info};
 use crate::{
     bus::{BusEvent, CommandResult},
     core::MessagePayload,
-    directory::{event::PeerEvent, MessageBinding, PeerDescriptor},
-    persistence::{command::PersistMessageCommand, is_persistence_peer},
+    directory::{event::PeerEvent, DirectoryReader, PeerDescriptor},
+    persistence::is_persistence_peer,
     proto::{FromProtobuf, IntoProtobuf},
     sync::stream::EventStream,
     transport::{
@@ -60,6 +62,7 @@ enum State {
 
 struct PersistenceService<S, T> {
     bus_events_rx: S,
+    directory: Arc<dyn DirectoryReader>,
     inner: T,
     forward_tx: broadcast::Sender<TransportMessage>,
     reqs_rx: mpsc::Receiver<PersistenceRequest>,
@@ -196,7 +199,7 @@ where
                                             // persisted, but force it to true to be compatible with
                                             // older versions of zebus that did not specify it
                                             msg.message.was_persisted = Some(true);
-                                            let _ = forward_tx.send(msg.message);
+                                            let _ = forward_tx.send(TransportMessage::from_protobuf(msg.message));
 
 
                                             // Stay in replay phase
@@ -222,7 +225,7 @@ where
 
                                             // Forward queued messages
                                             for mut msg in queue.drain(..) {
-                                                msg.was_persisted = Some(true);
+                                                msg.was_persisted = true;
                                                 let _ = forward_tx.send(msg);
                                             }
 
@@ -274,7 +277,7 @@ where
                                         {
                                             if let Some(descriptor) = descriptor.as_ref() {
                                                 // When we are in a replay phase, only forward messages that are infrastructure messages
-                                                let msg_type = msg.message_type().expect("A transport message should always have a type");
+                                                let msg_type = msg.message_type().expect("a TransportMessage should always have a message type");
                                                 if let Some(msg_type_id) = descriptor.subscriptions.iter().find_map(|s| {
                                                     (s.full_name() == msg_type).then_some(s.message_type())
                                                 }) {
@@ -322,7 +325,7 @@ where
                                             // persisted, but force it to true to be compatible with
                                             // older versions of zebus that did not specify it
                                             msg.message.was_persisted = Some(true);
-                                            queue.push(msg.message);
+                                            queue.push(TransportMessage::from_protobuf(msg.message));
 
                                             // Stay in safety phase
                                             State::SafetyPhase {
@@ -497,6 +500,7 @@ where
 
 pub(super) fn spawn<T, S>(
     configuration: &BusConfiguration,
+    directory: Arc<dyn DirectoryReader>,
     bus_events_rx: S,
     inner: T,
     forward_tx: broadcast::Sender<TransportMessage>,
@@ -518,6 +522,7 @@ where
 
         let service = PersistenceService {
             bus_events_rx,
+            directory,
             inner,
             forward_tx,
             reqs_rx: rx,

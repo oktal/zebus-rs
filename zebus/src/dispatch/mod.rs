@@ -9,8 +9,8 @@ use std::convert::Infallible;
 use std::{fmt::Display, sync::Arc};
 
 use crate::bus::{CommandError, CommandResult};
-use crate::core::RawMessage;
 use crate::core::{response::HANDLER_ERROR_CODE, Response};
+use crate::core::{MessagePayload, RawMessage};
 use crate::lotus::MessageProcessingFailed;
 use crate::proto::IntoProtobuf;
 use crate::{
@@ -37,11 +37,18 @@ pub(crate) enum DispatchMessage {
     Local(Arc<dyn Message>),
 }
 
-impl DispatchMessage {
-    fn message_type(&self) -> &str {
+impl MessagePayload for DispatchMessage {
+    fn message_type(&self) -> Option<&str> {
         match self {
-            DispatchMessage::Remote(message) => message.message_type_id.full_name.as_str(),
-            DispatchMessage::Local(message) => message.name(),
+            DispatchMessage::Remote(message) => message.message_type(),
+            DispatchMessage::Local(message) => Some(message.name()),
+        }
+    }
+
+    fn content(&self) -> Option<&[u8]> {
+        match self {
+            DispatchMessage::Remote(message) => message.content(),
+            DispatchMessage::Local(_) => None,
         }
     }
 }
@@ -178,7 +185,7 @@ impl Into<DispatchOutput> for Dispatched {
                 let failing_handlers = dispatch_error.0.iter().map(|e| e.0.to_string()).collect();
 
                 Some(MessageProcessingFailed {
-                    transport_message: message.clone(),
+                    transport_message: message.clone().into_protobuf(),
                     // TODO(oktal): serialize message to JSON
                     message_json: String::new(),
                     exception_message: dispatch_error.to_string(),
@@ -194,14 +201,14 @@ impl Into<DispatchOutput> for Dispatched {
                 Some(match self.result {
                     Ok(Some(response)) => response.into_message(command_id),
                     Ok(None) => MessageExecutionCompleted {
-                        command_id,
+                        command_id: command_id.into_protobuf(),
                         error_code: 0,
                         payload_type_id: None,
                         payload: None,
                         response_message: None,
                     },
                     Err(e) => MessageExecutionCompleted {
-                        command_id,
+                        command_id: command_id.into_protobuf(),
                         error_code: HANDLER_ERROR_CODE,
                         payload_type_id: None,
                         payload: None,
@@ -248,6 +255,12 @@ impl DispatchRequest {
 
     pub(crate) fn message(&self) -> &DispatchMessage {
         &self.message
+    }
+
+    pub(crate) fn message_type(&self) -> &str {
+        self.message
+            .message_type()
+            .expect("A dispatch message should have a message type")
     }
 
     pub(crate) fn bus(&self) -> Arc<dyn Bus> {

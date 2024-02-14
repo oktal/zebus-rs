@@ -1122,7 +1122,7 @@ mod tests {
                     let message_type = MessageTypeId::of::<RegisterPeerResponse>();
 
                     MessageExecutionCompleted {
-                        command_id: message.id,
+                        command_id: message.id.into_protobuf(),
                         error_code: 0,
                         payload_type_id: Some(message_type.into_protobuf()),
                         payload: Some(response.encode_to_vec()),
@@ -1320,7 +1320,7 @@ mod tests {
                 let message_type = MessageTypeId::of::<RegisterPeerResponse>();
 
                 MessageExecutionCompleted {
-                    command_id: message.id,
+                    command_id: message.id.into_protobuf(),
                     error_code: 0,
                     payload_type_id: Some(message_type.into_protobuf()),
                     payload: Some(response.encode_to_vec()),
@@ -1399,7 +1399,7 @@ mod tests {
                 let message_type = MessageTypeId::of::<RegisterPeerResponse>();
 
                 MessageExecutionCompleted {
-                    command_id: message.id,
+                    command_id: message.id.into_protobuf(),
                     error_code: 0,
                     payload_type_id: Some(message_type.into_protobuf()),
                     payload: Some(response.encode_to_vec()),

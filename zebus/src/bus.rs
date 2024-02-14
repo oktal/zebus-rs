@@ -131,19 +131,19 @@ pub enum CommandError {
 }
 
 /// Execution result of a [`Command`]
-pub type CommandResult = std::result::Result<Option<RawMessage<MessageTypeId>>, CommandError>;
+pub type CommandResult = std::result::Result<Option<RawMessage>, CommandError>;
 
 impl MessagePayload for CommandResult {
     fn message_type(&self) -> Option<&str> {
         match self {
-            Ok(Some(message)) => message.message_type(),
+            Ok(Some(message)) => MessagePayload::message_type(message),
             _ => None,
         }
     }
 
     fn content(&self) -> Option<&[u8]> {
         match self {
-            Ok(Some(message)) => message.content(),
+            Ok(Some(message)) => MessagePayload::content(message),
             _ => None,
         }
     }
@@ -242,7 +242,7 @@ pub trait MessageExt: Message {
         let (id, message) = TransportMessage::create(sender, environment.clone(), self);
         let message_replayed = MessageReplayed {
             replay_id: replay_id.into_protobuf(),
-            message,
+            message: message.into_protobuf(),
         };
 
         (id, message_replayed)

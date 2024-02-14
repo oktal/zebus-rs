@@ -1,5 +1,4 @@
 use crate::proto::FromProtobuf;
-use crate::Message;
 use crate::{proto::IntoProtobuf, BindingKeyFragment};
 
 pub(crate) mod proto {
@@ -20,7 +19,8 @@ impl From<zebus_core::BindingKey> for BindingKey {
 }
 
 impl BindingKey {
-    pub(crate) fn create(message: &dyn Message) -> Self {
+    #[cfg(test)]
+    pub(crate) fn create(message: &dyn crate::Message) -> Self {
         Self(message.get_binding())
     }
 

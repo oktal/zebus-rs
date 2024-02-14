@@ -5,7 +5,7 @@ pub(crate) mod memory;
 mod message_execution_completed;
 mod originator_info;
 mod send_context;
-mod transport_message;
+pub(crate) mod transport_message;
 pub mod zmq;
 
 use crate::{

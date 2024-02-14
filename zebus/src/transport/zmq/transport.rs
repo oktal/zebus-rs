@@ -1,4 +1,3 @@
-use prost::Message;
 use std::{borrow::Cow, collections::HashMap, io::Write, sync::Arc, thread::JoinHandle};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
@@ -597,7 +596,7 @@ impl OutboundWorker {
     ) -> Result<(), ZmqError> {
         for peer in peers {
             let was_persisted = context.was_persisted(&peer.id);
-            message.was_persisted = Some(was_persisted);
+            message.was_persisted = was_persisted;
             self.send_to(&peer, &message, encode_buf)?;
         }
 
@@ -703,7 +702,11 @@ impl OutboundWorker {
         encode_buf: &'a mut Vec<u8>,
     ) -> Result<&'a [u8], ZmqError> {
         encode_buf.clear();
-        message.encode(encode_buf).map_err(ZmqError::Encode)?;
+        // TODO(oktal): don't re-encode message multiple times
+        message
+            .clone()
+            .encode(encode_buf)
+            .map_err(ZmqError::Encode)?;
 
         Ok(&encode_buf[..])
     }

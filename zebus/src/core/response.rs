@@ -2,8 +2,8 @@ use core::fmt;
 
 use super::RawMessage;
 use crate::{
-    message_id::proto, proto::IntoProtobuf, transport::MessageExecutionCompleted, BoxError,
-    MessageDescriptor, MessageTypeDescriptor,
+    proto::IntoProtobuf, transport::MessageExecutionCompleted, BoxError, MessageDescriptor,
+    MessageId, MessageTypeDescriptor,
 };
 
 /// Error code returned in [`MessageExecutionCompleted`] when a [`crate::Handler`] returned a
@@ -36,7 +36,7 @@ pub enum Response {
     /// A [`Message`] response returned by a [`crate::Handler`]. This contains the
     /// [`MessageTypeDescriptor`] of the message as well as the raw protobuf-encoded payload of the
     /// [`Message`]
-    Message(RawMessage<MessageTypeDescriptor>),
+    Message(RawMessage),
 
     /// A business [`crate::Error`] error returned by a [`Handler`]. This contains the error code and the string
     /// representation of the error
@@ -47,7 +47,8 @@ pub enum Response {
 }
 
 impl Response {
-    pub(crate) fn into_message(self, command_id: proto::MessageId) -> MessageExecutionCompleted {
+    pub(crate) fn into_message(self, command_id: MessageId) -> MessageExecutionCompleted {
+        let command_id = command_id.into_protobuf();
         match self {
             Response::Message(message) => {
                 let (message_type, payload) = message.into();
