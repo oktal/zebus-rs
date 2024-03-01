@@ -32,19 +32,15 @@ pub(crate) mod proto {
         #[prost(string, optional, tag = 5)]
         pub environment: Option<String>,
 
+        /// Flag that indicates whether the message was sent to the persistence
+        /// Used to instruct a receiver that the message was sent to the persistence
+        /// and needs acknowledgment
         #[prost(bool, optional, tag = 6)]
         pub was_persisted: Option<bool>,
 
         /// List of recipient peers for this message that are persistent
         #[prost(message, repeated, tag = 7)]
         pub persistent_peer_ids: Vec<PeerId>,
-    }
-
-    impl TransportMessage {
-        /// Returns `true` if this message is persistent
-        pub(crate) fn is_persistent(&self) -> bool {
-            self.persistent_peer_ids.len() > 0
-        }
     }
 }
 
@@ -54,7 +50,7 @@ pub struct TransportMessage {
     /// Id of the message
     pub id: MessageId,
 
-    /// Content of the message
+    /// Raw content bytes of the message
     pub content: RawMessage,
 
     /// Information about the originator of the message
@@ -63,6 +59,9 @@ pub struct TransportMessage {
     /// Environment from which the message was sent
     pub environment: Option<String>,
 
+    /// Flag that indicates whether the message was sent to the persistence
+    /// Used to instruct a receiver that the message was sent to the persistence
+    /// and needs acknowledgment
     pub was_persisted: bool,
 }
 
