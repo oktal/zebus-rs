@@ -30,8 +30,9 @@ impl From<uuid::Uuid> for MessageId {
 
 impl FromProtobuf for MessageId {
     type Input = proto::MessageId;
+    type Output = Self;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         Self(uuid::Uuid::from_protobuf(input.value))
     }
 }

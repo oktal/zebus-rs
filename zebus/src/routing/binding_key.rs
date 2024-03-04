@@ -66,8 +66,9 @@ impl From<proto::BindingKey> for BindingKey {
 
 impl FromProtobuf for BindingKey {
     type Input = proto::BindingKey;
+    type Output = Self;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         Self::from(input)
     }
 }

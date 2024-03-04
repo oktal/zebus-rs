@@ -132,8 +132,9 @@ impl IntoProtobuf for MessageTypeId {
 
 impl FromProtobuf for MessageTypeId {
     type Input = proto::MessageTypeId;
+    type Output = Self;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         Self {
             repr: Repr::Name(input.full_name),
         }

@@ -145,7 +145,7 @@ impl PeerEntry {
             let binding_keys = subscription
                 .bindings
                 .into_iter()
-                .map(FromProtobuf::from_protobuf)
+                .map(BindingKey::from_protobuf)
                 .collect::<HashSet<_>>();
             self.set_message_subscriptions(index, message_type, binding_keys, timestamp_utc);
         }

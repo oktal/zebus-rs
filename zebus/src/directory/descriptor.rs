@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::{
     proto::{FromProtobuf, IntoProtobuf},
@@ -40,7 +40,7 @@ pub struct PeerDescriptor {
     pub is_persistent: bool,
 
     /// Optional timestamp of the current [`Peer`]
-    pub timestamp_utc: Option<chrono::DateTime<Utc>>,
+    pub timestamp_utc: Option<DateTime<Utc>>,
 
     /// Optional flag indicating whether the current [`Peer`] has been started
     /// with a debugger attached
@@ -80,15 +80,16 @@ impl IntoProtobuf for PeerDescriptor {
 
 impl FromProtobuf for PeerDescriptor {
     type Input = proto::PeerDescriptor;
+    type Output = Self;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         let subscriptions = input
             .subscriptions
             .into_iter()
             .map(Subscription::from_protobuf)
             .collect();
 
-        let timestamp_utc = input.timestamp_utc.map(FromProtobuf::from_protobuf);
+        let timestamp_utc = input.timestamp_utc.map(DateTime::from_protobuf);
 
         PeerDescriptor {
             peer: input.peer,

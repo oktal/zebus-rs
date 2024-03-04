@@ -26,8 +26,9 @@ impl From<uuid::Uuid> for Guid {
 
 impl FromProtobuf for uuid::Uuid {
     type Input = Guid;
+    type Output = Self;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         input.to_uuid()
     }
 }
@@ -129,8 +130,9 @@ impl IntoProtobuf for chrono::DateTime<chrono::Utc> {
 
 impl FromProtobuf for chrono::DateTime<chrono::Utc> {
     type Input = DateTime;
+    type Output = Self;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         const NANOSECONDS_IN_SECOND: i64 = 1_000_000_000;
 
         let nanos = input.value * 100;

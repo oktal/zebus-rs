@@ -88,8 +88,9 @@ impl IntoProtobuf for Subscription {
 
 impl FromProtobuf for Subscription {
     type Input = proto::Subscription;
+    type Output = Self;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         let message_type_id = MessageTypeId::from_protobuf(input.message_type_id);
         let binding_key = BindingKey::from_protobuf(input.binding_key);
 

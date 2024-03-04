@@ -11,10 +11,13 @@ pub mod bcl {
 
 /// A trait to turn a protobuf type into its Rust equivalent
 pub(crate) trait FromProtobuf {
-    /// Type to convert from
+    /// Input type to convert from
     type Input;
 
-    fn from_protobuf(input: Self::Input) -> Self;
+    /// Output type yielded by the conversion
+    type Output;
+
+    fn from_protobuf(input: Self::Input) -> Self::Output;
 }
 
 /// A trait to turn a Rust type into its protobuf equivalent
@@ -43,16 +46,18 @@ where
 
 impl<T: FromProtobuf> FromProtobuf for Option<T> {
     type Input = Option<T::Input>;
+    type Output = Option<T::Output>;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         input.map(T::from_protobuf)
     }
 }
 
 impl<T: FromProtobuf> FromProtobuf for Vec<T> {
     type Input = Vec<T::Input>;
+    type Output = Vec<T::Output>;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         input.into_iter().map(T::from_protobuf).collect()
     }
 }
