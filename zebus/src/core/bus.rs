@@ -347,12 +347,22 @@ impl<T: Transport> Receiver<T> {
                                 // Retrieve the output of the dispatch
                                 let output: DispatchOutput = dispatched.into();
 
+                                let success = output.failed.is_none();
+
+                                // Notify that we handled a message
+                                let _ = self.event_tx.send(BusEvent::MessageHandled {
+                                    id: output.message_id,
+                                    descriptor: output.descriptor,
+                                    persisted: output.persisted,
+                                    success
+                                });
+
                                 // If the message that has been dispatched is a Command, send back the
                                 // MessageExecutionCompleted
                                 if let Some(completed) = output.completed {
                                     self.send_to(
                                         &completed,
-                                        vec![output.originator.expect("missing originator")],
+                                        vec![output.originator],
                                     )
                                     .await;
                                 }
@@ -376,8 +386,20 @@ impl<T: Transport> Receiver<T> {
                     match request {
                         LocalDispatchRequest::Command { tx, message } => {
                             // Dispatch command locally
-                            match self.dispatch(DispatchRequest::local(message, bus.clone())).await {
+                            let dispatched = self.dispatch(
+                                DispatchRequest::local(self.self_peer.clone(), self.environment.clone(), message, bus.clone())).await;
+                            match dispatched {
                                 Ok(dispatched) => {
+                                    // Notify that a message has been handled
+                                    let success = dispatched.result.is_ok();
+                                    // NOTE(oktal): locally dispatched messages are not persisted
+                                    let _ = self.event_tx.send(BusEvent::MessageHandled {
+                                        id: None,
+                                        descriptor: dispatched.descriptor,
+                                        persisted: false,
+                                        success
+                                    });
+
                                     // Retrieve the `CommandResult`
                                     let command_result: Option<CommandResult> = dispatched.try_into().ok();
 
@@ -387,12 +409,22 @@ impl<T: Transport> Receiver<T> {
                                     }
 
                                 },
-                                Err(e) => error!("failed to dispatch message locally: {e}")
+                                Err(e) =>  {
+                                    error!("failed to dispatch message locally: {e}");
+
+                                    // Resolve command future
+                                    let _ = tx.send(Err(CommandError::Bus(Error::Dispatch(e))));
+                                }
                              }
                         }
                         LocalDispatchRequest::Event { tx, message } => {
                             // Dispatch event locally
-                            let _dispatched = self.dispatch(DispatchRequest::local(message, bus.clone())).await.unwrap();
+                            let dispatched = self.dispatch(
+                                DispatchRequest::local(self.self_peer.clone(), self.environment.clone(), message, bus.clone())).await;
+
+                            if let Err(e) = dispatched {
+                                error!("failed to dispatch event locally: {e}");
+                            }
 
                             // Notify that the event has been dispatched
                             let _ = tx.send(());
@@ -1037,7 +1069,7 @@ mod tests {
     use crate::directory::commands::{RegisterPeerCommand, RegisterPeerResponse};
     use crate::directory::memory::MemoryDirectory;
     use crate::dispatch::router::{RouteHandler, Router};
-    use crate::inject::{self};
+    use crate::inject;
     use crate::message_type_id::MessageTypeId;
     use crate::proto::IntoProtobuf;
     use crate::transport::memory::MemoryTransport;

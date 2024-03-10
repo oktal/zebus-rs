@@ -10,9 +10,9 @@ use once_cell::sync::Lazy;
 use thiserror::Error;
 
 use crate::{
-    directory::{MessageBinding, PeerDescriptor},
+    directory::{DirectoryReader, MessageBinding, PeerDescriptor},
     transport::TransportMessage,
-    BoxError, Peer,
+    BoxError, Peer, PeerId,
 };
 
 use self::command::PersistMessageCommand;
@@ -71,8 +71,29 @@ pub struct PersistenceRequest {
 
 impl From<crate::transport::future::SendEntry> for PersistenceRequest {
     fn from(value: crate::transport::future::SendEntry) -> Self {
-        let crate::transport::future::SendEntry { message, peers } = value;
+        let crate::transport::future::SendEntry { message, peers, .. } = value;
         Self { message, peers }
+    }
+}
+
+impl PersistenceRequest {
+    pub(crate) fn persistent_peer_ids(&self, directory: &dyn DirectoryReader) -> Vec<PeerId> {
+        let is_persistent = self.message.is_persistent();
+
+        if is_persistent {
+            self.peers
+                .iter()
+                .filter(|p| {
+                    directory
+                        .get_peer(&p.id)
+                        .map(|descriptor| descriptor.is_persistent)
+                        .unwrap_or(false)
+                })
+                .map(|p| p.id.clone())
+                .collect()
+        } else {
+            vec![]
+        }
     }
 }
 

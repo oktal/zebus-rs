@@ -7,8 +7,8 @@ use crate::{
     bus::BusEvent,
     directory::DirectoryReader,
     sync::stream::EventStream,
-    transport::{self, future::SendFuture, Transport, TransportMessage},
-    BusConfiguration, PeerId,
+    transport::{self, future::SendFuture, SendContext, Transport, TransportMessage},
+    BusConfiguration, Peer, PeerId,
 };
 
 use super::{PersistenceError, PersistenceRequest};
@@ -46,14 +46,11 @@ enum Inner<T> {
         /// Configuration of the bus
         _configuration: BusConfiguration,
 
-        /// [`PeerId`] that has ben configured
-        peer_id: PeerId,
+        /// Current [`Peer`]
+        peer: Peer,
 
         /// Environment that has been configured
         environment: String,
-
-        /// The endpoint that has been bound by the inner transport
-        inbound_endpoint: String,
 
         /// Channel to receive [`TransportMessage`] messages from
         /// Use to subscribe
@@ -164,7 +161,9 @@ where
                 inner.start().map_err(Into::into)?;
 
                 // Retrieve bound endpoint
-                let inbound_endpoint = inner.inbound_endpoint().map_err(Into::into)?.into_owned();
+                let inbound_endpoint = inner.inbound_endpoint().map_err(Into::into)?;
+
+                let peer = Peer::new(peer_id, inbound_endpoint);
 
                 // Create broadcast channel for transport message reception
                 let (messages_tx, _messages_rx) = broadcast::channel(128);
@@ -176,6 +175,8 @@ where
                     &configuration,
                     directory,
                     event_rx.stream(),
+                    peer.clone(),
+                    environment.clone(),
                     inner,
                     messages_tx.clone(),
                     shutdown.clone(),
@@ -188,9 +189,8 @@ where
                 (
                     Some(Inner::Started {
                         _configuration: configuration,
-                        peer_id,
+                        peer,
                         environment,
-                        inbound_endpoint,
                         messages_tx,
                         requests_tx,
                         shutdown,
@@ -223,8 +223,8 @@ where
 
     fn peer_id(&self) -> Result<&PeerId, Self::Err> {
         match self.inner.as_ref() {
-            Some(Inner::Configured { ref peer_id, .. })
-            | Some(Inner::Started { ref peer_id, .. }) => Ok(peer_id),
+            Some(Inner::Configured { peer_id, .. }) => Ok(peer_id),
+            Some(Inner::Started { peer, .. }) => Ok(&peer.id),
             _ => Err(PersistenceError::InvalidOperation),
         }
     }
@@ -241,26 +241,26 @@ where
         }
     }
 
-    fn inbound_endpoint(&self) -> Result<std::borrow::Cow<'_, str>, Self::Err> {
+    fn inbound_endpoint(&self) -> Result<Cow<'_, str>, Self::Err> {
         match self.inner.as_ref() {
-            Some(Inner::Started {
-                ref inbound_endpoint,
-                ..
-            }) => Ok(Cow::Borrowed(inbound_endpoint.as_str())),
+            Some(Inner::Started { peer, .. }) => Ok(Cow::Borrowed(&peer.endpoint)),
             _ => Err(PersistenceError::InvalidOperation),
         }
     }
 
     fn send(
         &mut self,
-        peers: impl Iterator<Item = crate::Peer>,
+        peers: impl Iterator<Item = Peer>,
         message: TransportMessage,
-        _context: crate::transport::SendContext,
+        _context: SendContext,
     ) -> Result<Self::SendFuture, Self::Err> {
         match self.inner.as_ref() {
-            Some(Inner::Started { requests_tx, .. }) => {
-                Ok(SendFuture::new(requests_tx.clone(), peers, message))
-            }
+            Some(Inner::Started { requests_tx, .. }) => Ok(SendFuture::new(
+                requests_tx.clone(),
+                peers,
+                message,
+                SendContext::default(),
+            )),
             _ => Err(PersistenceError::InvalidOperation),
         }
     }
@@ -285,8 +285,11 @@ mod tests {
         },
         proto::IntoProtobuf,
         sync::stream::EventStream,
-        transport::{memory::MemoryTransport, Transport, TransportExt},
-        BusConfiguration, Command, MessageExt, Peer, PeerId, Subscription,
+        transport::{
+            memory::{MemoryReceiver, MemoryTransport},
+            Transport, TransportExt, TransportMessage,
+        },
+        BusConfiguration, Command, Message, MessageExt, Peer, PeerId, Subscription,
     };
 
     use super::PersistentTransport;
@@ -294,6 +297,13 @@ mod tests {
     #[derive(prost::Message, Command, Clone, Eq, PartialEq)]
     #[zebus(namespace = "Abc.Test")]
     struct TestCommand {}
+
+    #[derive(prost::Message, Command, Clone, Eq, PartialEq)]
+    #[zebus(namespace = "Abc.Test")]
+    struct TestReplayCommand {
+        #[prost(fixed32, required, tag = 1)]
+        id: u32,
+    }
 
     struct Fixture {
         peer: Peer,
@@ -371,11 +381,22 @@ mod tests {
             }
         }
 
-        // Wait for the `StartMessageReplayCommand` to be sent the persistent transport layer
-        // for a [`timeout`] specific amount of time
-        //
-        // Returns `Some` with the replay id if the command was received before the timeout
-        // or `None` otherwise
+        /// Simulate a registration to the directory by sending the according `BusEvent`
+        fn register(&self, subscriptions: impl IntoIterator<Item = Subscription>) {
+            self.events
+                .send(BusEvent::Registering(self.descriptor(subscriptions)))
+                .expect("send should not fail");
+
+            self.events
+                .send(BusEvent::Registered(vec![self.persistence_peer.clone()]))
+                .expect("send should not fail");
+        }
+
+        /// Wait for the `StartMessageReplayCommand` to be sent the persistent transport layer
+        /// for a [`timeout`] specific amount of time
+        ///
+        /// Returns `Some` with the replay id if the command was received before the timeout
+        /// or `None` otherwise
         async fn wait_for_start(&mut self, timeout: Duration) -> Option<uuid::Uuid> {
             let start =
                 tokio::time::timeout(timeout, self.inner.wait_for::<StartMessageReplayCommand>(1))
@@ -392,6 +413,32 @@ mod tests {
                 }
                 Err(_) => None,
             }
+        }
+
+        /// Replay a given message `msg` from a sending `peer`
+        fn replay<M>(
+            &mut self,
+            replay_id: uuid::Uuid,
+            peer: Peer,
+            msg: M,
+            message_fn: impl FnOnce(&mut TransportMessage),
+        ) where
+            M: Message,
+        {
+            let (_, message_replayed) = msg.as_replayed(replay_id, &peer, self.environment.clone());
+
+            let (_, mut message_replayed) =
+                message_replayed.as_transport(&peer, self.environment.clone());
+
+            message_fn(&mut message_replayed);
+
+            self.inner
+                .transport_message_received(message_replayed)
+                .expect("message received should not fail");
+        }
+
+        fn spawn(&self) -> Result<MemoryReceiver, PersistenceError> {
+            self.transport.subscribe().map(MemoryReceiver::spawn)
         }
     }
 
@@ -432,17 +479,9 @@ mod tests {
         // Setup
         let mut fixture = Fixture::new_default();
 
-        // Configure transport
         fixture.configure().expect("configure should not fail");
-
-        // Start transport
         fixture.transport.start().expect("start should not fail");
-
-        // Start replay
-        fixture
-            .events
-            .send(BusEvent::Registered(vec![fixture.persistence_peer.clone()]))
-            .expect("send should not fail");
+        fixture.register([]);
 
         // Make sure a `StartMessageReplayCommand` has been sent
         // TODO(oktal): timeout
@@ -504,17 +543,9 @@ mod tests {
         // Setup
         let mut fixture = Fixture::new_default();
 
-        // Configure transport
         fixture.configure().expect("configure should not fail");
-
-        // Start transport
         let start = fixture.transport.start().expect("start should not fail");
-
-        // Start replay
-        fixture
-            .events
-            .send(BusEvent::Registered(vec![fixture.persistence_peer.clone()]))
-            .expect("send should not fail");
+        fixture.register([]);
 
         // Wait for `StartMessageReplayCommand` to retrieve the replay id
         let start_cmd = fixture.inner.wait_for::<StartMessageReplayCommand>(1).await;
@@ -544,21 +575,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_messages_during_replay_phase() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([]);
+
+        // Subscribe to persistent transport messages
+        let mut rx = fixture
+            .spawn()
+            .expect("subscribe to transport messages received should not fail");
+
+        // Wait for replay to start and retrieve the replay id
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        // Replay some messages
+        let to_replay = (0..100)
+            .map(|i| TestReplayCommand { id: i as u32 })
+            .collect::<Vec<_>>();
+
+        let replay_peer = Peer::test();
+
+        for message in &to_replay {
+            fixture.replay(replay_id, replay_peer.clone(), message.clone(), |_| {});
+        }
+
+        // Make sure messages were replayed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let replayed = rx.recv_all();
+
+        assert_eq!(replayed.len(), to_replay.len());
+
+        for (to_replay, replayed) in to_replay.into_iter().zip(replayed) {
+            let replayed = replayed.decode_as::<TestReplayCommand>();
+            assert_eq!(replayed.unwrap(), Ok(to_replay));
+        }
+    }
+
+    #[tokio::test]
     async fn set_was_persisted_for_replayed_messages() {
         // Setup
         let mut fixture = Fixture::new_default();
 
-        // Configure transport
         fixture.configure().expect("configure should not fail");
-
-        // Start transport
         fixture.transport.start().expect("start should not fail");
-
-        // Start replay
-        fixture
-            .events
-            .send(BusEvent::Registered(vec![fixture.persistence_peer.clone()]))
-            .expect("send should not fail");
+        fixture.register([]);
 
         // Subscribe to persistent transport messages
         let rx = fixture
@@ -575,20 +641,10 @@ mod tests {
             .await
             .expect("replay should have started");
 
-        // Create message replayed
-        let (_, message_replayed) =
-            TestCommand {}.as_replayed(replay_id, &Peer::test(), fixture.environment.clone());
-
-        let (_, mut message_replayed) =
-            message_replayed.as_transport(&Peer::test(), fixture.environment.clone());
-
-        message_replayed.was_persisted = false;
-
         // Replay message
-        fixture
-            .inner
-            .transport_message_received(message_replayed)
-            .expect("message received should not fail");
+        fixture.replay(replay_id, Peer::test(), TestCommand {}, |msg| {
+            msg.was_persisted = false
+        });
 
         // Make sure was_persisted was set to true
         let cmd = rx
@@ -604,24 +660,10 @@ mod tests {
     async fn set_was_persisted_for_messages_replayed_afer_replay_phase() {
         // Setup
         let mut fixture = Fixture::new_default();
-        let descriptor = fixture.descriptor([Subscription::any::<TestCommand>()]);
 
-        // Configure transport
         fixture.configure().expect("configure should not fail");
-
-        // Start transport
         fixture.transport.start().expect("start should not fail");
-
-        // Start replay
-        fixture
-            .events
-            .send(BusEvent::Registering(descriptor))
-            .expect("send should not fail");
-
-        fixture
-            .events
-            .send(BusEvent::Registered(vec![fixture.persistence_peer.clone()]))
-            .expect("send should not fail");
+        fixture.register([Subscription::any::<TestCommand>()]);
 
         // Subscribe to persistent transport messages
         let rx = fixture
@@ -674,17 +716,9 @@ mod tests {
         // Setup
         let mut fixture = Fixture::new_default();
 
-        // Configure transport
         fixture.configure().expect("configure should not fail");
-
-        // Start transport
         fixture.transport.start().expect("start should not fail");
-
-        // Start replay
-        fixture
-            .events
-            .send(BusEvent::Registered(vec![fixture.persistence_peer.clone()]))
-            .expect("send should not fail");
+        fixture.register([]);
 
         // Subscribe to persistent transport messages
         let rx = fixture
@@ -713,20 +747,10 @@ mod tests {
             )
             .expect("message received should not fail");
 
-        // Create message replayed
-        let (_, message_replayed) =
-            TestCommand {}.as_replayed(replay_id, &Peer::test(), fixture.environment.clone());
-
-        let (_, mut message_replayed) =
-            message_replayed.as_transport(&Peer::test(), fixture.environment.clone());
-
-        message_replayed.was_persisted = false;
-
         // Replay message
-        fixture
-            .inner
-            .transport_message_received(message_replayed)
-            .expect("message received should not fail");
+        fixture.replay(replay_id, Peer::test(), TestCommand {}, |msg| {
+            msg.was_persisted = false
+        });
 
         // Send SafetyPhaseEnded
         fixture
@@ -748,5 +772,62 @@ mod tests {
             .expect("we should have forwarded a message");
 
         assert_eq!(cmd.was_persisted, true);
+    }
+
+    #[tokio::test]
+    async fn deduplicate_messages_during_safety_phase() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([]);
+
+        // Subscribe to persistent transport messages
+        let mut receiver = fixture
+            .spawn()
+            .expect("spawning message receiver should not fail");
+
+        // Wait for replay to start and retrieve the replay id
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        // Send ReplayPhaseEnded
+        fixture
+            .inner
+            .message_received(
+                ReplayPhaseEnded {
+                    replay_id: replay_id.into_protobuf(),
+                },
+                &fixture.peer,
+                fixture.environment.clone(),
+            )
+            .expect("message received should not fail");
+
+        let replay_command = TestReplayCommand { id: 0xF00D };
+
+        // Receive message
+        let msg_id = fixture
+            .inner
+            .message_received(
+                replay_command.clone(),
+                &Peer::test(),
+                fixture.environment.clone(),
+            )
+            .unwrap();
+
+        // Replay duplicated message
+        fixture.replay(replay_id, Peer::test(), replay_command, |msg| {
+            msg.id = msg_id.into()
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let received = receiver.recv_all();
+
+        // Make sure we did not receive a duplicated message through the persistence
+        assert_eq!(received.len(), 1);
     }
 }

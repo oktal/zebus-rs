@@ -98,7 +98,7 @@ impl MemoryDirectory {
 }
 
 impl DirectoryReader for MemoryDirectory {
-    fn get(&self, _peer_id: &PeerId) -> Option<PeerDescriptor> {
+    fn get_peer(&self, _peer_id: &PeerId) -> Option<PeerDescriptor> {
         None
     }
 

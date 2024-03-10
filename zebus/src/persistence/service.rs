@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use futures_core::{stream::BoxStream, Stream};
 use futures_util::{pin_mut, StreamExt};
@@ -13,10 +13,8 @@ use crate::{
     persistence::is_persistence_peer,
     proto::{FromProtobuf, IntoProtobuf},
     sync::stream::EventStream,
-    transport::{
-        MessageExecutionCompleted, SendContext, Transport, TransportExt, TransportMessage,
-    },
-    BusConfiguration, CommandError, MessageId, Peer,
+    transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
+    BusConfiguration, CommandError, MessageId, Peer, PeerId,
 };
 
 use super::{
@@ -25,44 +23,82 @@ use super::{
     PersistenceError, PersistenceEvent, PersistenceRequest,
 };
 
+/// Represents a message to send to the persistence
+enum PersistenceMessage {
+    /// Special command to persist a message
+    Persist {
+        /// Original message to persist
+        message: TransportMessage,
+
+        /// List of persistent target peers for the message to persist
+        persistent_peer_ids: Vec<PeerId>,
+    },
+
+    /// Any other message to send to the persistence
+    Other(TransportMessage),
+}
+
+impl Into<TransportMessage> for PersistenceMessage {
+    fn into(self) -> TransportMessage {
+        match self {
+            Self::Persist {
+                mut message,
+                persistent_peer_ids,
+            } => {
+                message.persistent_peer_ids = persistent_peer_ids;
+                message
+            }
+            Self::Other(message) => message,
+        }
+    }
+}
+
 enum State {
     Init {
         peers: Vec<Peer>,
         descriptor: Option<PeerDescriptor>,
+
+        tx_queue: Vec<PersistenceMessage>,
     },
 
     Registered {
-        descriptor: Option<PeerDescriptor>,
+        descriptor: PeerDescriptor,
+        tx_queue: Vec<PersistenceMessage>,
     },
 
     PersistenceReady {
         peers: Vec<Peer>,
-        descriptor: Option<PeerDescriptor>,
+        descriptor: PeerDescriptor,
+        tx_queue: Vec<PersistenceMessage>,
     },
 
     ReplayPhase {
         command_id: uuid::Uuid,
         id: uuid::Uuid,
 
-        descriptor: Option<PeerDescriptor>,
+        descriptor: PeerDescriptor,
+        peers: Vec<Peer>,
 
-        queue: Vec<TransportMessage>,
-        replayed: usize,
+        rx_queue: Vec<TransportMessage>,
+        replayed: HashSet<MessageId>,
     },
 
     SafetyPhase {
+        descriptor: PeerDescriptor,
+        peers: Vec<Peer>,
         id: uuid::Uuid,
-        queue: Vec<TransportMessage>,
+        replayed: HashSet<MessageId>,
     },
 
     NormalPhase {
-        queue: Vec<TransportMessage>,
+        peers: Vec<Peer>,
     },
 }
 
-struct PersistenceService<S, T> {
-    bus_events_rx: S,
+struct PersistenceService<T> {
     directory: Arc<dyn DirectoryReader>,
+    peer: Peer,
+    environment: String,
     inner: T,
     forward_tx: broadcast::Sender<TransportMessage>,
     reqs_rx: mpsc::Receiver<PersistenceRequest>,
@@ -70,27 +106,25 @@ struct PersistenceService<S, T> {
     shutdown: CancellationToken,
 }
 
-impl<S, T> PersistenceService<S, T>
+impl<T> PersistenceService<T>
 where
-    S: Stream<Item = BusEvent>,
     T: Transport,
 {
-    async fn run(self) -> Result<(), PersistenceError> {
+    async fn run<S>(mut self, bus_events: S) -> Result<(), PersistenceError>
+    where
+        S: Stream<Item = BusEvent>,
+    {
         let mut inner_rx = self
             .inner
             .subscribe()
             .map_err(|e| PersistenceError::Transport(e.into()))?;
-        let stream = self.bus_events_rx;
 
-        let forward_tx = self.forward_tx;
-        let mut reqs_rx = self.reqs_rx;
-        let mut inner = self.inner;
-
-        pin_mut!(stream);
+        pin_mut!(bus_events);
 
         let mut state = State::Init {
             peers: Vec::new(),
             descriptor: None,
+            tx_queue: Vec::new(),
         };
 
         loop {
@@ -99,13 +133,13 @@ where
                _ = self.shutdown.cancelled() => break Ok(()),
 
                // We received a bus event
-               Some(event) = stream.next() => {
-                    state = Self::handle_event(state, event);
+               Some(event) = bus_events.next() => {
+                    state = self.handle_event(state, event).await;
                }
 
                 // We received a message from the inner transport layer
                 Some(message) = inner_rx.next() => {
-                    state = match Self::handle_transport_message(message, state, &self.events_tx, &forward_tx) {
+                    state = match self.handle_transport_message(message, state) {
                         Ok(state) => state,
                         Err((state, err)) => {
                             warn!("failed to handle transport message: {err}");
@@ -115,70 +149,74 @@ where
                 }
 
                 // We received a request to send a message
-                Some(req) = reqs_rx.recv() => {
-                    if let Err(err) = Self::persist_message(req, &mut inner, &mut state).await {
+                Some(req) = self.reqs_rx.recv() => {
+                    if let Err(err) = self.persist_message(req, &mut state).await {
                         warn!("failed to persist message: {err}");
                     }
                 }
             }
 
-            state =
-                match state {
-                    // We are ready to start the replay sequence
-                    State::PersistenceReady {
-                        mut peers,
-                        descriptor,
-                    } => {
-                        let peer = inner
-                            .peer()
-                            .map_err(|e| PersistenceError::Transport(e.into()))?;
-                        let environment = inner
-                            .environment()
-                            .map_err(|e| PersistenceError::Transport(e.into()))?;
-                        let replay_id = uuid::Uuid::new_v4();
-                        let cmd = StartMessageReplayCommand {
-                            replay_id: replay_id.into_protobuf(),
-                        };
+            state = match state {
+                // We are ready to start the replay sequence
+                State::PersistenceReady {
+                    mut peers,
+                    descriptor,
+                    tx_queue,
+                } => {
+                    // Create StartMessageReplayCommand
+                    let replay_id = uuid::Uuid::new_v4();
+                    let cmd = StartMessageReplayCommand {
+                        replay_id: replay_id.into_protobuf(),
+                    };
 
-                        let (command_id, message) =
-                            TransportMessage::create(&peer, environment.to_string(), &cmd);
+                    let (command_id, message) =
+                        TransportMessage::create(&self.peer, self.environment.to_string(), &cmd);
 
-                        debug!("starting replay with id {replay_id}");
+                    let persistence_peer = peers
+                        .pop()
+                        .expect("we should have at least one availablle persistence peer");
 
-                        inner
+                    debug!("starting replay {replay_id} with {persistence_peer}");
+
+                    // Start replay by sending StartMessageReplayCommand
+                    self.send(
+                        std::iter::once(persistence_peer.clone()),
+                        message,
+                        SendContext::Empty,
+                    )
+                    .await?;
+
+                    // Drain the queue for any message waiting to be persisted
+                    for message in tx_queue {
+                        if let Err(e) = self
                             .send(
-                                std::iter::once(peers.pop().expect(
-                                    "we should have at least one available persistence peer",
-                                )),
+                                std::iter::once(persistence_peer.clone()),
                                 message,
-                                SendContext::default(),
+                                SendContext::Empty,
                             )
-                            .map_err(|e| PersistenceError::Transport(e.into()))?
                             .await
-                            .map_err(|e| PersistenceError::Transport(e.into()))?;
-
-                        State::ReplayPhase {
-                            command_id,
-                            id: replay_id,
-                            descriptor,
-                            queue: Vec::new(),
-                            replayed: 0,
+                        {
+                            // TODO(oktal): log message type
+                            error!("failed to persist message: {e}",);
                         }
                     }
-                    s => s,
-                };
 
-            if let State::NormalPhase { ref mut queue, .. } = state {
-                // If we just switched to normal phase, forward the incomming messages
-                // that were received and queued during the safety phase
-                for msg in queue.drain(..) {
-                    let _ = forward_tx.send(msg);
+                    // Switch to ReplayPhase
+                    State::ReplayPhase {
+                        peers,
+                        command_id,
+                        id: replay_id,
+                        descriptor,
+                        rx_queue: Vec::new(),
+                        replayed: HashSet::new(),
+                    }
                 }
-            }
+                s => s,
+            };
         }
     }
 
-    fn handle_event(mut state: State, event: BusEvent) -> State {
+    async fn handle_event(&mut self, mut state: State, event: BusEvent) -> State {
         match event {
             // Bus is about to register to the directory
             BusEvent::Registering(desc) => {
@@ -196,7 +234,8 @@ where
             BusEvent::Registered(directory_peers) => {
                 if let State::Init {
                     mut peers,
-                    descriptor,
+                    mut descriptor,
+                    tx_queue,
                 } = state
                 {
                     // Find persistence service peers
@@ -209,15 +248,26 @@ where
                             .map(|p| p.peer.clone()),
                     );
 
+                    let descriptor = descriptor.take().expect(
+                        "a PeerDescriptor should have been received through the BusEvent::Registering event",
+                    );
+
                     // If the persistence is up and running, switch to the
                     // `PersistenceReady` state
                     if !peers.is_empty() {
                         debug!("discovered persistence peers {peers:?}");
-                        State::PersistenceReady { peers, descriptor }
+                        State::PersistenceReady {
+                            peers,
+                            descriptor,
+                            tx_queue,
+                        }
                     } else {
                         // We do not have a persistence peer available yet, switch to
                         // the `Registered` state and wait for the persistence to start
-                        State::Registered { descriptor }
+                        State::Registered {
+                            descriptor,
+                            tx_queue,
+                        }
                     }
                 } else {
                     state
@@ -228,6 +278,7 @@ where
                     State::Init {
                         mut peers,
                         descriptor,
+                        tx_queue,
                     } => {
                         // A persistence service peer started but we are still in the
                         // initialization stage, add it to our list of persistence peers
@@ -235,9 +286,16 @@ where
                             peers.push(peer.peer)
                         }
 
-                        State::Init { peers, descriptor }
+                        State::Init {
+                            peers,
+                            descriptor,
+                            tx_queue,
+                        }
                     }
-                    State::Registered { descriptor } => {
+                    State::Registered {
+                        descriptor,
+                        tx_queue,
+                    } => {
                         // If we are registered and the peer that started is a
                         // persistence service peer, switch to the `PersistenceReady`
                         // state.
@@ -247,33 +305,81 @@ where
                             State::PersistenceReady {
                                 peers: vec![peer.peer],
                                 descriptor,
+                                tx_queue,
                             }
                         } else {
-                            State::Registered { descriptor }
+                            State::Registered {
+                                descriptor,
+                                tx_queue,
+                            }
                         }
                     }
                     s => s,
                 }
             }
+
+            BusEvent::MessageHandled { id, persisted, .. } => {
+                // Ack the message to the persistence if the message was persisted
+                if let (Some(message_id), true) = (id, persisted) {
+                    let message_handled = super::event::MessageHandled {
+                        id: message_id.into_protobuf(),
+                    };
+
+                    let (_, message) = TransportMessage::create(
+                        &self.peer,
+                        self.environment.to_string(),
+                        &message_handled,
+                    );
+
+                    match &mut state {
+                        State::Init { tx_queue, .. }
+                        | State::Registered { tx_queue, .. }
+                        | State::PersistenceReady { tx_queue, .. } => {
+                            tx_queue.push(PersistenceMessage::Other(message));
+                        }
+                        State::ReplayPhase { peers, .. }
+                        | State::SafetyPhase { peers, .. }
+                        | State::NormalPhase { peers, .. } => {
+                            let persistence_peer = peers
+                                .first()
+                                .expect("we should have at least one availablle persistence peer");
+
+                            if let Err(e) = self
+                                .send(
+                                    std::iter::once(persistence_peer.clone()),
+                                    message,
+                                    SendContext::default(),
+                                )
+                                .await
+                            {
+                                error!("failed to ack message to persistence: {e}");
+                            }
+                        }
+                    }
+                }
+                state
+            }
+
             _ => state,
         }
     }
 
     fn handle_transport_message(
+        &self,
         message: TransportMessage,
         state: State,
-        events_tx: &EventStream<PersistenceEvent>,
-        forward_tx: &broadcast::Sender<TransportMessage>,
     ) -> Result<State, (State, PersistenceError)> {
         match state {
             // Replay phase
             State::ReplayPhase {
+                peers,
                 command_id,
                 id,
                 descriptor,
-                mut queue,
-                replayed,
+                rx_queue: mut queue,
+                mut replayed,
             } => {
+                let message_id = message.id;
                 // We are in a replay phase, attempt to handle the message as a
                 // `ReplayEvent` from the persistence
                 match ReplayEvent::try_from(message) {
@@ -284,17 +390,18 @@ where
 
                             debug!("replaying message with id {replay_id}");
 
-                            if replayed == 0 {
-                                let _ = events_tx.send(PersistenceEvent::ReplayStarted);
+                            if replayed.is_empty() {
+                                let _ = self.events_tx.send(PersistenceEvent::ReplayStarted);
                             }
 
                             if replay_id != id {
                                 return Err((
                                     State::ReplayPhase {
+                                        peers,
                                         command_id,
                                         id,
                                         descriptor,
-                                        queue,
+                                        rx_queue: queue,
                                         replayed,
                                     },
                                     PersistenceError::ConflictingReplay {
@@ -303,22 +410,25 @@ where
                                     },
                                 ));
                             } else {
+                                replayed.insert(message_id);
                                 // In the replay phase, forward a replayed message
                                 // directly
                                 // Since the message comes from the persistence, it was
                                 // persisted, but force it to true to be compatible with
                                 // older versions of zebus that did not specify it
                                 msg.message.was_persisted = Some(true);
-                                let _ =
-                                    forward_tx.send(TransportMessage::from_protobuf(msg.message));
+                                let _ = self
+                                    .forward_tx
+                                    .send(TransportMessage::from_protobuf(msg.message));
 
                                 // Stay in replay phase
                                 Ok(State::ReplayPhase {
+                                    peers,
                                     command_id,
                                     id,
                                     descriptor,
-                                    queue,
-                                    replayed: replayed + 1,
+                                    rx_queue: queue,
+                                    replayed,
                                 })
                             }
                         }
@@ -327,7 +437,12 @@ where
                             let replay_id = msg.replay_id.to_uuid();
                             if replay_id != id {
                                 return Err((
-                                    State::SafetyPhase { id, queue },
+                                    State::SafetyPhase {
+                                        descriptor,
+                                        peers,
+                                        id,
+                                        replayed,
+                                    },
                                     PersistenceError::ConflictingReplay {
                                         replay_id: id,
                                         conflicting_id: replay_id,
@@ -339,13 +454,18 @@ where
                                 // Forward queued messages
                                 for mut msg in queue.drain(..) {
                                     msg.was_persisted = true;
-                                    let _ = forward_tx.send(msg);
+                                    let _ = self.forward_tx.send(msg);
                                 }
 
-                                let _ = events_tx.send(PersistenceEvent::SafetyStarted);
+                                let _ = self.events_tx.send(PersistenceEvent::SafetyStarted);
 
                                 // Switch to safety phase
-                                Ok(State::SafetyPhase { id, queue })
+                                Ok(State::SafetyPhase {
+                                    descriptor,
+                                    peers,
+                                    id,
+                                    replayed,
+                                })
                             }
                         }
                         // We should not receive a `SafetyPhaseEnded` event in a replay
@@ -353,10 +473,11 @@ where
                         ReplayEvent::SafetyPhaseEnded(_msg) => {
                             return Err((
                                 State::ReplayPhase {
+                                    peers,
                                     command_id,
                                     id,
                                     descriptor,
-                                    queue,
+                                    rx_queue: queue,
                                     replayed,
                                 },
                                 PersistenceError::InvalidPhase,
@@ -368,10 +489,11 @@ where
                         TryFromReplayEventError::Decode(e) => {
                             return Err((
                                 State::ReplayPhase {
+                                    peers,
                                     command_id,
                                     id,
                                     descriptor,
-                                    queue,
+                                    rx_queue: queue,
                                     replayed,
                                 },
                                 PersistenceError::Decode(e),
@@ -381,7 +503,7 @@ where
                         // Incomming message is not a `ReplayEvent`
                         TryFromReplayEventError::Other(msg) => {
                             // Check if we received the `MessageExecutionCompleted`
-                            // from the `StartMessageReplayCommand`
+                            // for the `StartMessageReplayCommand`
                             if let Some(message_execution_completed) =
                                 msg.decode_as::<MessageExecutionCompleted>()
                             {
@@ -403,7 +525,7 @@ where
                                             }
                                         } else {
                                             // Forward the message
-                                            let _ = forward_tx.send(msg);
+                                            let _ = self.forward_tx.send(msg);
                                         }
                                     }
                                     Err(e) => {
@@ -411,32 +533,31 @@ where
                                     }
                                 }
                             } else {
-                                if let Some(descriptor) = descriptor.as_ref() {
-                                    // When we are in a replay phase, only forward messages that are infrastructure messages
-                                    let msg_type = msg.message_type().expect(
-                                        "a TransportMessage should always have a message type",
-                                    );
-                                    if let Some(msg_type_id) =
-                                        descriptor.subscriptions.iter().find_map(|s| {
-                                            (s.full_name() == msg_type).then_some(s.message_type())
-                                        })
-                                    {
-                                        if let Some(true) = msg_type_id.is_infrastructure() {
-                                            let _ = forward_tx.send(msg);
-                                        } else {
-                                            // Otherwise, queue it
-                                            queue.push(msg);
-                                        }
+                                // When we are in a replay phase, only forward messages that are infrastructure messages
+                                let msg_type = msg
+                                    .message_type()
+                                    .expect("a TransportMessage should always have a message type");
+                                if let Some(msg_type_id) =
+                                    descriptor.subscriptions.iter().find_map(|s| {
+                                        (s.full_name() == msg_type).then_some(s.message_type())
+                                    })
+                                {
+                                    if let Some(true) = msg_type_id.is_infrastructure() {
+                                        let _ = self.forward_tx.send(msg);
+                                    } else {
+                                        // Otherwise, queue it
+                                        queue.push(msg);
                                     }
                                 }
                             }
 
                             // Stay in replay phase
                             Ok(State::ReplayPhase {
-                                command_id,
                                 id,
+                                command_id,
+                                peers,
                                 descriptor,
-                                queue,
+                                rx_queue: queue,
                                 replayed,
                             })
                         }
@@ -445,7 +566,13 @@ where
             }
 
             // Safety phase
-            State::SafetyPhase { id, mut queue } => {
+            State::SafetyPhase {
+                descriptor,
+                peers,
+                id,
+                mut replayed,
+            } => {
+                let message_id = message.id;
                 // We are in a safety phase, attempt to handle the message as a
                 // `ReplayEvent` from the persistence
                 match ReplayEvent::try_from(message) {
@@ -458,7 +585,12 @@ where
 
                             if replay_id != id {
                                 return Err((
-                                    State::SafetyPhase { id, queue },
+                                    State::SafetyPhase {
+                                        descriptor,
+                                        peers,
+                                        id,
+                                        replayed,
+                                    },
                                     PersistenceError::ConflictingReplay {
                                         replay_id: id,
                                         conflicting_id: replay_id,
@@ -469,13 +601,23 @@ where
                                 // persisted, but force it to true to be compatible with
                                 // older versions of zebus that did not specify it
                                 msg.message.was_persisted = Some(true);
-                                // We received a message to replay from the
-                                // persistence while we are in the safety phase,
-                                // queue it instead of forwarding it directly
-                                queue.push(TransportMessage::from_protobuf(msg.message));
+                                // We received a message to replay from the persistence while we are in the safety
+                                // phase, only forward it if we did not already replay it
+                                if !replayed.contains(&message_id) {
+                                    let _ = self
+                                        .forward_tx
+                                        .send(TransportMessage::from_protobuf(msg.message));
+
+                                    replayed.insert(message_id);
+                                }
 
                                 // Stay in safety phase
-                                Ok(State::SafetyPhase { id, queue })
+                                Ok(State::SafetyPhase {
+                                    descriptor,
+                                    peers,
+                                    id,
+                                    replayed,
+                                })
                             }
                         }
 
@@ -483,7 +625,12 @@ where
                         // safety phase
                         ReplayEvent::ReplayPhaseEnded(_msg) => {
                             return Err((
-                                State::SafetyPhase { id, queue },
+                                State::SafetyPhase {
+                                    descriptor,
+                                    peers,
+                                    id,
+                                    replayed,
+                                },
                                 PersistenceError::InvalidPhase,
                             ))
                         }
@@ -494,7 +641,7 @@ where
 
                             if replay_id != id {
                                 return Err((
-                                    State::NormalPhase { queue },
+                                    State::NormalPhase { peers },
                                     PersistenceError::ConflictingReplay {
                                         replay_id: id,
                                         conflicting_id: replay_id,
@@ -503,10 +650,10 @@ where
                             } else {
                                 info!("switching to normal phase");
 
-                                let _ = events_tx.send(PersistenceEvent::Normal);
+                                let _ = self.events_tx.send(PersistenceEvent::Normal);
 
                                 // Switch to normal phase
-                                Ok(State::NormalPhase { queue })
+                                Ok(State::NormalPhase { peers })
                             }
                         }
                     },
@@ -514,56 +661,119 @@ where
                         // Failed to decode incomming message
                         TryFromReplayEventError::Decode(e) => {
                             return Err((
-                                State::SafetyPhase { id, queue },
+                                State::SafetyPhase {
+                                    descriptor,
+                                    peers,
+                                    id,
+                                    replayed,
+                                },
                                 PersistenceError::Decode(e),
                             ))
                         }
 
                         // Incomming message is not a replay event
                         TryFromReplayEventError::Other(msg) => {
-                            // Forward the message right away instead of queueing
-                            // it
-                            let _ = forward_tx.send(msg);
+                            // We received a message to replay from the persistence while we are in the safety
+                            // phase, only forward it if we did not already replay it
+                            if !replayed.contains(&message_id) {
+                                let _ = self.forward_tx.send(msg);
+                                replayed.insert(message_id);
+                            }
 
                             // Stay in safety phase
-                            Ok(State::SafetyPhase { id, queue })
+                            Ok(State::SafetyPhase {
+                                descriptor,
+                                peers,
+                                id,
+                                replayed,
+                            })
                         }
                     },
                 }
             }
             s => {
-                // TODO(oktal): only forward infrastructure messages
-                let _ = forward_tx.send(message);
+                let _ = self.forward_tx.send(message);
                 Ok(s)
             }
         }
     }
 
     async fn persist_message(
+        &mut self,
         req: PersistenceRequest,
-        inner: &mut T,
         state: &mut State,
-    ) -> Result<(), PersistenceError>
-    where
-        T: Transport,
-    {
+    ) -> Result<(), PersistenceError> {
+        let persistent_peer_ids = req.persistent_peer_ids(self.directory.as_ref());
+        let should_persist = !persistent_peer_ids.is_empty();
+
         match state {
-            State::Init { .. }
-            | State::Registered { .. }
-            | State::PersistenceReady { .. }
-            | State::NormalPhase { .. } => {
-                inner
-                    .send(req.peers.into_iter(), req.message, SendContext::default())
-                    .map_err(|e| PersistenceError::Transport(e.into()))?
-                    .await
-                    .map_err(|e| PersistenceError::Transport(e.into()))?;
+            State::Init {
+                ref mut tx_queue, ..
+            }
+            | State::Registered {
+                ref mut tx_queue, ..
+            }
+            | State::PersistenceReady {
+                ref mut tx_queue, ..
+            } => {
+                // We are still waiting for the persistence service peer
+                // We do not need to send the message to the persistence. Send the message right away
+                if !should_persist {
+                    self.send(req.peers, req.message, SendContext::default())
+                        .await?;
+                } else {
+                    // We need to send the message to the persistence
+                    // First send the message right away
+                    self.send(
+                        req.peers.clone(),
+                        req.message.clone(),
+                        SendContext::default(),
+                    )
+                    .await?;
+
+                    // Enqueue a command to persist the message
+                    tx_queue.push(PersistenceMessage::Persist {
+                        message: req.message,
+                        persistent_peer_ids,
+                    });
+                }
                 Ok(())
             }
-            State::ReplayPhase { ref mut queue, .. } | State::SafetyPhase { ref mut queue, .. } => {
-                queue.push(req.message);
-                Ok(())
+
+            State::ReplayPhase { peers, .. }
+            | State::SafetyPhase { peers, .. }
+            | State::NormalPhase { peers, .. } => {
+                let context = if should_persist {
+                    let persistence_peer = peers
+                        .first()
+                        .expect("we should have at least one available persistence peer")
+                        .clone();
+                    SendContext::Persistent {
+                        persistent_peer_ids,
+                        persistence_peer,
+                    }
+                } else {
+                    SendContext::Empty
+                };
+
+                self.send(req.peers, req.message, context).await
             }
         }
+    }
+
+    async fn send(
+        &mut self,
+        peers: impl IntoIterator<Item = Peer>,
+        message: impl Into<TransportMessage>,
+        context: SendContext,
+    ) -> Result<(), PersistenceError> {
+        // TODO(oktal): we could get rid of the double map_err by making the Transport::send function directly
+        // return a future that can resolve to an error instead of a Result<Future, Err>
+        self.inner
+            .send(peers.into_iter(), message.into(), context)
+            .map_err(|e| PersistenceError::Transport(e.into()))?
+            .await
+            .map_err(|e| PersistenceError::Transport(e.into()))
     }
 }
 
@@ -610,6 +820,8 @@ pub(super) fn spawn<T, S>(
     configuration: &BusConfiguration,
     directory: Arc<dyn DirectoryReader>,
     bus_events_rx: S,
+    peer: Peer,
+    environment: String,
     inner: T,
     forward_tx: broadcast::Sender<TransportMessage>,
     shutdown: CancellationToken,
@@ -629,8 +841,9 @@ where
         let events_rx = events_tx.stream();
 
         let service = PersistenceService {
-            bus_events_rx,
             directory,
+            peer,
+            environment,
             inner,
             forward_tx,
             reqs_rx: rx,
@@ -638,7 +851,7 @@ where
             shutdown,
         };
 
-        let fut = super::future::StopFuture::spawn(service.run());
+        let fut = super::future::StopFuture::spawn(service.run(bus_events_rx));
         (tx, events_rx.boxed(), fut)
     } else {
         let service = TransientService {

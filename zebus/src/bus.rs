@@ -6,6 +6,7 @@ use dyn_clone::DynClone;
 use futures_core::Stream;
 use thiserror::Error;
 use tokio::task::JoinError;
+use zebus_core::MessageTypeDescriptor;
 
 use crate::{
     core::{MessageDescriptor, MessageFlags, MessagePayload, RawMessage, Upcast, UpcastFrom},
@@ -14,7 +15,7 @@ use crate::{
     persistence::event::MessageReplayed,
     proto::{FromProtobuf, IntoProtobuf},
     transport::{MessageExecutionCompleted, TransportMessage},
-    BoxError, MessageTypeId, Peer, PeerId,
+    BoxError, MessageId, MessageTypeId, Peer, PeerId,
 };
 
 /// Error raised when failing to register with the directory
@@ -339,6 +340,23 @@ pub enum BusEvent {
 
     /// Event raised by the directory
     Peer(PeerEvent),
+
+    /// Event raised when a message has been handled by the bus
+    MessageHandled {
+        /// Identifier of the message that has been handled
+        /// When `None`, indicates that the message has been handled locally and thus does have an associated id
+        id: Option<MessageId>,
+
+        /// Descriptor of the message that has been handled
+        descriptor: MessageTypeDescriptor,
+
+        /// Flag indicating whether the handled message has been persisted
+        persisted: bool,
+
+        /// Flag indicating whether the message has been handled succesfully
+        /// When `false`, indicates that one or multiple handlers returned an error
+        success: bool,
+    },
 }
 
 /// A boxed [`BusEvent`] event stream

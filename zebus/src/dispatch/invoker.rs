@@ -70,6 +70,8 @@ pub trait InvokerService:
 impl dyn InvokerService {
     pub(crate) fn invoke<M>(
         &mut self,
+        peer: crate::Peer,
+        environment: String,
         message: M,
         bus: Arc<dyn crate::Bus>,
     ) -> BoxFuture<'static, Result<Option<Response>, Infallible>>
@@ -77,7 +79,12 @@ impl dyn InvokerService {
         M: crate::Message,
     {
         let request = InvokeRequest {
-            dispatch: Arc::new(DispatchRequest::local(Arc::new(message), bus)),
+            dispatch: Arc::new(DispatchRequest::local(
+                peer,
+                environment,
+                Arc::new(message),
+                bus,
+            )),
         };
 
         if let Poll::Ready(Some(_)) = self.poll_invoke(&request) {

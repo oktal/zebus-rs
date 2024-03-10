@@ -35,11 +35,11 @@ where
                     expected: <M as MessageDescriptor>::name(),
                 })),
             },
-            DispatchMessage::Local(msg) => msg
+            DispatchMessage::Local { message, .. } => message
                 .downcast_ref::<M>()
                 .ok_or_else(|| {
                     InternalError(Error::InvalidMessageType {
-                        got: msg.name().to_string(),
+                        got: message.name().to_string(),
                         expected: <M as MessageDescriptor>::name(),
                     })
                 })

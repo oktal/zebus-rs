@@ -397,8 +397,13 @@ mod tests {
         where
             M: Message,
         {
-            self.dispatch(DispatchRequest::local(Arc::new(message), Arc::new(TestBus)))
-                .await
+            self.dispatch(DispatchRequest::local(
+                self.peer.clone(),
+                self.environment.clone(),
+                Arc::new(message),
+                Arc::new(TestBus),
+            ))
+            .await
         }
 
         async fn dispatch(&mut self, request: DispatchRequest) -> Result<Dispatched, Error> {

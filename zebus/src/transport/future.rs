@@ -4,11 +4,12 @@ use futures_core::Future;
 
 use crate::Peer;
 
-use super::TransportMessage;
+use super::{SendContext, TransportMessage};
 
 pub(crate) struct SendEntry {
-    pub peers: Vec<Peer>,
-    pub message: TransportMessage,
+    pub(crate) peers: Vec<Peer>,
+    pub(crate) message: TransportMessage,
+    pub(crate) context: SendContext,
 }
 
 pub(crate) struct SendError(());
@@ -29,12 +30,14 @@ where
         tx: tokio::sync::mpsc::Sender<T>,
         peers: impl Iterator<Item = Peer>,
         message: TransportMessage,
+        context: SendContext,
     ) -> Self {
         Self {
             tx: tokio_util::sync::PollSender::new(tx),
             entry: Some(SendEntry {
                 peers: peers.collect(),
                 message,
+                context,
             }),
             _phantom: PhantomData,
         }
@@ -54,21 +57,21 @@ where
     ) -> std::task::Poll<Self::Output> {
         let mut this = self.project();
 
-        let entry = this.entry.take().expect("invalid state");
-
         match this.tx.poll_reserve(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(match this.tx.send_item(entry.into()) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    let _inner = e.into_inner().expect("send_item should return entry");
-                    Err(E::from(SendError(())))
-                }
-            }),
+            Poll::Ready(Ok(())) => Poll::Ready(
+                match this
+                    .tx
+                    .send_item(this.entry.take().expect("invalid state").into())
+                {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        let _inner = e.into_inner().expect("send_item should return entry");
+                        Err(E::from(SendError(())))
+                    }
+                },
+            ),
             Poll::Ready(Err(_)) => Poll::Ready(Err(E::from(SendError(())))),
-            Poll::Pending => {
-                *this.entry = Some(entry);
-                Poll::Pending
-            }
+            Poll::Pending => Poll::Pending,
         }
     }
 }

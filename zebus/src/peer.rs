@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::PeerId;
+use crate::{transport::OriginatorInfo, PeerId};
 
 #[derive(Clone, Eq, PartialEq, prost::Message)]
 pub struct Peer {
@@ -17,7 +17,29 @@ pub struct Peer {
     pub is_responding: bool,
 }
 
+impl From<OriginatorInfo> for Peer {
+    fn from(value: OriginatorInfo) -> Self {
+        Self {
+            id: value.sender_id,
+            endpoint: value.sender_endpoint,
+            is_up: true,
+            is_responding: true,
+        }
+    }
+}
+
 impl Peer {
+    /// Create a new instance of [`Peer`]
+    /// When creating a new peer, the [`Peer`] will be considered up and running by default
+    pub fn new(id: impl Into<PeerId>, endpoint: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            endpoint: endpoint.into(),
+            is_up: true,
+            is_responding: true,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test() -> Self {
         Self {

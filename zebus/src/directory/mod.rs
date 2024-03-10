@@ -15,7 +15,10 @@ pub use events::{PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStar
 pub(crate) use registration::{Registration, RegistrationError};
 
 use self::{commands::RegisterPeerResponse, event::PeerEvent};
-use crate::{dispatch::InvokerService, Message, MessageDescriptor, Peer, PeerId};
+use crate::{
+    dispatch::InvokerService, Message, MessageDescriptor, MessageTypeDescriptor, MessageTypeId,
+    Peer, PeerId,
+};
 use futures_core::Stream;
 use std::{pin::Pin, sync::Arc};
 
@@ -28,7 +31,7 @@ pub(crate) type EventStream = Pin<Box<dyn Stream<Item = PeerEvent> + Send + Sync
 pub trait DirectoryReader: Send + Sync + 'static {
     /// Get the [`PeerDescriptor`] descriptor corresponding to a [`PeerId`]
     /// Returns `Some` if the peer exists and has been found or `None` otherwise
-    fn get(&self, peer_id: &PeerId) -> Option<PeerDescriptor>;
+    fn get_peer(&self, peer_id: &PeerId) -> Option<PeerDescriptor>;
 
     /// Get the list of [`Peer`] peers handling a [`Message`] with specifing [`crate::BindingKey`] binding
     fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer>;

@@ -8,6 +8,7 @@ use crate::{
     bus::{BusEvent, BusEventStream},
     directory::{event::PeerEvent, DirectoryReader},
     persistence::is_persistence_peer,
+    proto::IntoProtobuf,
     sync::stream::{BoxEventStream, EventStream},
     transport::{
         self,
@@ -49,7 +50,7 @@ impl From<transport::future::SendEntry> for OutboundAction {
         Self::Send {
             peers: value.peers,
             message: value.message,
-            context: SendContext::default(),
+            context: value.context,
         }
     }
 }
@@ -525,6 +526,7 @@ impl OutboundWorker {
                         BusEvent::Stopping => "BusStopping",
                         BusEvent::Stopped => "BusStopped",
                         BusEvent::Peer(ev) => ev.kind().as_str(),
+                        BusEvent::MessageHandled { .. } => "MessageHandled",
                     };
                     (kind,  self.handle_event(event, &mut encode_buf))
                 },
@@ -589,31 +591,49 @@ impl OutboundWorker {
 
     fn handle_send(
         &mut self,
-        mut message: TransportMessage,
+        message: TransportMessage,
         peers: Vec<Peer>,
         context: SendContext,
         encode_buf: &mut Vec<u8>,
     ) -> Result<(), ZmqError> {
-        for peer in peers {
-            let was_persisted = context.was_persisted(&peer.id);
-            message.was_persisted = was_persisted;
-            self.send_to(&peer, &message, encode_buf)?;
-        }
+        let mut message = message.into_protobuf();
 
-        // TODO(oktal): handle persistent peer
+        match context {
+            SendContext::Persistent {
+                persistent_peer_ids,
+                persistence_peer,
+            } => {
+                for peer in peers {
+                    let is_persistent = persistent_peer_ids
+                        .iter()
+                        .find(|p| **p == peer.id)
+                        .is_some();
+                    message.was_persisted = Some(is_persistent);
+
+                    let bytes = Self::encode(&message, encode_buf)?;
+                    self.send_to(&peer, &bytes)?;
+                }
+
+                message.persistent_peer_ids = persistent_peer_ids;
+                let bytes = Self::encode(&message, encode_buf)?;
+
+                self.send_to(&persistence_peer, &bytes)?;
+            }
+
+            SendContext::Empty => {
+                for peer in peers {
+                    message.was_persisted = Some(false);
+                    let bytes = Self::encode(&message, encode_buf)?;
+                    self.send_to(&peer, &bytes)?;
+                }
+            }
+        }
 
         Ok(())
     }
 
-    fn send_to(
-        &mut self,
-        peer: &Peer,
-        message: &TransportMessage,
-        encode_buf: &mut Vec<u8>,
-    ) -> Result<(), ZmqError> {
+    fn send_to(&mut self, peer: &Peer, bytes: &[u8]) -> Result<(), ZmqError> {
         let socket = self.get_connected_socket(&peer)?;
-        let bytes = Self::encode(message, encode_buf)?;
-
         socket.write_all(bytes).map_err(ZmqError::Io)
     }
 
@@ -697,16 +717,12 @@ impl OutboundWorker {
         }
     }
 
-    fn encode<'a>(
-        message: &TransportMessage,
-        encode_buf: &'a mut Vec<u8>,
-    ) -> Result<&'a [u8], ZmqError> {
+    fn encode<'a, M>(message: &M, encode_buf: &'a mut Vec<u8>) -> Result<&'a [u8], ZmqError>
+    where
+        M: prost::Message,
+    {
         encode_buf.clear();
-        // TODO(oktal): don't re-encode message multiple times
-        message
-            .clone()
-            .encode(encode_buf)
-            .map_err(ZmqError::Encode)?;
+        message.encode(encode_buf).map_err(ZmqError::Encode)?;
 
         Ok(&encode_buf[..])
     }
@@ -807,7 +823,7 @@ impl Transport for ZmqTransport {
     ) -> Result<Self::SendFuture, Self::Err> {
         match self.inner.as_ref() {
             Some(Inner::Started { ref actions_tx, .. }) => {
-                Ok(SendFuture::new(actions_tx.clone(), peers, message))
+                Ok(SendFuture::new(actions_tx.clone(), peers, message, context))
             }
             _ => Err(ZmqError::InvalidOperation),
         }

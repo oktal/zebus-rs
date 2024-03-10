@@ -15,9 +15,9 @@ use crate::lotus::MessageProcessingFailed;
 use crate::proto::IntoProtobuf;
 use crate::{
     transport::{MessageExecutionCompleted, TransportMessage},
-    BoxError, MessageKind, Peer,
+    BoxError, MessageKind, MessageTypeDescriptor, Peer,
 };
-use crate::{Bus, Message, MessageDescriptor};
+use crate::{Bus, Message, MessageDescriptor, MessageId};
 pub(crate) use context::DispatchContext;
 pub(crate) use dispatcher::{Error, MessageDispatcher};
 use futures_core::future::BoxFuture;
@@ -25,7 +25,6 @@ pub(crate) use invoker::{HandlerResponse, MessageInvokerDescriptor};
 pub use invoker::{InvokeRequest, InvokerService};
 pub use router::{IntoHandler, RouteHandler, RouteHandlerDescriptor, Router};
 use tower_service::Service;
-use zebus_core::MessageTypeDescriptor;
 
 /// A message to dispatch
 #[derive(Debug, Clone)]
@@ -34,21 +33,30 @@ pub(crate) enum DispatchMessage {
     Remote(TransportMessage),
 
     /// Dispatch a local [`Message`]
-    Local(Arc<dyn Message>),
+    Local {
+        /// Current [`Peer`]
+        self_peer: Peer,
+
+        /// Current environment
+        environment: String,
+
+        /// [`Message`] to dispatch
+        message: Arc<dyn Message>,
+    },
 }
 
 impl MessagePayload for DispatchMessage {
     fn message_type(&self) -> Option<&str> {
         match self {
             DispatchMessage::Remote(message) => message.message_type(),
-            DispatchMessage::Local(message) => Some(message.name()),
+            DispatchMessage::Local { message, .. } => Some(message.name()),
         }
     }
 
     fn content(&self) -> Option<&[u8]> {
         match self {
             DispatchMessage::Remote(message) => message.content(),
-            DispatchMessage::Local(_) => None,
+            DispatchMessage::Local { .. } => None,
         }
     }
 }
@@ -85,10 +93,20 @@ impl Display for DispatchError {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct DispatchOutput {
+    /// [`MessageTypeDescriptor`] descriptor of the message that has been dispatched
+    pub(crate) descriptor: MessageTypeDescriptor,
+
+    /// Optional id of the message that has been handled
+    /// When `None`, indicates that the message has been handled locally and thus does have an associated id
+    pub(crate) message_id: Option<MessageId>,
+
+    /// Flag indicating whether the handled message has been sent to the persistence
+    pub(crate) persisted: bool,
+
     /// The originator of the message
-    pub(crate) originator: Option<Peer>,
+    pub(crate) originator: Peer,
 
     /// The [`MessageExecutionCompleted`] to send back to the originator peer
     pub(crate) completed: Option<MessageExecutionCompleted>,
@@ -106,10 +124,10 @@ pub(crate) struct Dispatched {
     request: Arc<DispatchRequest>,
 
     /// [`MessageTypeDescriptor`] descriptor of the message that has been dispatched
-    descriptor: MessageTypeDescriptor,
+    pub(crate) descriptor: MessageTypeDescriptor,
 
     /// Result of the dispatch
-    result: DispatchResult,
+    pub(crate) result: DispatchResult,
 }
 
 #[allow(dead_code)]
@@ -167,65 +185,103 @@ impl Into<DispatchOutput> for Dispatched {
     fn into(self) -> DispatchOutput {
         let is_command = self.is_command();
 
-        if let DispatchMessage::Remote(ref message) = self.request.message {
-            let originator = message.originator.clone();
-            let command_id = message.id.clone();
+        match &self.request.message {
+            DispatchMessage::Remote(ref message) => {
+                let originator = message.originator.clone();
+                let command_id = message.id.clone();
 
-            // Get originator peer from `OriginatorInfo` of `TransportMessage`
-            let peer = Peer {
-                id: originator.sender_id,
-                endpoint: originator.sender_endpoint,
-                is_up: true,
-                is_responding: true,
-            };
+                // Get originator peer from `OriginatorInfo` of `TransportMessage`
+                let peer = originator.into();
 
-            // Create `MessagePocessingFailed` message if dispatch triggered error
-            let failed = if let Err(dispatch_error) = self.result.as_ref() {
-                let now_utc = chrono::Utc::now();
-                let failing_handlers = dispatch_error.0.iter().map(|e| e.0.to_string()).collect();
+                // Create `MessagePocessingFailed` message if dispatch triggered error
+                let failed = if let Err(dispatch_error) = self.result.as_ref() {
+                    let transport_message = message.clone().into_protobuf();
+                    let now_utc = chrono::Utc::now();
+                    let failing_handlers =
+                        dispatch_error.0.iter().map(|e| e.0.to_string()).collect();
 
-                Some(MessageProcessingFailed {
-                    transport_message: message.clone().into_protobuf(),
-                    // TODO(oktal): serialize message to JSON
-                    message_json: String::new(),
-                    exception_message: dispatch_error.to_string(),
-                    exception_timestamp_utc: now_utc.into_protobuf(),
-                    failing_handlers,
-                })
-            } else {
-                None
-            };
+                    Some(MessageProcessingFailed {
+                        transport_message,
+                        // TODO(oktal): serialize message to JSON
+                        message_json: String::new(),
+                        exception_message: dispatch_error.to_string(),
+                        exception_timestamp_utc: now_utc.into_protobuf(),
+                        failing_handlers,
+                    })
+                } else {
+                    None
+                };
 
-            // Create `MessageExecutionCompleted` if the dispatched message was a `Command`
-            let completed = if is_command {
-                Some(match self.result {
-                    Ok(Some(response)) => response.into_message(command_id),
-                    Ok(None) => MessageExecutionCompleted {
-                        command_id: command_id.into_protobuf(),
-                        error_code: 0,
-                        payload_type_id: None,
-                        payload: None,
-                        response_message: None,
-                    },
-                    Err(e) => MessageExecutionCompleted {
-                        command_id: command_id.into_protobuf(),
-                        error_code: HANDLER_ERROR_CODE,
-                        payload_type_id: None,
-                        payload: None,
-                        response_message: Some(e.to_string()),
-                    },
-                })
-            } else {
-                None
-            };
+                // Create `MessageExecutionCompleted` if the dispatched message was a `Command`
+                let completed = if is_command {
+                    Some(match self.result {
+                        Ok(Some(response)) => response.into_message(command_id),
+                        Ok(None) => MessageExecutionCompleted {
+                            command_id: command_id.into_protobuf(),
+                            error_code: 0,
+                            payload_type_id: None,
+                            payload: None,
+                            response_message: None,
+                        },
+                        Err(e) => MessageExecutionCompleted {
+                            command_id: command_id.into_protobuf(),
+                            error_code: HANDLER_ERROR_CODE,
+                            payload_type_id: None,
+                            payload: None,
+                            response_message: Some(e.to_string()),
+                        },
+                    })
+                } else {
+                    None
+                };
 
-            DispatchOutput {
-                originator: Some(peer),
-                failed,
-                completed,
+                DispatchOutput {
+                    descriptor: self.descriptor,
+                    message_id: Some(command_id),
+                    persisted: message.was_persisted,
+                    originator: peer,
+                    completed,
+                    failed,
+                }
             }
-        } else {
-            DispatchOutput::default()
+
+            DispatchMessage::Local {
+                self_peer,
+                environment,
+                message,
+            } => {
+                // Create `MessagePocessingFailed` message if dispatch triggered error
+                let failed = if let Err(dispatch_error) = self.result.as_ref() {
+                    let (_, transport_message) =
+                        TransportMessage::create(&self_peer, environment.clone(), message.as_ref());
+                    let transport_message = transport_message.into_protobuf();
+
+                    let now_utc = chrono::Utc::now();
+                    let failing_handlers =
+                        dispatch_error.0.iter().map(|e| e.0.to_string()).collect();
+
+                    Some(MessageProcessingFailed {
+                        transport_message,
+                        // TODO(oktal): serialize message to JSON
+                        message_json: String::new(),
+                        exception_message: dispatch_error.to_string(),
+                        exception_timestamp_utc: now_utc.into_protobuf(),
+                        failing_handlers,
+                    })
+                } else {
+                    None
+                };
+
+                DispatchOutput {
+                    descriptor: self.descriptor,
+                    message_id: None,
+                    // NOTE(oktal): locally dispatched messages are not persisted
+                    persisted: false,
+                    originator: self_peer.clone(),
+                    completed: None,
+                    failed,
+                }
+            }
         }
     }
 }
@@ -246,9 +302,18 @@ impl DispatchRequest {
     }
 
     /// Create a [`DispatchRequest`] for a local [`Message`]
-    pub(crate) fn local(message: Arc<dyn Message>, bus: Arc<dyn Bus>) -> Self {
+    pub(crate) fn local(
+        self_peer: Peer,
+        environment: String,
+        message: Arc<dyn Message>,
+        bus: Arc<dyn Bus>,
+    ) -> Self {
         Self {
-            message: DispatchMessage::Local(message),
+            message: DispatchMessage::Local {
+                self_peer,
+                environment,
+                message,
+            },
             bus,
         }
     }

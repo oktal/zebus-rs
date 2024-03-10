@@ -424,7 +424,7 @@ impl Client {
 }
 
 impl DirectoryReader for Client {
-    fn get(&self, peer_id: &PeerId) -> Option<PeerDescriptor> {
+    fn get_peer(&self, peer_id: &PeerId) -> Option<PeerDescriptor> {
         let inner = self.state.lock().unwrap();
         inner.entry(peer_id, None).map(|e| e.descriptor.clone())
     }
@@ -547,6 +547,8 @@ async fn peer_subscriptions_for_type_updated(
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use chrono::Duration;
     use futures_util::FutureExt;
     use tokio_stream::StreamExt;
@@ -557,7 +559,7 @@ mod tests {
     use crate::directory::DirectoryReaderExt;
     use crate::dispatch::InvokerService;
     use crate::proto::IntoProtobuf;
-    use crate::{Message, MessageDescriptor, MessageTypeId};
+    use crate::{Message, MessageDescriptor, MessageTypeId, Response};
 
     #[derive(Clone, crate::Command, prost::Message)]
     #[zebus(namespace = "Abc.Test", routable)]
@@ -616,6 +618,15 @@ mod tests {
 
         async fn try_recv(&mut self) -> Option<PeerEvent> {
             self.events_rx.next().now_or_never().flatten()
+        }
+
+        async fn invoke<M>(&mut self, message: M) -> Result<Option<Response>, Infallible>
+        where
+            M: crate::Message,
+        {
+            self.service
+                .invoke(self.peer(), "test".to_string(), message, self.bus())
+                .await
         }
 
         fn peer_id(&self) -> PeerId {
@@ -690,11 +701,11 @@ mod tests {
             let peer = &descriptor.peer;
 
             assert_eq!(
-                fixture.client.get(&peer.id).as_ref().map(|p| p.peer()),
+                fixture.client.get_peer(&peer.id).as_ref().map(|p| p.peer()),
                 Some(peer)
             );
         }
-        assert_eq!(fixture.client.get(&PeerId::new("Test.Peer.0")), None);
+        assert_eq!(fixture.client.get_peer(&PeerId::new("Test.Peer.0")), None);
     }
 
     #[tokio::test]
@@ -837,21 +848,17 @@ mod tests {
         let descriptor = fixture.descriptor.clone();
 
         fixture
-            .service
-            .invoke(
-                PeerStarted {
-                    descriptor: descriptor.clone().into_protobuf(),
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerStarted {
+                descriptor: descriptor.clone().into_protobuf(),
+            })
             .await
             .unwrap();
 
-        let peer_descriptor = fixture.client.get(&fixture.peer_id());
+        let peer_descriptor = fixture.client.get_peer(&fixture.peer_id());
         let peer = peer_descriptor.as_ref().map(|p| p.peer());
 
         assert_eq!(peer, Some(&fixture.peer()));
-        assert_eq!(fixture.client.get(&PeerId::new("Test.Peer.0")), None);
+        assert_eq!(fixture.client.get_peer(&PeerId::new("Test.Peer.0")), None);
 
         Fixture::assert_event(fixture.recv().await, PeerEventKind::Started, fixture.peer());
     }
@@ -868,6 +875,8 @@ mod tests {
         fixture
             .service
             .invoke(
+                fixture.peer(),
+                "test".to_string(),
                 PeerStarted {
                     descriptor: descriptor.clone().into_protobuf(),
                 },
@@ -879,6 +888,8 @@ mod tests {
         fixture
             .service
             .invoke(
+                fixture.peer(),
+                "test".to_string(),
                 PeerStopped {
                     id: peer_id.clone(),
                     endpoint: Some(peer.endpoint.clone()),
@@ -889,7 +900,7 @@ mod tests {
             .await
             .unwrap();
 
-        let peer_stopped = fixture.client.get(&peer_id).map(|d| d.peer);
+        let peer_stopped = fixture.client.get_peer(&peer_id).map(|d| d.peer);
         assert_eq!(
             peer_stopped,
             Some(Peer {
@@ -944,41 +955,29 @@ mod tests {
         };
 
         fixture
-            .service
-            .invoke(
-                PeerStarted {
-                    descriptor: peer_desc_1.clone().into_protobuf(),
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerStarted {
+                descriptor: peer_desc_1.clone().into_protobuf(),
+            })
             .await
             .unwrap();
 
         fixture
-            .service
-            .invoke(
-                PeerStopped {
-                    id: test_peer.id.clone(),
-                    endpoint: Some(test_peer.endpoint.clone()),
-                    timestamp_utc: None,
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerStopped {
+                id: test_peer.id.clone(),
+                endpoint: Some(test_peer.endpoint.clone()),
+                timestamp_utc: None,
+            })
             .await
             .unwrap();
 
         fixture
-            .service
-            .invoke(
-                PeerStarted {
-                    descriptor: peer_desc_2.clone().into_protobuf(),
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerStarted {
+                descriptor: peer_desc_2.clone().into_protobuf(),
+            })
             .await
             .unwrap();
 
-        let peer_1 = fixture.client.get(&test_peer.id).map(|p| p.peer);
+        let peer_1 = fixture.client.get_peer(&test_peer.id).map(|p| p.peer);
         assert_eq!(
             peer_1,
             Some(Peer {
@@ -1029,13 +1028,9 @@ mod tests {
         let subscription = Fixture::create_subscription_for::<RoutableCommand>(&[&command_1]);
 
         fixture
-            .service
-            .invoke(
-                PeerStarted {
-                    descriptor: descriptor.clone().into_protobuf(),
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerStarted {
+                descriptor: descriptor.clone().into_protobuf(),
+            })
             .await
             .unwrap();
 
@@ -1043,15 +1038,11 @@ mod tests {
         let now = chrono::Utc::now();
 
         fixture
-            .service
-            .invoke(
-                PeerSubscriptionsForTypeUpdated {
-                    peer_id: peer_id.clone(),
-                    subscriptions: vec![subscription],
-                    timestamp_utc: now.into_protobuf(),
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerSubscriptionsForTypeUpdated {
+                peer_id: peer_id.clone(),
+                subscriptions: vec![subscription],
+                timestamp_utc: now.into_protobuf(),
+            })
             .await
             .unwrap();
 
@@ -1081,13 +1072,9 @@ mod tests {
         let subscription_2 = Fixture::create_subscription_for::<RoutableCommand>(&[&command_2]);
 
         fixture
-            .service
-            .invoke(
-                PeerStarted {
-                    descriptor: descriptor.clone().into_protobuf(),
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerStarted {
+                descriptor: descriptor.clone().into_protobuf(),
+            })
             .await
             .unwrap();
 
@@ -1095,28 +1082,20 @@ mod tests {
         let now = chrono::Utc::now();
 
         fixture
-            .service
-            .invoke(
-                PeerSubscriptionsForTypeUpdated {
-                    peer_id: peer_id.clone(),
-                    subscriptions: vec![subscription_1],
-                    timestamp_utc: now.into_protobuf(),
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerSubscriptionsForTypeUpdated {
+                peer_id: peer_id.clone(),
+                subscriptions: vec![subscription_1],
+                timestamp_utc: now.into_protobuf(),
+            })
             .await
             .unwrap();
 
         fixture
-            .service
-            .invoke(
-                PeerSubscriptionsForTypeUpdated {
-                    peer_id: peer_id.clone(),
-                    subscriptions: vec![subscription_2],
-                    timestamp_utc: (now - Duration::seconds(30)).into_protobuf(),
-                },
-                fixture.bus(),
-            )
+            .invoke(PeerSubscriptionsForTypeUpdated {
+                peer_id: peer_id.clone(),
+                subscriptions: vec![subscription_2],
+                timestamp_utc: (now - Duration::seconds(30)).into_protobuf(),
+            })
             .await
             .unwrap();
 

@@ -1,11 +1,20 @@
+#![allow(dead_code)]
+
 use std::{
     borrow::Cow,
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
+use futures_core::Stream;
+use futures_util::pin_mut;
 use thiserror::Error;
-use tokio::sync::{broadcast, Notify};
+use tokio::{
+    select,
+    sync::{broadcast, Notify},
+};
+use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     bus::BusEvent, core::MessagePayload, directory::DirectoryReader, sync::stream::EventStream,
@@ -68,6 +77,66 @@ pub(crate) struct MemoryTransport {
 pub(crate) enum MemoryTransportError {
     #[error("invalid operation")]
     InvalidOperation,
+}
+
+async fn receive<S>(
+    stream: S,
+    tx: tokio::sync::mpsc::Sender<TransportMessage>,
+    cancel: CancellationToken,
+) where
+    S: Stream<Item = TransportMessage> + Send,
+{
+    pin_mut!(stream);
+
+    loop {
+        select! {
+            _ = cancel.cancelled() => break,
+            msg = stream.next() => {
+                let Some(msg) = msg else {
+                    break;
+                };
+
+                let _ = tx.send(msg).await;
+            }
+        }
+    }
+}
+
+pub(crate) struct MemoryReceiver {
+    rx: tokio::sync::mpsc::Receiver<TransportMessage>,
+    cancel: CancellationToken,
+}
+
+impl MemoryReceiver {
+    pub(crate) fn spawn<S>(stream: S) -> Self
+    where
+        S: Stream<Item = TransportMessage> + Send + 'static,
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let cancel = CancellationToken::new();
+
+        tokio::spawn(receive(stream, tx, cancel.clone()));
+
+        Self { rx, cancel }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.cancel.cancel();
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<TransportMessage> {
+        self.rx.recv().await
+    }
+
+    pub(crate) fn recv_all(&mut self) -> Vec<TransportMessage> {
+        let mut messages = Vec::new();
+
+        while let Ok(msg) = self.rx.try_recv() {
+            messages.push(msg);
+        }
+
+        messages
+    }
 }
 
 impl MemoryTransport {
@@ -184,6 +253,10 @@ impl MemoryTransport {
     pub(crate) fn get_environment(&self) -> Option<String> {
         let inner = self.inner.lock().unwrap();
         inner.environment.clone()
+    }
+
+    pub(crate) fn spawn(&self) -> Result<MemoryReceiver, MemoryTransportError> {
+        self.subscribe().map(MemoryReceiver::spawn)
     }
 }
 

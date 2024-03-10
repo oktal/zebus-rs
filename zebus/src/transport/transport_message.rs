@@ -2,12 +2,12 @@ use prost::bytes::BufMut;
 
 use crate::core::{MessagePayload, RawMessage};
 use crate::proto::{FromProtobuf, IntoProtobuf};
-use crate::{Message, MessageId, MessageTypeId, Peer};
+use crate::{Message, MessageFlags, MessageId, MessageKind, MessageTypeId, Peer, PeerId};
 
 use super::OriginatorInfo;
 
 pub(crate) mod proto {
-    use crate::{proto, transport::OriginatorInfo, PeerId};
+    use crate::{core::MessagePayload, proto, transport::OriginatorInfo, PeerId};
 
     /// Protobuf definition for a message sent through the bus
     #[derive(prost::Message, Clone)]
@@ -42,6 +42,16 @@ pub(crate) mod proto {
         #[prost(message, repeated, tag = 7)]
         pub persistent_peer_ids: Vec<PeerId>,
     }
+
+    impl MessagePayload for TransportMessage {
+        fn message_type(&self) -> Option<&str> {
+            Some(self.message_type_id.full_name.as_str())
+        }
+
+        fn content(&self) -> Option<&[u8]> {
+            Some(&self.content)
+        }
+    }
 }
 
 /// A message that can be sent through the bus
@@ -59,10 +69,19 @@ pub struct TransportMessage {
     /// Environment from which the message was sent
     pub environment: Option<String>,
 
+    /// Kind of message if known. Can be either Command or Event
+    pub kind: Option<MessageKind>,
+
+    /// Flags associated with the message
+    pub flags: MessageFlags,
+
     /// Flag that indicates whether the message was sent to the persistence
     /// Used to instruct a receiver that the message was sent to the persistence
     /// and needs acknowledgment
     pub was_persisted: bool,
+
+    /// List of recipient peers for this message that are persistent
+    pub persistent_peer_ids: Vec<PeerId>,
 }
 
 impl TransportMessage {
@@ -73,6 +92,10 @@ impl TransportMessage {
     ) -> (uuid::Uuid, Self) {
         let uuid = uuid::Uuid::new_v4();
         let id = MessageId::from(uuid.clone());
+
+        let kind = message.kind();
+        let flags = message.flags();
+
         let content = RawMessage::encode(message);
 
         let sender_id = sender.id.clone();
@@ -95,8 +118,15 @@ impl TransportMessage {
                 originator,
                 environment: Some(environment),
                 was_persisted: false,
+                persistent_peer_ids: vec![],
+                kind: Some(kind),
+                flags,
             },
         )
+    }
+
+    pub(crate) fn is_persistent(&self) -> bool {
+        !self.flags.contains(MessageFlags::TRANSIENT)
     }
 
     pub(crate) fn encode_to_vec(self) -> Vec<u8> {
@@ -112,9 +142,9 @@ impl TransportMessage {
         self.into_protobuf().encode(buf)
     }
 
-    pub(crate) fn decode(buf: &[u8]) -> Result<Self, prost::DecodeError> {
+    pub(crate) fn decode(buf: &[u8]) -> Result<TransportMessage, prost::DecodeError> {
         use prost::Message;
-        proto::TransportMessage::decode(buf).map(FromProtobuf::from_protobuf)
+        proto::TransportMessage::decode(buf).map(TransportMessage::from_protobuf)
     }
 }
 
@@ -148,8 +178,9 @@ impl IntoProtobuf for TransportMessage {
 
 impl FromProtobuf for TransportMessage {
     type Input = proto::TransportMessage;
+    type Output = TransportMessage;
 
-    fn from_protobuf(input: Self::Input) -> Self {
+    fn from_protobuf(input: Self::Input) -> Self::Output {
         let message_type = MessageTypeId::from_protobuf(input.message_type_id);
 
         TransportMessage {
@@ -158,6 +189,9 @@ impl FromProtobuf for TransportMessage {
             originator: input.originator,
             environment: input.environment,
             was_persisted: input.was_persisted.unwrap_or(false),
+            persistent_peer_ids: input.persistent_peer_ids,
+            kind: None,
+            flags: MessageFlags::NONE,
         }
     }
 }
