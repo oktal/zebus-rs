@@ -1,6 +1,9 @@
 use std::{borrow::Cow, sync::Arc};
 
+use futures_core::future::BoxFuture;
+use futures_util::FutureExt;
 use tokio::sync::broadcast;
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -92,7 +95,7 @@ where
     type Err = PersistenceError;
     type MessageStream = super::MessageStream;
 
-    type StartCompletionFuture = super::future::StartFuture;
+    type StartCompletionFuture = BoxFuture<'static, Result<(), Self::Err>>;
     type StopCompletionFuture = super::future::StopFuture;
     type SendFuture = transport::future::SendFuture<PersistenceRequest, Self::Err>;
 
@@ -158,7 +161,7 @@ where
                 event_rx,
             }) => {
                 // Start the underlying transport
-                inner.start().map_err(Into::into)?;
+                let inner_start = inner.start().map_err(Into::into)?;
 
                 // Retrieve bound endpoint
                 let inbound_endpoint = inner.inbound_endpoint().map_err(Into::into)?;
@@ -171,7 +174,7 @@ where
                 let shutdown = CancellationToken::new();
 
                 // Spawn a new task for the persistence service
-                let (requests_tx, events_rx, stop) = super::service::spawn(
+                let (requests_tx, mut events_rx, stop) = super::service::spawn(
                     &configuration,
                     directory,
                     event_rx.stream(),
@@ -182,8 +185,21 @@ where
                     shutdown.clone(),
                 );
 
-                // Spawn a future that will resolve when the start sequence completes
-                let start = super::future::StartFuture::spawn(events_rx, &configuration);
+                // Create a future that will complete once the inner transport start sequence completes and our start sequence completes
+                let timeout = configuration.start_replay_timeout;
+                let completion = async move {
+                    inner_start
+                        .await
+                        .map_err(|e| PersistenceError::Transport(e.into()))?;
+
+                    // Wait for the next event from the persistence before completing the start sequence or raise
+                    // an Unreachable error if we did not receiving anything in the configured timeout
+                    match tokio::time::timeout(timeout, events_rx.next()).await {
+                        Ok(_) => Ok(()),
+                        Err(_) => Err(PersistenceError::Unreachable(timeout)),
+                    }
+                }
+                .boxed();
 
                 // Transition to Started state
                 (
@@ -196,7 +212,7 @@ where
                         shutdown,
                         stop,
                     }),
-                    Ok(start),
+                    Ok(completion),
                 )
             }
             x => (x, Err(PersistenceError::InvalidOperation)),
@@ -475,7 +491,7 @@ mod tests {
         fixture.configure().expect("configure should not fail");
 
         // Start transport
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
 
         // Make sure that inner transport has been started
         assert!(fixture.inner.is_started());
@@ -491,11 +507,14 @@ mod tests {
         // Configure transport
         fixture.configure().expect("configure should not fail");
 
-        // Start transport
-        let fut = fixture.transport.start().expect("start should not fail");
+        let start = fixture
+            .transport
+            .start()
+            .expect("start should not fail")
+            .await;
 
-        // Make sure that start fails with proper error
-        assert!(matches!(fut.await, Err(PersistenceError::Unreachable(_))));
+        // Make sure that start faileld with proper error
+        assert!(matches!(start, Err(PersistenceError::Unreachable(_))));
     }
 
     #[tokio::test]
@@ -504,17 +523,13 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
-        // Make sure a `StartMessageReplayCommand` has been sent
-        // TODO(oktal): timeout
-        let start = fixture.inner.wait_for::<StartMessageReplayCommand>(1).await;
-        let start = start
-            .get(0)
-            .expect("we should have received a start replay message");
-
-        let replay_id = start.0.replay_id.to_uuid();
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
 
         // Subscribe to persistent transport messages
         let rx = fixture
@@ -560,6 +575,11 @@ mod tests {
 
         // Make sure that we did not forward any more message
         assert!(matches!(rx.try_next().await, Err(_)));
+
+        // Make sure that the start sequence completed properly
+        assert!(tokio::time::timeout(Duration::from_millis(100), start)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -604,7 +624,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Subscribe to persistent transport messages
@@ -647,7 +667,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Subscribe to persistent transport messages
@@ -686,7 +706,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([Subscription::any::<TestCommand>()]);
 
         // Subscribe to persistent transport messages
@@ -741,7 +761,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Subscribe to persistent transport messages
@@ -804,7 +824,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([Subscription::any::<PingPeerCommand>()]);
 
         // Subscribe to transport messages
@@ -846,7 +866,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([Subscription::any::<TestReplayCommand>()]);
 
         // Subscribe to transport messages
@@ -914,7 +934,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Subscribe to transport messages
@@ -971,7 +991,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Subscribe to transport messages
@@ -1027,7 +1047,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Wait for replay to start and retrieve the replay id
@@ -1097,7 +1117,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Wait for replay to start and retrieve the replay id
@@ -1166,7 +1186,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Wait for replay to start and retrieve the replay id
@@ -1232,7 +1252,7 @@ mod tests {
         let mut fixture = Fixture::new_default();
 
         fixture.configure().expect("configure should not fail");
-        fixture.transport.start().expect("start should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
         // Wait for replay to start and retrieve the replay id
