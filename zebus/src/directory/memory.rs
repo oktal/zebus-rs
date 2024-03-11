@@ -4,12 +4,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use chrono::Utc;
 use tokio::sync::broadcast;
 
 use crate::{
     dispatch::{RouteHandler, Router},
     inject::{self, State},
-    MessageDescriptor, Peer, PeerId,
+    BindingExpression, MessageDescriptor, Peer, PeerId, Subscription,
 };
 
 use super::{
@@ -30,7 +31,7 @@ pub(crate) struct MemoryDirectoryState {
     messages: HashMap<&'static str, Vec<Arc<dyn Any + Send + Sync>>>,
 
     /// Collection of peers that have been configured to handle a type of message
-    peers: HashMap<&'static str, Vec<Peer>>,
+    peers: HashMap<PeerId, PeerDescriptor>,
 }
 
 impl MemoryDirectoryState {
@@ -53,8 +54,21 @@ impl MemoryDirectoryState {
         entry.push(Arc::new(message));
     }
 
-    fn add_peer_for<M: MessageDescriptor>(&mut self, peer: Peer) {
-        self.peers.entry(M::name()).or_insert(vec![]).push(peer);
+    fn add_subscription_for(
+        &mut self,
+        peer: Peer,
+        subscription: Subscription,
+    ) -> &mut PeerDescriptor {
+        let descriptor = self.peers.entry(peer.id.clone()).or_insert(PeerDescriptor {
+            peer,
+            subscriptions: vec![],
+            is_persistent: true,
+            timestamp_utc: Some(Utc::now()),
+            has_debugger_attached: Some(false),
+        });
+
+        descriptor.subscriptions.push(subscription);
+        descriptor
     }
 }
 
@@ -79,7 +93,7 @@ impl MemoryDirectory {
     }
 
     /// Add a list of [`peers`] that should handle the message of type [`M`]
-    pub(crate) fn add_peers_for<M: MessageDescriptor>(
+    pub(crate) fn add_peers_for<M: MessageDescriptor + BindingExpression + 'static>(
         &self,
         peers: impl IntoIterator<Item = Peer>,
     ) -> &Self {
@@ -90,25 +104,45 @@ impl MemoryDirectory {
     }
 
     /// Add a peer that should hande the `Message`
-    pub(crate) fn add_peer_for<M: MessageDescriptor>(&self, peer: Peer) -> &Self {
+    pub(crate) fn add_peer_for<M: MessageDescriptor + BindingExpression + 'static>(
+        &self,
+        peer: Peer,
+    ) -> &Self {
         let mut state = self.state.lock().unwrap();
-        state.add_peer_for::<M>(peer);
+        state.add_subscription_for(peer, Subscription::any::<M>());
         self
+    }
+
+    pub(crate) fn add_subscription_for(
+        &self,
+        peer: Peer,
+        subscription: Subscription,
+        descriptor_fn: impl FnOnce(&mut PeerDescriptor),
+    ) {
+        let mut state = self.state.lock().unwrap();
+        let descriptor = state.add_subscription_for(peer, subscription);
+        descriptor_fn(descriptor);
     }
 }
 
 impl DirectoryReader for MemoryDirectory {
-    fn get_peer(&self, _peer_id: &PeerId) -> Option<PeerDescriptor> {
-        None
+    fn get_peer(&self, peer_id: &PeerId) -> Option<PeerDescriptor> {
+        let state = self.state.lock().unwrap();
+        state.peers.get(peer_id).cloned()
     }
 
     fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer> {
         let state = self.state.lock().unwrap();
-        if let Some(peers) = state.peers.get(binding.descriptor().full_name) {
-            peers.clone()
-        } else {
-            vec![]
-        }
+
+        state
+            .peers
+            .values()
+            .filter_map(|descriptor| {
+                descriptor
+                    .handles(binding)
+                    .then_some(descriptor.peer.clone())
+            })
+            .collect()
     }
 }
 

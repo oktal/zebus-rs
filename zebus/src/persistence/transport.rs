@@ -273,6 +273,7 @@ mod tests {
     use chrono::Utc;
     use futures_util::pin_mut;
     use tokio_stream::StreamExt;
+    use zebus_core::MessageTypeDescriptor;
 
     use crate::{
         bus::BusEvent,
@@ -280,16 +281,16 @@ mod tests {
         directory::{memory::MemoryDirectory, Directory, PeerDescriptor},
         persistence::{
             command::{PersistMessageCommand, StartMessageReplayCommand},
-            event::{ReplayPhaseEnded, SafetyPhaseEnded},
+            event::{MessageHandled, ReplayPhaseEnded, SafetyPhaseEnded},
             PersistenceError,
         },
         proto::IntoProtobuf,
         sync::stream::EventStream,
         transport::{
             memory::{MemoryReceiver, MemoryTransport},
-            Transport, TransportExt, TransportMessage,
+            SendContext, Transport, TransportExt, TransportMessage,
         },
-        BusConfiguration, Command, Message, MessageExt, Peer, PeerId, Subscription,
+        BusConfiguration, Command, Message, MessageExt, MessageId, Peer, PeerId, Subscription,
     };
 
     use super::PersistentTransport;
@@ -303,6 +304,20 @@ mod tests {
     struct TestReplayCommand {
         #[prost(fixed32, required, tag = 1)]
         id: u32,
+    }
+
+    #[derive(prost::Message, Command, Clone, Eq, PartialEq)]
+    #[zebus(namespace = "Abc.Test", transient)]
+    struct TestTransientCommand {
+        #[prost(fixed32, required, tag = 1)]
+        id: u32,
+    }
+
+    #[derive(prost::Message, Command, Clone, Eq, PartialEq)]
+    #[zebus(namespace = "Abc.Test", transient, infrastructure)]
+    struct PingPeerCommand {
+        #[prost(fixed32, required, tag = 1)]
+        seq: u32,
     }
 
     struct Fixture {
@@ -413,6 +428,15 @@ mod tests {
                 }
                 Err(_) => None,
             }
+        }
+
+        fn send_persistence_event<M>(&mut self, msg: M)
+        where
+            M: Message + prost::Message,
+        {
+            self.inner
+                .message_received(msg, &self.persistence_peer.peer, self.environment.clone())
+                .expect("message received should not fail");
         }
 
         /// Replay a given message `msg` from a sending `peer`
@@ -775,6 +799,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forward_infrastructure_messages_during_replay_phase() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([Subscription::any::<PingPeerCommand>()]);
+
+        // Subscribe to transport messages
+        let mut receiver = fixture
+            .spawn()
+            .expect("spawning message receiver should not fail");
+
+        // Wait for replay to start and retrieve the replay id
+        fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        // Receive infrastructure message during replay phase
+        fixture
+            .inner
+            .message_received(
+                PingPeerCommand { seq: 0xB0B },
+                &Peer::test(),
+                fixture.environment.clone(),
+            )
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let received = receiver.recv_all();
+
+        // Make sure we received the message
+        assert_eq!(received.len(), 1);
+
+        // Make sure we received the right messages
+        let msg0 = received[0].decode_as::<PingPeerCommand>();
+        assert!(matches!(msg0, Some(Ok(_))));
+        assert_eq!(msg0.unwrap().unwrap().seq, 0xB0B);
+    }
+
+    #[tokio::test]
+    async fn forward_messages_after_replay_phase() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([Subscription::any::<TestReplayCommand>()]);
+
+        // Subscribe to transport messages
+        let mut receiver = fixture
+            .spawn()
+            .expect("spawning message receiver should not fail");
+
+        // Wait for replay to start and retrieve the replay id
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        // Receive message during replay phase
+        fixture
+            .inner
+            .message_received(
+                TestReplayCommand { id: 0xF00D },
+                &Peer::test(),
+                fixture.environment.clone(),
+            )
+            .unwrap();
+
+        // Send ReplayPhaseEnded
+        fixture
+            .inner
+            .message_received(
+                ReplayPhaseEnded {
+                    replay_id: replay_id.into_protobuf(),
+                },
+                &fixture.peer,
+                fixture.environment.clone(),
+            )
+            .expect("message received should not fail");
+
+        // Receive message after replay phase
+        fixture
+            .inner
+            .message_received(
+                TestReplayCommand { id: 0xFEED },
+                &Peer::test(),
+                fixture.environment.clone(),
+            )
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let received = receiver.recv_all();
+
+        // Make sure we received both messages
+        assert_eq!(received.len(), 2);
+
+        // Make sure we received the right messages
+        let msg0 = received[0].decode_as::<TestReplayCommand>();
+        assert!(matches!(msg0, Some(Ok(_))));
+        assert_eq!(msg0.unwrap().unwrap().id, 0xF00D);
+
+        let msg1 = received[1].decode_as::<TestReplayCommand>();
+        assert!(matches!(msg1, Some(Ok(_))));
+        assert_eq!(msg1.unwrap().unwrap().id, 0xFEED);
+    }
+
+    #[tokio::test]
     async fn deduplicate_messages_during_safety_phase() {
         // Setup
         let mut fixture = Fixture::new_default();
@@ -783,7 +917,7 @@ mod tests {
         fixture.transport.start().expect("start should not fail");
         fixture.register([]);
 
-        // Subscribe to persistent transport messages
+        // Subscribe to transport messages
         let mut receiver = fixture
             .spawn()
             .expect("spawning message receiver should not fail");
@@ -801,7 +935,7 @@ mod tests {
                 ReplayPhaseEnded {
                     replay_id: replay_id.into_protobuf(),
                 },
-                &fixture.peer,
+                &fixture.persistence_peer.peer.clone(),
                 fixture.environment.clone(),
             )
             .expect("message received should not fail");
@@ -829,5 +963,315 @@ mod tests {
 
         // Make sure we did not receive a duplicated message through the persistence
         assert_eq!(received.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_deduplicate_messages_after_safety_phase() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([]);
+
+        // Subscribe to transport messages
+        let mut receiver = fixture
+            .spawn()
+            .expect("spawning message receiver should not fail");
+
+        // Wait for replay to start and retrieve the replay id
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        fixture.send_persistence_event(ReplayPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+        fixture.send_persistence_event(SafetyPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+
+        let replay_command = TestReplayCommand { id: 0xF00D };
+        let (message_id, message) =
+            replay_command.as_transport(&Peer::test(), fixture.environment.clone());
+
+        let message_id = MessageId::from(message_id);
+
+        // Receive message twice
+        fixture
+            .inner
+            .transport_message_received(message.clone())
+            .expect("transport message received should not fail");
+
+        fixture
+            .inner
+            .transport_message_received(message.clone())
+            .expect("transport message received should not fail");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let received = receiver.recv_all();
+
+        // Make sure we received both messages
+        assert_eq!(received.len(), 2);
+
+        // Make sure both messages are duplicated
+        assert_eq!(received[0].id, message_id);
+        assert_eq!(received[1].id, message_id);
+    }
+
+    #[tokio::test]
+    async fn send_persistent_message_to_peer_and_persistence() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([]);
+
+        // Wait for replay to start and retrieve the replay id
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        fixture.send_persistence_event(ReplayPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+        fixture.send_persistence_event(SafetyPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+
+        let (_, message) = TestReplayCommand { id: 0xF00D }
+            .as_transport(&fixture.peer, fixture.environment.clone());
+
+        // Register persistent peer to directory
+        let persistent_peer = Peer {
+            id: "My.Persistent.Peer".into(),
+            endpoint: "tcp://localhost:9871".to_string(),
+            is_up: true,
+            is_responding: true,
+        };
+
+        fixture.directory.add_subscription_for(
+            persistent_peer.clone(),
+            Subscription::any::<TestReplayCommand>(),
+            |desc| desc.is_persistent = true,
+        );
+
+        // Send command
+        fixture
+            .transport
+            .send(
+                [persistent_peer.clone()].into_iter(),
+                message,
+                SendContext::default(),
+            )
+            .expect("send should not fail")
+            .await
+            .expect("send should not fail");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let sent = fixture.inner.get::<TestReplayCommand>();
+
+        // Make sure the message has been sent
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0.id, 0xF00D);
+
+        // Make sure the message has been sent to the target peer and the persistence peer
+        let peers = &sent[0].1;
+        assert_eq!(peers.len(), 2);
+
+        assert!(peers.iter().find(|p| p.id == persistent_peer.id).is_some());
+        assert!(peers
+            .iter()
+            .find(|p| p.id == fixture.persistence_peer.peer.id)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn send_persistent_message_to_persistence_only_when_peer_is_down() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([]);
+
+        // Wait for replay to start and retrieve the replay id
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        fixture.send_persistence_event(ReplayPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+        fixture.send_persistence_event(SafetyPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+
+        let (_, message) = TestReplayCommand { id: 0xF00D }
+            .as_transport(&fixture.peer, fixture.environment.clone());
+
+        // Register persistent peer to directory
+        let persistent_peer = Peer {
+            id: "My.Persistent.Peer".into(),
+            endpoint: "tcp://localhost:9871".to_string(),
+            is_up: false,
+            is_responding: false,
+        };
+
+        fixture.directory.add_subscription_for(
+            persistent_peer.clone(),
+            Subscription::any::<TestReplayCommand>(),
+            |desc| desc.is_persistent = true,
+        );
+
+        // Send command
+        fixture
+            .transport
+            .send(
+                [persistent_peer.clone()].into_iter(),
+                message,
+                SendContext::default(),
+            )
+            .expect("send should not fail")
+            .await
+            .expect("send should not fail");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let sent = fixture.inner.get::<TestReplayCommand>();
+
+        // Make sure the message has been sent
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0.id, 0xF00D);
+
+        // Make sure the message has only been sent to the persistence peer
+        let peers = &sent[0].1;
+        assert_eq!(peers.len(), 1);
+
+        assert!(peers
+            .iter()
+            .find(|p| p.id == fixture.persistence_peer.peer.id)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn transient_message_not_sent_to_persistence() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([]);
+
+        // Wait for replay to start and retrieve the replay id
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        fixture.send_persistence_event(ReplayPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+        fixture.send_persistence_event(SafetyPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+
+        let (_, message) = TestTransientCommand { id: 0xF00D }
+            .as_transport(&fixture.peer, fixture.environment.clone());
+
+        // Register persistent peer to directory
+        let persistent_peer = Peer {
+            id: "My.Persistent.Peer".into(),
+            endpoint: "tcp://localhost:9871".to_string(),
+            is_up: true,
+            is_responding: false,
+        };
+
+        fixture.directory.add_subscription_for(
+            persistent_peer.clone(),
+            Subscription::any::<TestTransientCommand>(),
+            |desc| desc.is_persistent = true,
+        );
+
+        // Send command
+        fixture
+            .transport
+            .send(
+                [persistent_peer.clone()].into_iter(),
+                message,
+                SendContext::default(),
+            )
+            .expect("send should not fail")
+            .await
+            .expect("send should not fail");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let sent = fixture.inner.get::<TestTransientCommand>();
+
+        // Make sure the message has been sent
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0.id, 0xF00D);
+
+        // Make sure the message has only been sent to the target peer
+        let peers = &sent[0].1;
+        assert_eq!(peers.len(), 1);
+
+        assert!(peers.iter().find(|p| p.id == persistent_peer.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn send_message_handled_to_persistence_when_message_was_persisted() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        fixture.transport.start().expect("start should not fail");
+        fixture.register([]);
+
+        // Wait for replay to start and retrieve the replay id
+        let replay_id = fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        fixture.send_persistence_event(ReplayPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+        fixture.send_persistence_event(SafetyPhaseEnded {
+            replay_id: replay_id.into_protobuf(),
+        });
+
+        // Publish MessageHandled event
+        let descriptor = MessageTypeDescriptor::of::<TestReplayCommand>();
+        let id = MessageId::from(uuid::Uuid::new_v4());
+
+        fixture
+            .events
+            .send(BusEvent::MessageHandled {
+                id: Some(id),
+                descriptor,
+                persisted: true,
+                success: true,
+            })
+            .expect("send BusEvent should not fail");
+
+        // Make sure a MessageHandled message has been sent to the persistence
+        let message_handled = fixture.inner.wait_for::<MessageHandled>(1).await;
+
+        assert_eq!(message_handled.len(), 1);
+
+        // Make sure MessageHandled has been sent with the right id to the right persistence peer
+        let msg0 = &message_handled[0];
+        assert_eq!(msg0.0.id, id.into_protobuf());
+
+        assert_eq!(msg0.1.len(), 1);
+        assert_eq!(msg0.1[0].id, fixture.persistence_peer.peer.id);
     }
 }

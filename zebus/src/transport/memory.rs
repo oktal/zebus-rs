@@ -317,9 +317,9 @@ impl Transport for MemoryTransport {
         &mut self,
         peers: impl Iterator<Item = Peer>,
         message: TransportMessage,
-        _context: SendContext,
+        context: SendContext,
     ) -> std::result::Result<Self::SendFuture, Self::Err> {
-        let peers: Vec<_> = peers.collect();
+        let mut peers: Vec<_> = peers.collect();
 
         let mut inner = self.inner.lock().unwrap();
         let environment = inner.environment.clone().unwrap();
@@ -345,6 +345,15 @@ impl Transport for MemoryTransport {
             .message_type()
             .expect("a TransportMessage should always have a message type")
             .to_string();
+
+        // If the message is persistent, add the persistence to the list of peers that the message
+        // has been sent to
+        if let SendContext::Persistent {
+            persistence_peer, ..
+        } = context
+        {
+            peers.push(persistence_peer);
+        }
         inner.tx_queue.push((message, peers));
 
         // Notify any waiter that some messages have been sent

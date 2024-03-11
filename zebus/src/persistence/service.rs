@@ -159,7 +159,7 @@ where
             state = match state {
                 // We are ready to start the replay sequence
                 State::PersistenceReady {
-                    mut peers,
+                    peers,
                     descriptor,
                     tx_queue,
                 } => {
@@ -173,7 +173,7 @@ where
                         TransportMessage::create(&self.peer, self.environment.to_string(), &cmd);
 
                     let persistence_peer = peers
-                        .pop()
+                        .last()
                         .expect("we should have at least one availablle persistence peer");
 
                     debug!("starting replay {replay_id} with {persistence_peer}");
@@ -255,7 +255,6 @@ where
                     // If the persistence is up and running, switch to the
                     // `PersistenceReady` state
                     if !peers.is_empty() {
-                        debug!("discovered persistence peers {peers:?}");
                         State::PersistenceReady {
                             peers,
                             descriptor,
@@ -537,6 +536,7 @@ where
                                 let msg_type = msg
                                     .message_type()
                                     .expect("a TransportMessage should always have a message type");
+
                                 if let Some(msg_type_id) =
                                     descriptor.subscriptions.iter().find_map(|s| {
                                         (s.full_name() == msg_type).then_some(s.message_type())
@@ -706,6 +706,8 @@ where
         let persistent_peer_ids = req.persistent_peer_ids(self.directory.as_ref());
         let should_persist = !persistent_peer_ids.is_empty();
 
+        let target_peers = req.peers.into_iter().filter(|p| p.is_up);
+
         match state {
             State::Init {
                 ref mut tx_queue, ..
@@ -717,19 +719,15 @@ where
                 ref mut tx_queue, ..
             } => {
                 // We are still waiting for the persistence service peer
-                // We do not need to send the message to the persistence. Send the message right away
+                // The message does not have any persistent peer targets. Send the message right away
                 if !should_persist {
-                    self.send(req.peers, req.message, SendContext::default())
+                    self.send(target_peers, req.message, SendContext::default())
                         .await?;
                 } else {
                     // We need to send the message to the persistence
                     // First send the message right away
-                    self.send(
-                        req.peers.clone(),
-                        req.message.clone(),
-                        SendContext::default(),
-                    )
-                    .await?;
+                    self.send(target_peers, req.message.clone(), SendContext::default())
+                        .await?;
 
                     // Enqueue a command to persist the message
                     tx_queue.push(PersistenceMessage::Persist {
@@ -756,7 +754,7 @@ where
                     SendContext::Empty
                 };
 
-                self.send(req.peers, req.message, context).await
+                self.send(target_peers, req.message, context).await
             }
         }
     }
