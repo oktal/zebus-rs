@@ -1,6 +1,5 @@
 pub(crate) mod command;
 pub mod event;
-pub mod future;
 mod service;
 pub mod transport;
 

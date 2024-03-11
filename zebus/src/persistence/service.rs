@@ -826,7 +826,7 @@ pub(super) fn spawn<T, S>(
 ) -> (
     mpsc::Sender<PersistenceRequest>,
     BoxStream<'static, PersistenceEvent>,
-    super::future::StopFuture,
+    tokio::task::JoinHandle<Result<(), PersistenceError>>,
 )
 where
     S: Stream<Item = BusEvent> + Send + 'static,
@@ -849,8 +849,9 @@ where
             shutdown,
         };
 
-        let fut = super::future::StopFuture::spawn(service.run(bus_events_rx));
-        (tx, events_rx.boxed(), fut)
+        //let fut = super::future::StopFuture::spawn(service.run(bus_events_rx));
+        let handle = tokio::spawn(service.run(bus_events_rx));
+        (tx, events_rx.boxed(), handle)
     } else {
         let service = TransientService {
             inner,
@@ -859,13 +860,12 @@ where
             shutdown,
         };
 
-        let fut = super::future::StopFuture::spawn(service.run());
-
         let events_rx = futures_util::stream::iter([
             PersistenceEvent::ReplayStarted,
             PersistenceEvent::SafetyStarted,
             PersistenceEvent::Normal,
         ]);
-        (tx, events_rx.boxed(), fut)
+        let handle = tokio::spawn(service.run());
+        (tx, events_rx.boxed(), handle)
     }
 }

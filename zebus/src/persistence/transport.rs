@@ -65,8 +65,8 @@ enum Inner<T> {
         /// Token to cancel task
         shutdown: CancellationToken,
 
-        /// Future that resolves when the task has been joined
-        stop: super::future::StopFuture,
+        /// Join handle for the persistence task
+        handle: tokio::task::JoinHandle<Result<(), PersistenceError>>,
     },
 }
 
@@ -96,7 +96,7 @@ where
     type MessageStream = super::MessageStream;
 
     type StartCompletionFuture = BoxFuture<'static, Result<(), Self::Err>>;
-    type StopCompletionFuture = super::future::StopFuture;
+    type StopCompletionFuture = BoxFuture<'static, Result<(), Self::Err>>;
     type SendFuture = transport::future::SendFuture<PersistenceRequest, Self::Err>;
 
     fn configure(
@@ -174,7 +174,7 @@ where
                 let shutdown = CancellationToken::new();
 
                 // Spawn a new task for the persistence service
-                let (requests_tx, mut events_rx, stop) = super::service::spawn(
+                let (requests_tx, mut events_rx, handle) = super::service::spawn(
                     &configuration,
                     directory,
                     event_rx.stream(),
@@ -210,7 +210,7 @@ where
                         messages_tx,
                         requests_tx,
                         shutdown,
-                        stop,
+                        handle,
                     }),
                     Ok(completion),
                 )
@@ -224,14 +224,21 @@ where
 
     fn stop(&mut self) -> Result<Self::StopCompletionFuture, Self::Err> {
         match self.inner.take() {
-            Some(Inner::Started { shutdown, stop, .. }) => {
+            Some(Inner::Started {
+                shutdown, handle, ..
+            }) => {
                 // Cancel the task
                 shutdown.cancel();
 
                 // TODO(oktal): we should go back to the `Configured` state but we need to retrieve
                 // the inner transport layer that was moved to an inner task
 
-                Ok(stop)
+                Ok(Box::pin(async move {
+                    match handle.await {
+                        Ok(res) => res,
+                        Err(e) => Err(PersistenceError::Join(e)),
+                    }
+                }))
             }
             _ => Err(PersistenceError::InvalidOperation),
         }
