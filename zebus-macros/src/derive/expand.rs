@@ -138,9 +138,17 @@ fn message_binding(
                 })
                 .collect::<Vec<_>>();
 
-            quote! {
-                ::zebus_core::BindingKey {
-                    fragments: Some(vec![#( #fragments )*])
+            if fragments.is_empty() {
+                quote! {
+                    ::zebus_core::BindingKey {
+                        fragments: None
+                    }
+                }
+            } else {
+                quote! {
+                    ::zebus_core::BindingKey {
+                        fragments: Some(vec![#( #fragments )*])
+                    }
                 }
             }
         };
