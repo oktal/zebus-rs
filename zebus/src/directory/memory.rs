@@ -92,24 +92,13 @@ impl MemoryDirectory {
         }
     }
 
-    /// Add a list of [`peers`] that should handle the message of type [`M`]
-    pub(crate) fn add_peers_for<M: MessageDescriptor + BindingExpression + 'static>(
-        &self,
-        peers: impl IntoIterator<Item = Peer>,
-    ) -> &Self {
-        for peer in peers {
-            self.add_peer_for::<M>(peer);
-        }
-        self
-    }
-
     /// Add a peer that should hande the `Message`
     pub(crate) fn add_peer_for<M: MessageDescriptor + BindingExpression + 'static>(
         &self,
         peer: Peer,
+        descriptor_fn: impl FnOnce(&mut PeerDescriptor),
     ) -> &Self {
-        let mut state = self.state.lock().unwrap();
-        state.add_subscription_for(peer, Subscription::any::<M>());
+        self.add_subscription_for(peer, Subscription::any::<M>(), descriptor_fn);
         self
     }
 
@@ -133,6 +122,9 @@ impl DirectoryReader for MemoryDirectory {
 
     fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer> {
         let state = self.state.lock().unwrap();
+
+        println!("Getting peers handling {binding:?}");
+        println!("{:#?}", state.peers);
 
         state
             .peers

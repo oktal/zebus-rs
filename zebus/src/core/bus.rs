@@ -373,7 +373,7 @@ impl<T: Transport> Receiver<T> {
                                 }
                             },
                             Err(e) => {
-                                println!("Failed to dispatch: {e}");
+                                error!("Failed to dispatch: {e}");
                             }
                         }
 
@@ -1490,10 +1490,10 @@ mod tests {
         // Setup directory with multiple peers for the same command
         fixture
             .directory
-            .add_peer_for::<BrewCoffeeCommand>(Peer::test());
+            .add_peer_for::<BrewCoffeeCommand>(Peer::test(), |_| {});
         fixture
             .directory
-            .add_peer_for::<BrewCoffeeCommand>(Peer::test());
+            .add_peer_for::<BrewCoffeeCommand>(Peer::test(), |_| {});
 
         // Attempt to send a command to multiple peers
         let res = fixture
@@ -1516,12 +1516,14 @@ mod tests {
         assert_eq!(fixture.configure().await.is_ok(), true);
         assert_eq!(fixture.start_with_registration().await.is_ok(), true);
 
-        // Setup directory with multiple peers for the same command
+        // Setup directory with non responding peer
         fixture
             .directory
-            .add_peer_for::<BrewCoffeeCommand>(Peer::test().set_not_responding());
+            .add_peer_for::<BrewCoffeeCommand>(Peer::test().set_not_responding(), |desc| {
+                desc.is_persistent = false
+            });
 
-        // Attempt to send a command to multiple peers
+        // Attempt to send a command to non responding peer
         let res = fixture
             .bus
             .send(&BrewCoffeeCommand { id: 0xBADC0FFEE })
@@ -1553,10 +1555,10 @@ mod tests {
         // Setup directory with self and other peer
         fixture
             .directory
-            .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
+            .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone(), |_| {});
         fixture
             .directory
-            .add_peer_for::<BrewCoffeeCommand>(Peer::test());
+            .add_peer_for::<BrewCoffeeCommand>(Peer::test(), |_| {});
 
         // Send command
         let result = fixture
@@ -1581,9 +1583,11 @@ mod tests {
 
         // Setup directory with recipient peers
         let peers = Fixture::create_test_peers(3);
-        fixture
-            .directory
-            .add_peers_for::<CoffeeBrewed>(peers.clone());
+        for peer in &peers {
+            fixture
+                .directory
+                .add_peer_for::<CoffeeBrewed>(peer.clone(), |_| {});
+        }
 
         // Publish event
         let res = fixture.bus.publish(&CoffeeBrewed { id: 0xBADC0FFEE }).await;
@@ -1628,12 +1632,14 @@ mod tests {
         // Setup directory with self and other peer
         fixture
             .directory
-            .add_peer_for::<CoffeeBrewed>(fixture.peer.clone());
+            .add_peer_for::<CoffeeBrewed>(fixture.peer.clone(), |_| {});
 
         let peers = Fixture::create_test_peers(3);
-        fixture
-            .directory
-            .add_peers_for::<CoffeeBrewed>(peers.clone());
+        for peer in &peers {
+            fixture
+                .directory
+                .add_peer_for::<CoffeeBrewed>(peer.clone(), |_| {});
+        }
 
         // Publish event
         let res = fixture.bus.publish(&CoffeeBrewed { id: 0xBADC0FFEE }).await;
@@ -1681,7 +1687,7 @@ mod tests {
         // Setup directory with self
         fixture
             .directory
-            .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
+            .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone(), |_| {});
 
         // Send command
         let result = fixture
@@ -1750,7 +1756,7 @@ mod tests {
         // Setup directory with self and other peer
         fixture
             .directory
-            .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone());
+            .add_peer_for::<BrewCoffeeCommand>(fixture.peer.clone(), |_| {});
 
         // Simulate reception of a message
         let sender = Peer::test();

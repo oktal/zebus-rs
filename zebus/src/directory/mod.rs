@@ -15,10 +15,7 @@ pub use events::{PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStar
 pub(crate) use registration::{Registration, RegistrationError};
 
 use self::{commands::RegisterPeerResponse, event::PeerEvent};
-use crate::{
-    dispatch::InvokerService, Message, MessageDescriptor, MessageTypeDescriptor, MessageTypeId,
-    Peer, PeerId,
-};
+use crate::{dispatch::InvokerService, Message, MessageDescriptor, Peer, PeerId};
 use futures_core::Stream;
 use std::{pin::Pin, sync::Arc};
 
