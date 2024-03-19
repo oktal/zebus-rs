@@ -13,12 +13,14 @@ use crate::{
     persistence::is_persistence_peer,
     proto::{FromProtobuf, IntoProtobuf},
     sync::stream::EventStream,
-    transport::{MessageExecutionCompleted, SendContext, Transport, TransportMessage},
-    BusConfiguration, CommandError, MessageId, Peer, PeerId,
+    transport::{
+        MessageExecutionCompleted, OriginatorInfo, SendContext, Transport, TransportMessage,
+    },
+    BusConfiguration, CommandError, MessageExt, MessageId, Peer, PeerId,
 };
 
 use super::{
-    command::StartMessageReplayCommand,
+    command::{PersistenceStopping, PersistenceStoppingAck, StartMessageReplayCommand},
     event::{ReplayEvent, TryFromReplayEventError},
     PersistenceError, PersistenceEvent, PersistenceRequest,
 };
@@ -363,11 +365,36 @@ where
         }
     }
 
+    fn handle_persistence_stopping(
+        &mut self,
+        originator: OriginatorInfo,
+        stopping: Result<PersistenceStopping, prost::DecodeError>,
+    ) {
+        if let Err(e) = stopping {
+            warn!("failed to decode `PersistenceStopping` message: {e}");
+        }
+
+        let (_id, ack) =
+            PersistenceStoppingAck {}.as_transport(&self.peer, self.environment.clone());
+
+        if let Err(e) = self
+            .inner
+            .send(std::iter::once(originator.into()), ack, SendContext::Empty)
+        {
+            warn!("failed to send `PersistenceStoppingAck`: {e}");
+        }
+    }
+
     fn handle_transport_message(
-        &self,
+        &mut self,
         message: TransportMessage,
         state: State,
     ) -> Result<State, (State, PersistenceError)> {
+        if let Some(stopping) = message.decode_as::<PersistenceStopping>() {
+            self.handle_persistence_stopping(message.originator, stopping);
+            return Ok(state);
+        }
+
         match state {
             // Replay phase
             State::ReplayPhase {

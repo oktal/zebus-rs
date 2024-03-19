@@ -16,3 +16,11 @@ pub(super) struct StartMessageReplayCommand {
     #[prost(message, required, tag = 1)]
     pub replay_id: proto::bcl::Guid,
 }
+
+#[derive(prost::Message, crate::Command, Clone)]
+#[zebus(namespace = "Abc.Zebus.Persistence", transient)]
+pub(crate) struct PersistenceStopping {}
+
+#[derive(prost::Message, crate::Command, Clone)]
+#[zebus(namespace = "Abc.Zebus.Persistence", transient)]
+pub(crate) struct PersistenceStoppingAck {}

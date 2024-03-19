@@ -303,7 +303,10 @@ mod tests {
         core::MessagePayload,
         directory::{memory::MemoryDirectory, Directory, PeerDescriptor},
         persistence::{
-            command::{PersistMessageCommand, StartMessageReplayCommand},
+            command::{
+                PersistMessageCommand, PersistenceStopping, PersistenceStoppingAck,
+                StartMessageReplayCommand,
+            },
             event::{MessageHandled, ReplayPhaseEnded, SafetyPhaseEnded},
             PersistenceError,
         },
@@ -1300,5 +1303,33 @@ mod tests {
 
         assert_eq!(msg0.1.len(), 1);
         assert_eq!(msg0.1[0].id, fixture.persistence_peer.peer.id);
+    }
+
+    #[tokio::test]
+    async fn send_ack_when_persistence_is_stopping() {
+        // Setup
+        let mut fixture = Fixture::new_default();
+
+        fixture.configure().expect("configure should not fail");
+        let _start = fixture.transport.start().expect("start should not fail");
+        fixture.register([]);
+
+        // Wait for replay to start
+        fixture
+            .wait_for_start(Duration::from_millis(100))
+            .await
+            .expect("replay should have started");
+
+        // Send PersistenceStopping
+        fixture.inner.message_received(
+            PersistenceStopping {},
+            &fixture.persistence_peer.peer,
+            fixture.environment.clone(),
+        );
+
+        // Make sure PersistenceStopping has been acked
+        let ack = fixture.inner.wait_for::<PersistenceStoppingAck>(1).await;
+
+        assert_eq!(ack.len(), 1);
     }
 }
