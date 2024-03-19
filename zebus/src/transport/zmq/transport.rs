@@ -431,7 +431,7 @@ impl InboundWorker {
     #[cfg(windows)]
     async fn run(mut self) {
         loop {
-            if self.shutdown_rx.try_recv().is_ok() {
+            if self.shutdown_rx.is_cancelled() {
                 break;
             }
 
