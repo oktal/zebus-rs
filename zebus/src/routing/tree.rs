@@ -45,11 +45,6 @@ impl PeerCollector {
         self.peers.extend_from_slice(peers);
     }
 
-    /// Get the list of peers collected
-    fn peers(&self) -> &Vec<Peer> {
-        &self.peers
-    }
-
     /// Consumes the [`PeerCollector`] and return the list of peers collected
     fn into_peers(self) -> Vec<Peer> {
         self.peers

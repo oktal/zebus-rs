@@ -1,4 +1,4 @@
-use std::{fmt::Debug, str::FromStr};
+use std::str::FromStr;
 
 use syn::{Attribute, Lit, Meta, MetaList, MetaNameValue, NestedMeta};
 
@@ -28,37 +28,6 @@ where
         .collect();
 
     Attrs::try_from(attrs)
-}
-
-pub(crate) fn attr<T>(name: &str, meta: &Meta) -> Result<Option<T>, syn::Error>
-where
-    T: FromStr,
-    T::Err: Debug,
-{
-    if let Meta::NameValue(MetaNameValue {
-        ref path, ref lit, ..
-    }) = meta
-    {
-        if path.is_ident(name) {
-            if let Lit::Str(s) = lit {
-                let value = s.value().parse().map_err(|e| {
-                    syn::Error::new_spanned(path, format!("invalid value for `{}`: {:?}", name, e))
-                })?;
-
-                return Ok(Some(value));
-            } else {
-                return Err(syn::Error::new_spanned(
-                    path,
-                    format!(
-                        "invalid value for `{}` expected: string got: {:?}",
-                        name, lit
-                    ),
-                ));
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 pub(crate) fn attr_str(

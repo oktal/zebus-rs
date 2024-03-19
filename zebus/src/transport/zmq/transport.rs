@@ -85,7 +85,7 @@ enum Inner {
         inbound_endpoint: String,
         inbound_handle: JoinHandle<()>,
 
-        outbound_handle: JoinHandle<Result<OutboundHandle, ZmqError>>,
+        outbound_handle: JoinHandle<Result<(), ZmqError>>,
         actions_tx: mpsc::Sender<OutboundAction>,
         rcv_tx: broadcast::Sender<TransportMessage>,
 
@@ -106,10 +106,6 @@ struct InboundWorker {
 
     /// Shutdown token
     shutdown_rx: CancellationToken,
-}
-
-struct OutboundHandle {
-    event_rx: BusEventStream,
 }
 
 struct OutboundWorker {
@@ -335,30 +331,6 @@ impl ZmqTransport {
         self.inner = inner;
         res
     }
-
-    fn send(
-        &mut self,
-        peers: impl Iterator<Item = Peer>,
-        message: TransportMessage,
-        context: SendContext,
-    ) -> Result<(), ZmqError> {
-        match self.inner.as_ref() {
-            Some(Inner::Started { ref actions_tx, .. }) => {
-                let peers = peers.collect();
-
-                actions_tx
-                    .try_send(OutboundAction::Send {
-                        message,
-                        peers,
-                        context,
-                    })
-                    .expect("unexpected send failure");
-
-                Ok(())
-            }
-            _ => Err(ZmqError::InvalidOperation),
-        }
-    }
 }
 
 impl InboundWorker {
@@ -472,7 +444,7 @@ impl OutboundWorker {
     ) -> Result<
         (
             mpsc::Sender<OutboundAction>,
-            JoinHandle<Result<OutboundHandle, ZmqError>>,
+            JoinHandle<Result<(), ZmqError>>,
         ),
         ZmqError,
     > {
@@ -508,7 +480,7 @@ impl OutboundWorker {
         Ok((actions_tx, outbound_thread))
     }
 
-    async fn run(mut self) -> Result<OutboundHandle, ZmqError> {
+    async fn run(mut self) -> Result<(), ZmqError> {
         let mut encode_buf = vec![0u8; 1024];
 
         loop {
@@ -545,9 +517,7 @@ impl OutboundWorker {
 
         debug!("outbound stopped");
 
-        Ok(OutboundHandle {
-            event_rx: self.event_rx,
-        })
+        Ok(())
     }
 
     fn handle_action(

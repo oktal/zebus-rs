@@ -127,11 +127,7 @@ impl ZmqOutboundSocket {
                 endpoint,
                 ..
             }) => {
-                // Disconnect the socket
                 socket.disconnect(&endpoint).map_err(Error::Zmq)?;
-
-                // Drop the socket to close the file descriptor
-                drop(socket);
                 (None, Ok(()))
             }
             x => (x, Err(Error::InvalidOperation)),
