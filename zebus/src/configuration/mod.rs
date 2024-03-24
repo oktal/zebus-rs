@@ -7,7 +7,7 @@ pub use bus::{
 };
 pub use provider::ConfigurationProvider;
 
-//#[cfg(feature = "config")]
+#[cfg(feature = "config-provider")]
 pub mod default;
-//#[cfg(feature = "config")]
+#[cfg(feature = "config-provider")]
 pub use default::DefaultConfigurationProvider;
