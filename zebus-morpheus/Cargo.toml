@@ -1,0 +1,16 @@
+[package]
+name = "zebus-morpheus"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.81"
+clap = { version = "4.5.3", features = ["derive"] }
+prost = "0.12.3"
+tokio = { version = "1.36.0", features = ["full"] }
+tokio-util = "0.7.10"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+zebus = { version = "0.1.0", path = "../zebus", features = ["config", "config-provider"] }

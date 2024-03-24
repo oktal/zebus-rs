@@ -6,4 +6,4 @@ members = [
     "zebus-macros",
 
     "examples"
-]
+, "zebus-morpheus"]
