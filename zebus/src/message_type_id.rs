@@ -51,7 +51,6 @@ pub struct MessageTypeId {
 
 impl Hash for MessageTypeId {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        println!("Hashing {:?} to {}", self, self.full_name());
         self.full_name().hash(state);
     }
 }
