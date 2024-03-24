@@ -28,8 +28,8 @@ enum SubscriptionModeAttr {
 
 fn expand(mut item: ItemFn, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
     let mode = match attrs.mode {
-        SubscriptionModeAttr::Auto => quote! { ::zebus_core::SubscriptionMode::Auto },
-        SubscriptionModeAttr::Manual => quote! { ::zebus_core::SubscriptionMode::Manual },
+        SubscriptionModeAttr::Auto => quote! { ::zebus::zebus_core::SubscriptionMode::Auto },
+        SubscriptionModeAttr::Manual => quote! { ::zebus::zebus_core::SubscriptionMode::Manual },
     };
 
     let bindings = attrs.bindings.iter().map(|binding| {
@@ -39,17 +39,21 @@ fn expand(mut item: ItemFn, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
                 BindingKeyFragment::Value(v) => {
                     quote! { ::zebus_core::BindingKeyFragment::Value(#v.to_string()) }
                 }
-                BindingKeyFragment::Star => quote! { ::zebus_core::BindingKeyFragment::Star },
-                BindingKeyFragment::Sharp => quote! { ::zebus_core::BindingKeyFragment::Sharp },
+                BindingKeyFragment::Star => {
+                    quote! { ::zebus::zebus_core::BindingKeyFragment::Star }
+                }
+                BindingKeyFragment::Sharp => {
+                    quote! { ::zebus::zebus_core::BindingKeyFragment::Sharp }
+                }
             });
 
             quote! {
-                ::zebus_core::BindingKey::from_raw_parts(
+                ::zebus::zebus_core::BindingKey::from_raw_parts(
                     vec![#( #fragments_expanded ), *]
                 )
             }
         } else {
-            quote! { ::zebus_core::BindingKey::empty() }
+            quote! { ::zebus::zebus_core::BindingKey::empty() }
         };
 
         binding_expanded
@@ -69,18 +73,18 @@ fn expand(mut item: ItemFn, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
         #[allow(non_camel_case_types)]
         struct #old_ident;
 
-        impl<S> ::zebus_core::HandlerDescriptor<S> for #old_ident
+        impl<S> ::zebus::HandlerDescriptor<S> for #old_ident
             where S: Clone + Send + 'static
         {
             type Service = tower::util::BoxService<::zebus::dispatch::InvokeRequest, Option<::zebus::Response>, std::convert::Infallible>;
-            type Binding = ::zebus_core::BindingKey;
+            type Binding = ::zebus::BindingKey;
 
             fn service(self, state: S) -> Self::Service
             {
                 tower::util::BoxService::new(#new_ident.into_service(state))
             }
 
-            fn message(&self) -> ::zebus_core::MessageTypeDescriptor
+            fn message(&self) -> ::zebus::zebus_core::MessageTypeDescriptor
             {
                 #new_ident.message()
             }
@@ -95,7 +99,7 @@ fn expand(mut item: ItemFn, attrs: HandlerAttrs) -> syn::Result<TokenStream> {
                 #new_ident.name()
             }
 
-            fn subscription_mode(&self) -> ::zebus_core::SubscriptionMode {
+            fn subscription_mode(&self) -> ::zebus::zebus_core::SubscriptionMode {
                 #mode
             }
 

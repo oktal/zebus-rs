@@ -102,7 +102,7 @@ fn message_binding(
                 let ty = &field.ty;
 
                 quote! {
-                    pub #ident: ::zebus_core::Binding<#ty>,
+                    pub #ident: ::zebus::zebus_core::Binding<#ty>,
                 }
             })
             .collect::<Vec<_>>();
@@ -140,13 +140,13 @@ fn message_binding(
 
             if fragments.is_empty() {
                 quote! {
-                    ::zebus_core::BindingKey {
+                    ::zebus::zebus_core::BindingKey {
                         fragments: None
                     }
                 }
             } else {
                 quote! {
-                    ::zebus_core::BindingKey {
+                    ::zebus::zebus_core::BindingKey {
                         fragments: Some(vec![#( #fragments )*])
                     }
                 }
@@ -154,10 +154,10 @@ fn message_binding(
         };
 
         quote! {
-            impl ::zebus_core::BindingExpression for #ident {
+            impl ::zebus::zebus_core::BindingExpression for #ident {
                 type Binding = #name;
 
-                fn bind(binding: Self::Binding) -> ::zebus_core::BindingKey {
+                fn bind(binding: Self::Binding) -> ::zebus::zebus_core::BindingKey {
                     #bind_expanded
                 }
             }
@@ -191,7 +191,7 @@ fn message_impl(
         let routing_position = routing_field.routing_position;
 
         quote! {
-            ::zebus_core::RoutingField {
+            ::zebus::zebus_core::RoutingField {
                 index: #index,
                 routing_position: #routing_position
             }
@@ -199,7 +199,7 @@ fn message_impl(
     });
 
     let get_binding = if routing_fields.is_empty() {
-        quote! { ::zebus_core::BindingKey::default() }
+        quote! { ::zebus::zebus_core::BindingKey::default() }
     } else {
         let parts = routing_fields.iter().map(|routing_field| {
             let ident = routing_field.ident().expect("field should have an ident");
@@ -217,21 +217,21 @@ fn message_impl(
     let transient = attrs.transient.unwrap_or(false);
 
     let flags = match (infrastructure, transient) {
-        (false, false) => quote! { ::zebus_core::MessageFlags::NONE },
-        (false, true) => quote! { ::zebus_core::MessageFlags::TRANSIENT },
-        (true, false) => quote! { ::zebus_core::MessageFlags::INFRASTRUCTURE },
+        (false, false) => quote! { ::zebus::zebus_core::MessageFlags::NONE },
+        (false, true) => quote! { ::zebus::zebus_core::MessageFlags::TRANSIENT },
+        (true, false) => quote! { ::zebus::zebus_core::MessageFlags::INFRASTRUCTURE },
         (true, true) => {
-            quote! { ::zebus_core::MessageFlags::INFRASTRUCTURE | ::zebus_core::MessageFlags::TRANSIENT }
+            quote! { ::zebus::zebus_core::MessageFlags::INFRASTRUCTURE | ::zebus::MessageFlags::TRANSIENT }
         }
     };
 
     Ok(quote! {
-        impl ::zebus_core::MessageDescriptor for #ident {
-            fn kind() -> ::zebus_core::MessageKind {
+        impl ::zebus::zebus_core::MessageDescriptor for #ident {
+            fn kind() -> ::zebus::zebus_core::MessageKind {
                 #kind
             }
 
-            fn flags() -> ::zebus_core::MessageFlags {
+            fn flags() -> ::zebus::zebus_core::MessageFlags {
                 #flags
             }
 
@@ -239,17 +239,17 @@ fn message_impl(
                 #full_name
             }
 
-            fn routing() -> &'static [::zebus_core::RoutingField] {
+            fn routing() -> &'static [::zebus::zebus_core::RoutingField] {
                 &[#( #routing_fields_expanded, )*]
             }
         }
 
-        impl ::zebus_core::Message for #ident {
-            fn kind(&self) -> ::zebus_core::MessageKind {
+        impl ::zebus::zebus_core::Message for #ident {
+            fn kind(&self) -> ::zebus::zebus_core::MessageKind {
                 #kind
             }
 
-            fn flags(&self) -> ::zebus_core::MessageFlags {
+            fn flags(&self) -> ::zebus::zebus_core::MessageFlags {
                 #flags
             }
 
@@ -257,7 +257,7 @@ fn message_impl(
                 #full_name
             }
 
-            fn get_binding(&self) -> ::zebus_core::BindingKey {
+            fn get_binding(&self) -> ::zebus::zebus_core::BindingKey {
                 #get_binding
             }
 
@@ -321,15 +321,15 @@ fn message(
 pub(crate) fn command(input: TokenStream) -> syn::Result<TokenStream> {
     message(
         input,
-        quote! { ::zebus_core::MessageKind::Command },
-        quote! { ::zebus_core::Command },
+        quote! { ::zebus::zebus_core::MessageKind::Command },
+        quote! { ::zebus::zebus_core::Command },
     )
 }
 
 pub(crate) fn event(input: TokenStream) -> syn::Result<TokenStream> {
     message(
         input,
-        quote! { ::zebus_core::MessageKind::Event },
-        quote! { ::zebus_core::Event },
+        quote! { ::zebus::zebus_core::MessageKind::Event },
+        quote! { ::zebus::zebus_core::Event },
     )
 }

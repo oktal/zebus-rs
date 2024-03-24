@@ -38,4 +38,6 @@ pub use zebus_core::{
 };
 pub use zebus_macros::{handler, Command, Event};
 
+pub use zebus_core;
+
 extern crate self as zebus;

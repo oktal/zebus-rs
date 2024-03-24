@@ -6,7 +6,6 @@ use dyn_clone::DynClone;
 use futures_core::Stream;
 use thiserror::Error;
 use tokio::task::JoinError;
-use zebus_core::MessageTypeDescriptor;
 
 use crate::{
     core::{MessageDescriptor, MessageFlags, MessagePayload, RawMessage, Upcast, UpcastFrom},
@@ -15,7 +14,7 @@ use crate::{
     persistence::event::MessageReplayed,
     proto::{FromProtobuf, IntoProtobuf},
     transport::{MessageExecutionCompleted, TransportMessage},
-    BoxError, MessageId, MessageTypeId, Peer, PeerId,
+    BoxError, MessageId, MessageTypeDescriptor, MessageTypeId, Peer, PeerId,
 };
 
 /// Error raised when failing to register with the directory
