@@ -5,6 +5,8 @@ use zebus::{Bus, Command, ResponseMessage};
 
 use crate::opts::Opts;
 
+const NAME: &'static str = "echo";
+
 #[derive(Command, prost::Message, Clone)]
 #[zebus(namespace = "Zebus.Morpheus.Simulation.Echo")]
 struct EchoCommand {
@@ -30,7 +32,7 @@ async fn handle_echo(cmd: EchoCommand) -> ResponseMessage<EchoResponse> {
 }
 
 pub(crate) async fn start(opts: Opts, shutdown: CancellationToken) -> anyhow::Result<()> {
-    info!("starting echo operator");
+    info!("starting {NAME} operator");
 
     let bus = opts
         .create_bus(
