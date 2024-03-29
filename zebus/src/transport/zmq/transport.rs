@@ -545,12 +545,18 @@ impl OutboundWorker {
 
             match peer_event {
                 PeerEvent::Decomissionned(descriptor) if !is_persistence_peer(&descriptor) => {
-                    self.disconnect::<TerminateConnection>(descriptor.id(), encode_buf)
+                    match self.try_disconnect::<TerminateConnection>(descriptor.id(), encode_buf) {
+                        Some(r) => r,
+                        None => Ok(()),
+                    }
                 }
                 // If a previously existing peer starts up with a new endpoint, make sure to disconnect
                 // the previous socket to avoid keeping stale sockets
                 PeerEvent::Started(descriptor) => {
-                    self.disconnect::<TerminateConnection>(descriptor.id(), encode_buf)
+                    match self.try_disconnect::<TerminateConnection>(descriptor.id(), encode_buf) {
+                        Some(r) => r,
+                        None => Ok(()),
+                    }
                 }
                 _ => Ok(()),
             }
@@ -627,24 +633,36 @@ impl OutboundWorker {
         Ok(socket)
     }
 
-    fn disconnect<S>(&mut self, peer_id: &PeerId, encode_buf: &mut Vec<u8>) -> Result<(), ZmqError>
+    fn try_disconnect<S>(
+        &mut self,
+        peer_id: &PeerId,
+        encode_buf: &mut Vec<u8>,
+    ) -> Option<Result<(), ZmqError>>
     where
         S: DisconnectStrategy,
     {
-        info!("disconnecting peer {peer_id}");
-        if let Some(mut socket) = self.outbound_sockets.remove(&peer_id) {
+        self.outbound_sockets.remove(&peer_id).map(|mut socket| {
+            info!("disconnecting peer {peer_id}");
+
             // Invoke the disconnect strategy
             S::disconnect(&mut socket, &self.peer, &self.environment, encode_buf)?;
 
             // Disconnect the underlying zmq socket
             socket.disconnect().map_err(ZmqError::Outbound)?;
+
             // Dropping the socket will close the underlying zmq file descriptor
             drop(socket);
 
             Ok(())
-        } else {
-            Err(ZmqError::UnknownPeer(peer_id.clone()))
-        }
+        })
+    }
+
+    fn disconnect<S>(&mut self, peer_id: &PeerId, encode_buf: &mut Vec<u8>) -> Result<(), ZmqError>
+    where
+        S: DisconnectStrategy,
+    {
+        self.try_disconnect::<S>(peer_id, encode_buf)
+            .unwrap_or_else(|| Err(ZmqError::UnknownPeer(peer_id.clone())))
     }
 
     async fn close_all(&mut self) -> Result<(), ZmqError> {
