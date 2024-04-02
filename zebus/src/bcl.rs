@@ -135,7 +135,7 @@ impl FromProtobuf for chrono::DateTime<chrono::Utc> {
     fn from_protobuf(input: Self::Input) -> Self::Output {
         const NANOSECONDS_IN_SECOND: i64 = 1_000_000_000;
 
-        let nanos = input.value * 100;
+        let nanos = input.value / 100;
         let secs = nanos / NANOSECONDS_IN_SECOND;
         let Some(nsecs) = (nanos % NANOSECONDS_IN_SECOND).try_into().ok() else {
             return Self::UNIX_EPOCH;
