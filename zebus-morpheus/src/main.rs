@@ -31,6 +31,10 @@ async fn main() -> anyhow::Result<()> {
         opts.clone(),
         shutdown.clone(),
     )));
+    handles.push(tokio::spawn(operator::routed_command::start(
+        opts.clone(),
+        shutdown.clone(),
+    )));
 
     println!("Press a key to exit");
 
