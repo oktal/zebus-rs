@@ -19,7 +19,7 @@ use std::{
 use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
-    events::{PeerSubscriptionsForTypeUpdated, SubscriptionsForType},
+    events::{PeerSubscriptionsForTypesUpdated, SubscriptionsForType},
     Directory, DirectoryReader, PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted,
     PeerStopped,
 };
@@ -263,7 +263,7 @@ impl DirectoryState {
         }
     }
 
-    fn peer_subscriptions_for_type_updated(&mut self, message: PeerSubscriptionsForTypeUpdated) {
+    fn peer_subscriptions_for_type_updated(&mut self, message: PeerSubscriptionsForTypesUpdated) {
         let timestamp_utc = message
             .timestamp_utc
             .try_into()
@@ -416,7 +416,7 @@ impl Client {
         try_replay!(PeerNotResponding, peer_not_responding);
         try_replay!(PeerResponding, peer_responding);
         try_replay!(
-            PeerSubscriptionsForTypeUpdated,
+            PeerSubscriptionsForTypesUpdated,
             peer_subscriptions_for_type_updated
         );
         false
@@ -536,7 +536,7 @@ async fn ping_peer(_message: PingPeerCommand, inject::Originator(originator): in
 }
 
 async fn peer_subscriptions_for_type_updated(
-    message: PeerSubscriptionsForTypeUpdated,
+    message: PeerSubscriptionsForTypesUpdated,
     inject::State(state): inject::State<Arc<Mutex<DirectoryState>>>,
 ) {
     state
@@ -1038,7 +1038,7 @@ mod tests {
         let now = chrono::Utc::now();
 
         fixture
-            .invoke(PeerSubscriptionsForTypeUpdated {
+            .invoke(PeerSubscriptionsForTypesUpdated {
                 peer_id: peer_id.clone(),
                 subscriptions: vec![subscription],
                 timestamp_utc: now.into_protobuf(),
@@ -1082,7 +1082,7 @@ mod tests {
         let now = chrono::Utc::now();
 
         fixture
-            .invoke(PeerSubscriptionsForTypeUpdated {
+            .invoke(PeerSubscriptionsForTypesUpdated {
                 peer_id: peer_id.clone(),
                 subscriptions: vec![subscription_1],
                 timestamp_utc: now.into_protobuf(),
@@ -1091,7 +1091,7 @@ mod tests {
             .unwrap();
 
         fixture
-            .invoke(PeerSubscriptionsForTypeUpdated {
+            .invoke(PeerSubscriptionsForTypesUpdated {
                 peer_id: peer_id.clone(),
                 subscriptions: vec![subscription_2],
                 timestamp_utc: (now - Duration::seconds(30)).into_protobuf(),

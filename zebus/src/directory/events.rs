@@ -74,7 +74,7 @@ pub struct SubscriptionsForType {
 /// [`Event`] raised when subscriptions for a message have been updated
 #[derive(prost::Message, crate::Event, Clone)]
 #[zebus(namespace = "Abc.Zebus.Directory")]
-pub struct PeerSubscriptionsForTypeUpdated {
+pub struct PeerSubscriptionsForTypesUpdated {
     /// [`PeerId`] id of the peer for which the subscriptions have been updated
     #[prost(message, required, tag = 1)]
     pub peer_id: PeerId,

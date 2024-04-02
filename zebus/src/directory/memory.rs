@@ -16,7 +16,7 @@ use crate::{
 use super::{
     commands::{PingPeerCommand, RegisterPeerResponse},
     event::PeerEvent,
-    events::PeerSubscriptionsForTypeUpdated,
+    events::PeerSubscriptionsForTypesUpdated,
     Directory, DirectoryReader, MessageBinding, PeerDecommissioned, PeerDescriptor,
     PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
 };
@@ -181,7 +181,7 @@ async fn ping_peer(
 }
 
 async fn peer_subscriptions_for_type_updated(
-    msg: PeerSubscriptionsForTypeUpdated,
+    msg: PeerSubscriptionsForTypesUpdated,
     inject::State(state): State<Arc<Mutex<MemoryDirectoryState>>>,
 ) {
     state.lock().unwrap().add_handled(msg)
