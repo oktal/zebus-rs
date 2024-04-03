@@ -24,7 +24,7 @@ impl RoutingField {
     }
 }
 
-fn routing_fields<'a>(
+fn routing_fields(
     ident: &syn::Ident,
     attrs: &ZebusStructAttrs,
     fields: &[Field],
@@ -51,13 +51,11 @@ fn routing_fields<'a>(
                 "a routable message must have at least one field with a `routing_position` attribute",
             ));
         }
-    } else {
-        if let Some(field) = routing_fields.iter().next() {
-            return Err(syn::Error::new_spanned(
-                &field.field,
-                "a non-routable message must not have any field with a `routing_position` attribute",
-            ));
-        }
+    } else if let Some(field) = routing_fields.first() {
+        return Err(syn::Error::new_spanned(
+            &field.field,
+            "a non-routable message must not have any field with a `routing_position` attribute",
+        ));
     }
 
     // Sanity check that fields do not have duplicated routing positions
@@ -93,7 +91,7 @@ fn message_binding(
 ) -> proc_macro2::TokenStream {
     // Generate the type that will be associated with the `Binding` type of `BindingExpression` trait
     let (message_binding_struct_expanded, name) = {
-        let name = syn::Ident::new(&format!("{}Binding", ident.to_string()), ident.span());
+        let name = syn::Ident::new(&format!("{ident}Binding"), ident.span());
         let fields = routing_fields
             .iter()
             .map(|routing_field| {
@@ -217,7 +215,7 @@ fn message_impl(
     let transient = attrs.transient.unwrap_or(false);
 
     let flags = match (infrastructure, transient) {
-        (false, false) => quote! { ::zebus::zebus_core::MessageFlags::NONE },
+        (false, false) => quote! { ::zebus::zebus_core::MessageFlags::default() },
         (false, true) => quote! { ::zebus::zebus_core::MessageFlags::TRANSIENT },
         (true, false) => quote! { ::zebus::zebus_core::MessageFlags::INFRASTRUCTURE },
         (true, true) => {

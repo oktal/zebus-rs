@@ -73,7 +73,7 @@ impl IntoProtobuf for PeerDescriptor {
             subscriptions: self.subscriptions.into_protobuf(),
             is_persistent: self.is_persistent,
             timestamp_utc: self.timestamp_utc.into_protobuf(),
-            has_debugger_attached: self.has_debugger_attached.clone(),
+            has_debugger_attached: self.has_debugger_attached,
         }
     }
 }

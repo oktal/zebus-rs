@@ -29,8 +29,8 @@ use super::close::{self, EndOfStream};
 use super::outbound::ZmqOutboundSocket;
 use super::{inbound::ZmqInboundSocket, ZmqError};
 
-const OUTBOUND_THREAD_NAME: &'static str = "outbound";
-const INBOUND_THREAD_NAME: &'static str = "inbound";
+const OUTBOUND_THREAD_NAME: &str = "outbound";
+const INBOUND_THREAD_NAME: &str = "inbound";
 
 #[derive(Debug)]
 pub enum OutboundAction {

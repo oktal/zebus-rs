@@ -110,7 +110,7 @@ impl DispatchQueue {
                 drop(tx);
 
                 // Wait for the worker to finish
-                if let Err(_) = handle.join() {
+                if handle.join().is_err() {
                     error!("{name} panic'ed");
                 }
 

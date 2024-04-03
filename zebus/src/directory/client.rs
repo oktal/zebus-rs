@@ -106,10 +106,7 @@ impl PeerEntry {
     }
 
     fn update(&mut self, descriptor: &PeerDescriptor) {
-        let timestamp_utc = descriptor
-            .timestamp_utc
-            .and_then(|v| v.try_into().ok())
-            .unwrap_or(chrono::Utc::now());
+        let timestamp_utc = descriptor.timestamp_utc.unwrap_or(chrono::Utc::now());
 
         self.descriptor.peer.endpoint = descriptor.peer.endpoint.clone();
         self.descriptor.peer.is_up = descriptor.peer.is_up;
@@ -169,7 +166,7 @@ impl PeerEntry {
                 index.remove(&message_type, &self.descriptor.peer, to_remove);
 
                 entry.timestamp_utc = timestamp_utc;
-                entry.binding_keys.retain(|b| binding_keys.contains(&b));
+                entry.binding_keys.retain(|b| binding_keys.contains(b));
             }
             hash_map::Entry::Vacant(e) => {
                 index.add(
@@ -294,7 +291,7 @@ impl DirectoryState {
             .or_insert_with(|| PeerEntry::new(descriptor.clone()));
 
         let index = &mut self.subscriptions;
-        let timestamp_utc = descriptor.timestamp_utc.and_then(|t| t.try_into().ok());
+        let timestamp_utc = descriptor.timestamp_utc;
         peer_entry.set_subscriptions(index, descriptor.subscriptions.clone(), timestamp_utc);
 
         PeerUpdate {
@@ -338,7 +335,7 @@ impl DirectoryState {
 
     fn get_peers_handling(&self, binding: &MessageBinding) -> Vec<Peer> {
         // TODO(oktal):  avoid allocating a MessageTypeId
-        let message_type = MessageTypeId::from(binding.descriptor().clone());
+        let message_type = MessageTypeId::from(*binding.descriptor());
         self.subscriptions.get(&message_type, binding.key())
     }
 

@@ -78,9 +78,7 @@ impl InvokerDispatcher {
             let dispatch_info = self
                 .descriptors
                 .entry(descriptor.message.full_name)
-                .or_insert(MessageTypeInvokerDescriptor::new(
-                    descriptor.message.clone(),
-                ));
+                .or_insert(MessageTypeInvokerDescriptor::new(descriptor.message));
             dispatch_info.invokers.push(descriptor);
 
             self.dispatch_queues
@@ -93,7 +91,7 @@ impl InvokerDispatcher {
     }
 
     fn start(&mut self) -> Result<(), Error> {
-        for (_name, dipatch_queue) in &mut self.dispatch_queues {
+        for dipatch_queue in &mut self.dispatch_queues.values_mut() {
             dipatch_queue.start().map_err(Error::Queue)?;
         }
 
@@ -101,7 +99,7 @@ impl InvokerDispatcher {
     }
 
     fn stop(&mut self) -> Result<(), Error> {
-        for (_name, dipatch_queue) in &mut self.dispatch_queues {
+        for dipatch_queue in &mut self.dispatch_queues.values_mut() {
             dipatch_queue.stop().map_err(Error::Queue)?;
         }
 
@@ -178,12 +176,7 @@ impl InvokerDispatcher {
         }
 
         // Create the future that will resolve when all handlers have been called
-        super::future::new(
-            total_invokers,
-            context.request(),
-            descriptor.message.clone(),
-            rx,
-        )
+        super::future::new(total_invokers, context.request(), descriptor.message, rx)
     }
 }
 
@@ -251,9 +244,7 @@ impl MessageDispatcher {
         res
     }
 
-    fn descriptors<'a>(
-        &'a self,
-    ) -> Result<impl Iterator<Item = &'a MessageInvokerDescriptor>, Error> {
+    fn descriptors(&self) -> Result<impl Iterator<Item = &'_ MessageInvokerDescriptor>, Error> {
         match self.inner.as_ref() {
             Some(Inner::Init(ref dispatch)) | Some(Inner::Started(ref dispatch)) => Ok(dispatch
                 .descriptors

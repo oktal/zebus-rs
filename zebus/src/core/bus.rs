@@ -153,7 +153,7 @@ impl<T: Transport> Sender<T> {
 
         // Create the `TransportMessage`
         let (id, message) =
-            TransportMessage::create(&self_peer, environment.to_string(), message.up());
+            TransportMessage::create(self_peer, environment.to_string(), message.up());
 
         // Insert the command in the collection of pending commands
         pending_commands.lock().unwrap().entry(id).or_insert(tx);
@@ -183,7 +183,7 @@ impl<T: Transport> Sender<T> {
     ) -> Result<()> {
         // Create the `TransportMessage`
         let (_, message) =
-            TransportMessage::create(&self_peer, environment.to_string(), message.up());
+            TransportMessage::create(self_peer, environment.to_string(), message.up());
 
         // Enqueue the message
         snd_tx
@@ -328,7 +328,7 @@ impl<T: Transport> Receiver<T> {
                         if let Ok(message_execution_completed) = message_execution_completed {
                             // Get the orignal command MessageId
                             let command_id =
-                                MessageId::from_protobuf(message_execution_completed.command_id.clone());
+                                MessageId::from_protobuf(message_execution_completed.command_id);
 
                             // Retrieve the pending command associated with the MessageExecutionCompleted
                             // TODO(oktal): do not silently ignore when failing to find the pending command
@@ -467,7 +467,7 @@ impl<T: Transport> Receiver<T> {
 async fn register<T: Transport>(
     transport: &mut T,
     descriptor: PeerDescriptor,
-    environment: &String,
+    environment: &str,
     configuration: &BusConfiguration,
 ) -> Result<Registration> {
     let directory_peers = configuration.directory_peers();
@@ -480,7 +480,7 @@ async fn register<T: Transport>(
         match directory::registration::register(
             transport,
             descriptor.clone(),
-            environment.clone(),
+            environment.to_owned(),
             directory_peer.clone(),
             timeout,
         )
@@ -534,19 +534,16 @@ fn get_startup_subscriptions<D: DispatchService>(
         // subscriptions
         if descriptor.subscription_mode == SubscriptionMode::Auto {
             // If we have bindings for the subscription, create a subscription for every binding
-            if descriptor.bindings.len() > 0 {
+            if !descriptor.bindings.is_empty() {
                 subscriptions.extend(
                     descriptor
                         .bindings
                         .iter()
-                        .map(|b| Subscription::new(descriptor.message.clone(), b.clone())),
+                        .map(|b| Subscription::new(descriptor.message, b.clone())),
                 );
             } else {
                 // Create a subscription with an empty default (*) binding
-                subscriptions.push(Subscription::new(
-                    descriptor.message.clone(),
-                    BindingKey::default(),
-                ));
+                subscriptions.push(Subscription::new(descriptor.message, BindingKey::default()));
             }
         }
     }
@@ -833,7 +830,7 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                     peer: self_peer.clone(),
                     subscriptions: startup_subscriptions,
                     is_persistent: configuration.is_persistent,
-                    timestamp_utc: Some(utc_now.into()),
+                    timestamp_utc: Some(utc_now),
                     has_debugger_attached: Some(false),
                 };
 

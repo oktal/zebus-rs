@@ -191,7 +191,7 @@ impl FromProtobuf for TransportMessage {
             was_persisted: input.was_persisted.unwrap_or(false),
             persistent_peer_ids: input.persistent_peer_ids,
             kind: None,
-            flags: MessageFlags::NONE,
+            flags: MessageFlags::default(),
         }
     }
 }

@@ -23,7 +23,7 @@ impl TryFrom<Vec<Meta>> for ZebusStructAttrs {
 
     fn try_from(value: Vec<Meta>) -> Result<Self, Self::Error> {
         let mut attrs = ZebusStructAttrs {
-            span: value.get(0).map(|m| m.span()),
+            span: value.first().map(|m| m.span()),
             namespace: None,
             infrastructure: None,
             transient: None,

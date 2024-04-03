@@ -134,10 +134,8 @@ impl<T> Default for Binding<T> {
 
 bitflags! {
     /// Marker flags for a [`Message`]
+    #[derive(Default)]
     pub struct MessageFlags: u32 {
-        /// None
-        const NONE           = 0b00000000;
-
         /// Marker flag for infrastructure messages
         const INFRASTRUCTURE = 0b00000001;
 
@@ -276,7 +274,7 @@ pub struct MessageTypeDescriptor {
 
 impl AsRef<str> for MessageTypeDescriptor {
     fn as_ref(&self) -> &str {
-        self.full_name.as_ref()
+        self.full_name
     }
 }
 
@@ -342,7 +340,7 @@ where
 }
 
 /// Name of the default dispatch queue
-pub const DEFAULT_DISPATCH_QUEUE: &'static str = "DefaultQueue";
+pub const DEFAULT_DISPATCH_QUEUE: &str = "DefaultQueue";
 
 /// Type alias for a generic standard error type that is safe to send across threads
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

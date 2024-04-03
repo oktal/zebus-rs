@@ -188,7 +188,7 @@ impl Into<DispatchOutput> for Dispatched {
         match &self.request.message {
             DispatchMessage::Remote(ref message) => {
                 let originator = message.originator.clone();
-                let command_id = message.id.clone();
+                let command_id = message.id;
 
                 // Get originator peer from `OriginatorInfo` of `TransportMessage`
                 let peer = originator.into();
@@ -253,7 +253,7 @@ impl Into<DispatchOutput> for Dispatched {
                 // Create `MessagePocessingFailed` message if dispatch triggered error
                 let failed = if let Err(dispatch_error) = self.result.as_ref() {
                     let (_, transport_message) =
-                        TransportMessage::create(&self_peer, environment.clone(), message.as_ref());
+                        TransportMessage::create(self_peer, environment.clone(), message.as_ref());
                     let transport_message = transport_message.into_protobuf();
 
                     let now_utc = chrono::Utc::now();

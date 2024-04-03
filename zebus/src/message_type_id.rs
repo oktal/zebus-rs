@@ -85,7 +85,7 @@ impl MessageTypeId {
     /// Returns the fully qualified name of this message type
     pub fn full_name(&self) -> &str {
         match &self.repr {
-            Repr::Descriptor(desc) => &desc.full_name,
+            Repr::Descriptor(desc) => desc.full_name,
             Repr::Name(name) => name.as_str(),
         }
     }

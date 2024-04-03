@@ -263,10 +263,8 @@ where
     }
 
     fn call(&mut self, req: InvokeRequest) -> Self::Future {
-        let handler = self.handler.clone();
-        let future = RouteHandler::handle(handler, req, self.state.clone());
-        let future = future.map(Ok as _);
-        future
+        let future = RouteHandler::handle(self.handler, req, self.state.clone());
+        future.map(Ok as _)
     }
 }
 
