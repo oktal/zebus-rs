@@ -5,26 +5,25 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use zebus::{
     dispatch::{RouteHandler, Router},
-    inject, Bus, Command,
+    inject, Bus, Event,
 };
 
 use crate::opts::Opts;
 
 use super::messages::SimulationStarted;
 
-const NAME: &'static str = "basic-command";
+const NAME: &'static str = "basic-event";
 
-#[derive(prost::Message, Command, Clone)]
-#[zebus(namespace = "Zebus.Morpheus.Simulation.BasicCommand")]
-struct BasicCommand {
+#[derive(prost::Message, Event, Clone)]
+#[zebus(namespace = "Zebus.Morpheus.Simulation.BasicEvent")]
+struct BasicEvent {
     #[prost(fixed64, tag = 1)]
     seq: u64,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-struct BasicCommandParameters {
+struct BasicEventParameters {
     count: u64,
-
     seq: u64,
 }
 
@@ -54,7 +53,7 @@ pub(crate) async fn start(opts: Opts, _shutdown: CancellationToken) -> anyhow::R
 
     let bus = opts
         .create_bus(
-            "Zebus.Morpheus.BasicCommand.Operator",
+            "Zebus.Morpheus.BasicEvent.Operator",
             None,
             Router::with_state(state).handles(handle_simulation_started.into_handler()),
         )
@@ -70,17 +69,17 @@ pub(crate) async fn start(opts: Opts, _shutdown: CancellationToken) -> anyhow::R
             break;
         };
 
-        let params: BasicCommandParameters = serde_json::from_str(&started.params)?;
+        let params: BasicEventParameters = serde_json::from_str(&started.params)?;
         info!("{NAME} started with {params:?} parameters");
 
         let seq_start = params.seq;
         let seq_end = params.seq + params.count;
 
         for seq in seq_start..seq_end {
-            let cmd = BasicCommand { seq };
+            let ev = BasicEvent { seq };
 
-            if let Err(e) = bus.send(&cmd).await {
-                error!("error sending command {e}");
+            if let Err(e) = bus.publish(&ev).await {
+                error!("error publishing event {e}");
             }
         }
     }
