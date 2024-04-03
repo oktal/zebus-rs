@@ -631,20 +631,17 @@ impl<T: Transport> Core<T> {
         let name = event.name();
 
         if len == 0 {
-            info!(message = event.name(), "sending {name} to no target peer");
+            info!("sending {name} to no target peer");
             return Ok(());
         }
 
         if len == 1 {
             let peer = &peers[0];
-            info!(message = event.name(), "sending {name} to {peer}");
+            info!("sending {name} to {peer}");
         } else {
             let first = &peers[0];
             let rest = len - 1;
-            info!(
-                message = event.name(),
-                "sending {name} to {first} and {rest} other peers"
-            );
+            info!("sending {name} to {first} and {rest} other peers");
         }
 
         let self_dst_peer = peers.iter().find(|&p| p.id == self.self_peer.id);
