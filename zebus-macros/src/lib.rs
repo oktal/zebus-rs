@@ -4,8 +4,8 @@
 //!
 //! For a given definition of a message:
 //!
-//! ```
-//! use zebus_macros::Command;
+//! ```ignore
+//! use zebus::Command;
 //!
 //! #[derive(Command)]
 //! #[zebus(namespace = "Abc.Namespace", routable)]

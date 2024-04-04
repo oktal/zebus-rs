@@ -1,4 +1,5 @@
 //! A client to communicate with a a peer directory
+use chrono::Utc;
 use itertools::Itertools;
 use tokio::sync::broadcast;
 use tracing::debug;
@@ -75,7 +76,13 @@ impl SubscriptionIndex {
 #[derive(Debug)]
 struct SubscriptionEntry {
     binding_keys: HashSet<BindingKey>,
-    timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+    timestamp_utc: chrono::DateTime<chrono::Utc>,
+}
+
+impl SubscriptionEntry {
+    fn checked_mut(&mut self, timestamp: chrono::DateTime<chrono::Utc>) -> Option<&mut Self> {
+        (timestamp >= self.timestamp_utc).then_some(self)
+    }
 }
 
 /// Entry representing a peer from the directory
@@ -118,7 +125,7 @@ impl PeerEntry {
         &mut self,
         index: &mut SubscriptionIndex,
         subscriptions: Vec<Subscription>,
-        timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+        timestamp_utc: chrono::DateTime<chrono::Utc>,
     ) {
         let subscription_bindings = subscriptions
             .into_iter()
@@ -135,7 +142,7 @@ impl PeerEntry {
         &mut self,
         index: &mut SubscriptionIndex,
         subscriptions: Vec<SubscriptionsForType>,
-        timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+        timestamp_utc: chrono::DateTime<chrono::Utc>,
     ) {
         for subscription in subscriptions {
             let message_type = MessageTypeId::from_protobuf(subscription.message_type);
@@ -153,20 +160,22 @@ impl PeerEntry {
         index: &mut SubscriptionIndex,
         message_type: MessageTypeId,
         binding_keys: HashSet<BindingKey>,
-        timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+        timestamp_utc: chrono::DateTime<chrono::Utc>,
     ) {
         match self.subscriptions.entry(message_type.clone()) {
             hash_map::Entry::Occupied(mut e) => {
                 let entry = e.get_mut();
 
-                let to_remove = entry.binding_keys.difference(&binding_keys);
-                let to_add = binding_keys.difference(&entry.binding_keys);
+                if let Some(entry) = entry.checked_mut(timestamp_utc) {
+                    let to_remove = entry.binding_keys.difference(&binding_keys);
+                    let to_add = binding_keys.difference(&entry.binding_keys);
 
-                index.add(message_type.clone(), &self.descriptor.peer, to_add);
-                index.remove(&message_type, &self.descriptor.peer, to_remove);
+                    index.add(message_type.clone(), &self.descriptor.peer, to_add);
+                    index.remove(&message_type, &self.descriptor.peer, to_remove);
 
-                entry.timestamp_utc = timestamp_utc;
-                entry.binding_keys.retain(|b| binding_keys.contains(b));
+                    entry.timestamp_utc = timestamp_utc;
+                    entry.binding_keys.retain(|b| binding_keys.contains(b));
+                }
             }
             hash_map::Entry::Vacant(e) => {
                 index.add(
@@ -266,11 +275,9 @@ impl DirectoryState {
             .try_into()
             .ok()
             .unwrap_or(chrono::Utc::now());
-        let update = self.set_subscriptions_for(
-            &message.peer_id,
-            message.subscriptions,
-            Some(timestamp_utc),
-        );
+
+        let update =
+            self.set_subscriptions_for(&message.peer_id, message.subscriptions, timestamp_utc);
 
         if let Some(update) = update {
             update.raise(PeerEvent::Updated);
@@ -291,7 +298,8 @@ impl DirectoryState {
             .or_insert_with(|| PeerEntry::new(descriptor.clone()));
 
         let index = &mut self.subscriptions;
-        let timestamp_utc = descriptor.timestamp_utc;
+        let timestamp_utc = descriptor.timestamp_utc.unwrap_or(Utc::now());
+
         peer_entry.set_subscriptions(index, descriptor.subscriptions.clone(), timestamp_utc);
 
         PeerUpdate {
@@ -304,23 +312,16 @@ impl DirectoryState {
         &mut self,
         peer_id: &PeerId,
         subscriptions: Vec<SubscriptionsForType>,
-        timestamp_utc: Option<chrono::DateTime<chrono::Utc>>,
+        timestamp_utc: chrono::DateTime<chrono::Utc>,
     ) -> Option<PeerUpdate> {
         if let Some(entry) = self.peers.get_mut(peer_id) {
-            if let Some(timestamp) = timestamp_utc {
-                if let Some(entry) = entry.checked_mut(timestamp) {
-                    entry.set_subscriptions_for(
-                        &mut self.subscriptions,
-                        subscriptions,
-                        timestamp_utc,
-                    );
-                    Some(PeerUpdate {
-                        descriptor: entry.descriptor.clone(),
-                        events_tx: self.events_tx.clone(),
-                    })
-                } else {
-                    None
-                }
+            if let Some(entry) = entry.checked_mut(timestamp_utc) {
+                entry.set_subscriptions_for(&mut self.subscriptions, subscriptions, timestamp_utc);
+
+                Some(PeerUpdate {
+                    descriptor: entry.descriptor.clone(),
+                    events_tx: self.events_tx.clone(),
+                })
             } else {
                 entry.set_subscriptions_for(&mut self.subscriptions, subscriptions, timestamp_utc);
                 Some(PeerUpdate {
@@ -1010,7 +1011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_peer_subscriptions_for_type_updated() {
+    async fn handle_peer_subscriptions_for_types_updated() {
         let mut fixture = Fixture::new();
         let descriptor = fixture.descriptor.clone();
 
@@ -1053,7 +1054,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_peer_subscriptions_for_type_updated_discard_outdated() {
+    async fn handle_peer_subscriptions_for_types_updated_discard_outdated() {
         let mut fixture = Fixture::new();
         let descriptor = fixture.descriptor.clone();
 
