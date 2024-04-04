@@ -77,7 +77,7 @@ impl IntoProtobuf for BindingKey {
     type Output = proto::BindingKey;
 
     fn into_protobuf(self) -> Self::Output {
-        let parts = if let Some(ref fragments) = self.0.fragments {
+        let parts = if let Some(fragments) = self.0.fragments {
             fragments
                 .into_iter()
                 .map(|fragment| match fragment {

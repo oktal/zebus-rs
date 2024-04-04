@@ -12,7 +12,7 @@ use crate::opts::Opts;
 
 use super::messages::SimulationStarted;
 
-const NAME: &'static str = "basic-command";
+const NAME: &str = "basic-command";
 
 #[derive(prost::Message, Command, Clone)]
 #[zebus(namespace = "Zebus.Morpheus.Simulation.BasicCommand")]

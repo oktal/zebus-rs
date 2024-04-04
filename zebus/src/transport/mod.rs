@@ -102,8 +102,8 @@ pub trait TransportExt: Transport {
     }
 
     /// Send one [`Message`] to a destination [`Peer`]
-    fn send_one<'a>(
-        &'a mut self,
+    fn send_one(
+        &mut self,
         peer: Peer,
         message: &dyn Message,
         context: SendContext,

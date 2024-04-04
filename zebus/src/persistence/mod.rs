@@ -105,7 +105,7 @@ enum PersistenceEvent {
 
 type MessageStream = crate::sync::stream::BroadcastStream<TransportMessage>;
 
-const BINDING: Lazy<MessageBinding> = Lazy::new(|| MessageBinding::any::<PersistMessageCommand>());
+static BINDING: Lazy<MessageBinding> = Lazy::new(MessageBinding::any::<PersistMessageCommand>);
 
 /// Returns whether the given [`PeerDescriptor`] is a persistence peer
 pub fn is_persistence_peer(descriptor: &PeerDescriptor) -> bool {

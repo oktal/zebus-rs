@@ -268,15 +268,15 @@ where
     }
 }
 
-impl<Args, S, H, Fut> Into<BoxInvokerHandlerService> for InvokerHandlerService<Args, S, H, Fut>
+impl<Args, S, H, Fut> From<InvokerHandlerService<Args, S, H, Fut>> for BoxInvokerHandlerService
 where
     Fut: Future<Output = Option<Response>> + Send + 'static,
     H: InvokerHandler<Args, S, Future = Fut>,
     S: Clone + Send + 'static,
     Args: 'static,
 {
-    fn into(self) -> BoxInvokerHandlerService {
-        self.boxed()
+    fn from(value: InvokerHandlerService<Args, S, H, Fut>) -> Self {
+        value.boxed()
     }
 }
 
@@ -374,10 +374,7 @@ where
             Entry::Occupied(_) => None,
             Entry::Vacant(e) => Some(e.insert((descriptor.clone(), service))),
         }
-        .expect(&format!(
-            "attempted to double-insert handler for {}",
-            message_type
-        ));
+        .unwrap_or_else(|| panic!("attempted to double-insert handler for {message_type}"));
         self
     }
 

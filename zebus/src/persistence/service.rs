@@ -40,17 +40,17 @@ enum PersistenceMessage {
     Other(TransportMessage),
 }
 
-impl Into<TransportMessage> for PersistenceMessage {
-    fn into(self) -> TransportMessage {
-        match self {
-            Self::Persist {
+impl From<PersistenceMessage> for TransportMessage {
+    fn from(value: PersistenceMessage) -> Self {
+        match value {
+            PersistenceMessage::Persist {
                 mut message,
                 persistent_peer_ids,
             } => {
                 message.persistent_peer_ids = persistent_peer_ids;
                 message
             }
-            Self::Other(message) => message,
+            PersistenceMessage::Other(message) => message,
         }
     }
 }
@@ -421,7 +421,7 @@ where
                             }
 
                             if replay_id != id {
-                                return Err((
+                                Err((
                                     State::ReplayPhase {
                                         peers,
                                         command_id,
@@ -434,7 +434,7 @@ where
                                         replay_id: id,
                                         conflicting_id: replay_id,
                                     },
-                                ));
+                                ))
                             } else {
                                 replayed.insert(message_id);
                                 // In the replay phase, forward a replayed message
@@ -462,7 +462,7 @@ where
                         ReplayEvent::ReplayPhaseEnded(msg) => {
                             let replay_id = msg.replay_id.to_uuid();
                             if replay_id != id {
-                                return Err((
+                                Err((
                                     State::SafetyPhase {
                                         descriptor,
                                         peers,
@@ -473,7 +473,7 @@ where
                                         replay_id: id,
                                         conflicting_id: replay_id,
                                     },
-                                ));
+                                ))
                             } else {
                                 info!("switching to safety phase");
 
@@ -496,35 +496,31 @@ where
                         }
                         // We should not receive a `SafetyPhaseEnded` event in a replay
                         // phase
-                        ReplayEvent::SafetyPhaseEnded(_msg) => {
-                            return Err((
-                                State::ReplayPhase {
-                                    peers,
-                                    command_id,
-                                    id,
-                                    descriptor,
-                                    rx_queue: queue,
-                                    replayed,
-                                },
-                                PersistenceError::InvalidPhase,
-                            ))
-                        }
+                        ReplayEvent::SafetyPhaseEnded(_msg) => Err((
+                            State::ReplayPhase {
+                                peers,
+                                command_id,
+                                id,
+                                descriptor,
+                                rx_queue: queue,
+                                replayed,
+                            },
+                            PersistenceError::InvalidPhase,
+                        )),
                     },
                     Err(e) => match e {
                         // Failed to decode incomming message
-                        TryFromReplayEventError::Decode(e) => {
-                            return Err((
-                                State::ReplayPhase {
-                                    peers,
-                                    command_id,
-                                    id,
-                                    descriptor,
-                                    rx_queue: queue,
-                                    replayed,
-                                },
-                                PersistenceError::Decode(e),
-                            ))
-                        }
+                        TryFromReplayEventError::Decode(e) => Err((
+                            State::ReplayPhase {
+                                peers,
+                                command_id,
+                                id,
+                                descriptor,
+                                rx_queue: queue,
+                                replayed,
+                            },
+                            PersistenceError::Decode(e),
+                        )),
 
                         // Incomming message is not a `ReplayEvent`
                         TryFromReplayEventError::Other(msg) => {
@@ -611,7 +607,7 @@ where
                             debug!("forwarding message with id {replay_id}");
 
                             if replay_id != id {
-                                return Err((
+                                Err((
                                     State::SafetyPhase {
                                         descriptor,
                                         peers,
@@ -622,7 +618,7 @@ where
                                         replay_id: id,
                                         conflicting_id: replay_id,
                                     },
-                                ));
+                                ))
                             } else {
                                 // Since the message comes from the persistence, it was
                                 // persisted, but force it to true to be compatible with
@@ -650,30 +646,28 @@ where
 
                         // We should not receive a `ReplayPhaseEnded` while we are in
                         // safety phase
-                        ReplayEvent::ReplayPhaseEnded(_msg) => {
-                            return Err((
-                                State::SafetyPhase {
-                                    descriptor,
-                                    peers,
-                                    id,
-                                    replayed,
-                                },
-                                PersistenceError::InvalidPhase,
-                            ))
-                        }
+                        ReplayEvent::ReplayPhaseEnded(_msg) => Err((
+                            State::SafetyPhase {
+                                descriptor,
+                                peers,
+                                id,
+                                replayed,
+                            },
+                            PersistenceError::InvalidPhase,
+                        )),
 
                         // Safety phase ended
                         ReplayEvent::SafetyPhaseEnded(msg) => {
                             let replay_id = msg.replay_id.to_uuid();
 
                             if replay_id != id {
-                                return Err((
+                                Err((
                                     State::NormalPhase { peers },
                                     PersistenceError::ConflictingReplay {
                                         replay_id: id,
                                         conflicting_id: replay_id,
                                     },
-                                ));
+                                ))
                             } else {
                                 info!("switching to normal phase");
 
@@ -686,17 +680,15 @@ where
                     },
                     Err(e) => match e {
                         // Failed to decode incomming message
-                        TryFromReplayEventError::Decode(e) => {
-                            return Err((
-                                State::SafetyPhase {
-                                    descriptor,
-                                    peers,
-                                    id,
-                                    replayed,
-                                },
-                                PersistenceError::Decode(e),
-                            ))
-                        }
+                        TryFromReplayEventError::Decode(e) => Err((
+                            State::SafetyPhase {
+                                descriptor,
+                                peers,
+                                id,
+                                replayed,
+                            },
+                            PersistenceError::Decode(e),
+                        )),
 
                         // Incomming message is not a replay event
                         TryFromReplayEventError::Other(msg) => {

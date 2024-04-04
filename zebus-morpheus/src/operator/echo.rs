@@ -5,7 +5,7 @@ use zebus::{Bus, Command, ResponseMessage};
 
 use crate::opts::Opts;
 
-const NAME: &'static str = "echo";
+const NAME: &str = "echo";
 
 #[derive(Command, prost::Message, Clone)]
 #[zebus(namespace = "Zebus.Morpheus.Simulation.Echo")]

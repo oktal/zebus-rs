@@ -91,7 +91,7 @@ impl TransportMessage {
         message: &dyn Message,
     ) -> (uuid::Uuid, Self) {
         let uuid = uuid::Uuid::new_v4();
-        let id = MessageId::from(uuid.clone());
+        let id = MessageId::from(uuid);
 
         let kind = message.kind();
         let flags = message.flags();

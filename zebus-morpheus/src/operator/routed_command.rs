@@ -12,7 +12,7 @@ use crate::opts::Opts;
 
 use super::messages::SimulationStarted;
 
-const NAME: &'static str = "routed-command";
+const NAME: &str = "routed-command";
 
 #[derive(prost::Message, Command, Clone)]
 #[zebus(namespace = "Zebus.Morpheus.Simulation.RoutedCommand", routable)]

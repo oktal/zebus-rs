@@ -142,7 +142,7 @@ trait DisconnectStrategy {
     fn disconnect(
         socket: &mut ZmqOutboundSocket,
         sender: &Peer,
-        environment: &String,
+        environment: &str,
         buf: &mut Vec<u8>,
     ) -> Result<(), ZmqError>;
 }
@@ -154,13 +154,13 @@ impl DisconnectStrategy for EndStreamGracefully {
     fn disconnect(
         socket: &mut ZmqOutboundSocket,
         sender: &Peer,
-        environment: &String,
+        environment: &str,
         buf: &mut Vec<u8>,
     ) -> Result<(), ZmqError> {
         let peer = socket.peer().map_err(ZmqError::Outbound)?;
         debug!("sending EndOfStreamAck to {peer}");
         let (_, end_of_stream_ack) =
-            TransportMessage::create(&sender, environment.clone(), &close::EndOfStreamAck {});
+            TransportMessage::create(sender, environment.to_owned(), &close::EndOfStreamAck {});
         buf.clear();
         end_of_stream_ack.encode(buf).map_err(ZmqError::Encode)?;
         socket.write_all(buf).map_err(ZmqError::Io)?;
@@ -172,7 +172,7 @@ impl DisconnectStrategy for TerminateConnection {
     fn disconnect(
         _socket: &mut ZmqOutboundSocket,
         _sender: &Peer,
-        _environment: &String,
+        _environment: &str,
         _buf: &mut Vec<u8>,
     ) -> Result<(), ZmqError> {
         Ok(())
@@ -223,7 +223,7 @@ impl ZmqTransport {
                 let mut inbound_endpoint = inbound_socket.bind().map_err(ZmqError::Inbound)?;
                 let hostname = gethostname::gethostname();
                 let host_str = hostname.to_str().ok_or(ZmqError::InvalidUtf8)?;
-                inbound_endpoint = inbound_endpoint.replace("0.0.0.0", &host_str);
+                inbound_endpoint = inbound_endpoint.replace("0.0.0.0", host_str);
                 info!("socket bound to endpoint {inbound_endpoint}");
 
                 // Create cancellation token to shutdown inner components
@@ -304,14 +304,15 @@ impl ZmqTransport {
                 shutdown_tx.cancel();
 
                 // Wait for the inbound worker to stop;
-                if let Err(_) = outbound_handle.join() {
+                if outbound_handle.join().is_err() {
                     error!("outbound worker panic'ed");
                 }
 
                 // Now, shutdown inbound worker
                 shutdown_rx.cancel();
+
                 // Wait for the inbound worker to stop;
-                if let Err(_) = inbound_handle.join() {
+                if inbound_handle.join().is_err() {
                     error!("inbound worker panic'ed");
                 }
 
@@ -580,27 +581,24 @@ impl OutboundWorker {
                 persistence_peer,
             } => {
                 for peer in peers {
-                    let is_persistent = persistent_peer_ids
-                        .iter()
-                        .find(|p| **p == peer.id)
-                        .is_some();
+                    let is_persistent = persistent_peer_ids.iter().any(|p| *p == peer.id);
                     message.was_persisted = Some(is_persistent);
 
                     let bytes = Self::encode(&message, encode_buf)?;
-                    self.send_to(&peer, &bytes)?;
+                    self.send_to(&peer, bytes)?;
                 }
 
                 message.persistent_peer_ids = persistent_peer_ids;
                 let bytes = Self::encode(&message, encode_buf)?;
 
-                self.send_to(&persistence_peer, &bytes)?;
+                self.send_to(&persistence_peer, bytes)?;
             }
 
             SendContext::Empty => {
                 for peer in peers {
                     message.was_persisted = Some(false);
                     let bytes = Self::encode(&message, encode_buf)?;
-                    self.send_to(&peer, &bytes)?;
+                    self.send_to(&peer, bytes)?;
                 }
             }
         }
@@ -609,7 +607,7 @@ impl OutboundWorker {
     }
 
     fn send_to(&mut self, peer: &Peer, bytes: &[u8]) -> Result<(), ZmqError> {
-        let socket = self.get_connected_socket(&peer)?;
+        let socket = self.get_connected_socket(peer)?;
         socket.write_all(bytes).map_err(ZmqError::Io)
     }
 
@@ -641,7 +639,7 @@ impl OutboundWorker {
     where
         S: DisconnectStrategy,
     {
-        self.outbound_sockets.remove(&peer_id).map(|mut socket| {
+        self.outbound_sockets.remove(peer_id).map(|mut socket| {
             info!("disconnecting peer {peer_id}");
 
             // Invoke the disconnect strategy
@@ -666,10 +664,9 @@ impl OutboundWorker {
     }
 
     async fn close_all(&mut self) -> Result<(), ZmqError> {
-        let timeout =
-            tokio::time::Duration::from(self.configuration.wait_for_end_of_stream_ack_timeout);
+        let timeout = self.configuration.wait_for_end_of_stream_ack_timeout;
 
-        for (peer_id, mut socket) in &mut self.outbound_sockets {
+        for (peer_id, socket) in &mut self.outbound_sockets {
             let endpoint = socket.endpoint().unwrap_or("NA").to_string();
 
             info!("sending EndOfStream to peer {peer_id} [{endpoint}] ...");
@@ -677,7 +674,7 @@ impl OutboundWorker {
             let future = super::close::close(
                 &self.peer,
                 self.environment.clone(),
-                &mut socket,
+                socket,
                 self.rcv_tx.subscribe(),
             )?;
 

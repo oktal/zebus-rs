@@ -46,15 +46,12 @@ impl PeerId {
     }
 }
 
-impl Into<PeerId> for String {
-    fn into(self) -> PeerId {
-        PeerId::new(self)
-    }
-}
-
-impl Into<PeerId> for &str {
-    fn into(self) -> PeerId {
-        PeerId::new(self)
+impl<T> From<T> for PeerId
+where
+    T: Into<String>,
+{
+    fn from(value: T) -> Self {
+        Self::new(value)
     }
 }
 

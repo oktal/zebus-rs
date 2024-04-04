@@ -41,8 +41,8 @@ impl PeerCollector {
     }
 
     /// Offer [`Peer`] peers to this collector
-    fn offer(&mut self, peers: &Vec<Peer>) {
-        self.peers.extend_from_slice(peers);
+    fn offer(&mut self, peers: impl IntoIterator<Item = Peer>) {
+        self.peers.extend(peers.into_iter());
     }
 
     /// Consumes the [`PeerCollector`] and return the list of peers collected
@@ -138,7 +138,7 @@ impl Node {
         index: usize,
         key: &BindingKey,
     ) -> Option<&'a mut Vec<Peer>> {
-        if self.is_leaf(&key) {
+        if self.is_leaf(key) {
             return Some(&mut self.peers);
         }
 
@@ -149,7 +149,7 @@ impl Node {
     /// is a leaf for a particular binding key
     fn accept(&self, collector: &mut PeerCollector, key: &BindingKey) {
         if self.is_leaf(key) {
-            collector.offer(&self.peers);
+            collector.offer(self.peers.clone());
             return;
         }
 
@@ -166,14 +166,14 @@ impl Node {
         }
 
         let child = self.children.iter().find(|n| n.is(key));
-        if let Some(ref child_node) = child {
+        if let Some(child_node) = child {
             child_node.accept(collector, key);
         }
     }
 
     /// Collect all the peers associated with this node and their children
     fn offer(&self, collector: &mut PeerCollector) {
-        collector.offer(&self.peers);
+        collector.offer(self.peers.clone());
 
         if let Some(ref star_node) = self.star_node {
             star_node.offer(collector);
@@ -331,7 +331,7 @@ impl PeerSubscriptionTree {
     /// TODO(oktal): Support RoutingContent
     pub(crate) fn get_peers(&self, key: &BindingKey) -> Vec<Peer> {
         let mut collector = PeerCollector::new();
-        collector.offer(&self.root_peers);
+        collector.offer(self.root_peers.clone());
 
         if key.is_empty() {
             self.root.offer(&mut collector);

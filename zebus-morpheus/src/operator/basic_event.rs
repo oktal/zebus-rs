@@ -12,7 +12,7 @@ use crate::opts::Opts;
 
 use super::messages::SimulationStarted;
 
-const NAME: &'static str = "basic-event";
+const NAME: &str = "basic-event";
 
 #[derive(prost::Message, Event, Clone)]
 #[zebus(namespace = "Zebus.Morpheus.Simulation.BasicEvent")]
