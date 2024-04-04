@@ -50,7 +50,7 @@ async fn handle_simulation_started(
         .expect("publish event failed");
 }
 
-pub(crate) async fn start(opts: Opts, shutdown: CancellationToken) -> anyhow::Result<()> {
+pub(crate) async fn start(opts: Opts, _shutdown: CancellationToken) -> anyhow::Result<()> {
     info!("starting {NAME} operator");
 
     let (events_tx, events_rx) = mpsc::channel(128);
