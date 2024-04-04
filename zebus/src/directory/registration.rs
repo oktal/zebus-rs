@@ -16,7 +16,7 @@ use crate::{
     transport::{
         MessageExecutionCompleted, SendContext, Transport, TransportExt, TransportMessage,
     },
-    BoxError, Peer,
+    BoxError, MessageId, Peer,
 };
 
 #[derive(Debug, Error)]
@@ -30,12 +30,8 @@ pub enum RegistrationError {
     Decode(TransportMessage, prost::DecodeError),
 
     /// Failed to deserialize a [`MessageExecutionCompleted`]
-    #[error("invalid response from directory {0:?} {1}")]
-    InvalidResponse(MessageExecutionCompleted, prost::DecodeError),
-
-    /// An unexpected message was received as a response
-    #[error("received unexpected message from directory during registration {0:?}")]
-    UnexpectedMessage(TransportMessage),
+    #[error("invalid response from directory {0:?}")]
+    InvalidResponse(TransportMessage),
 
     #[error("timeout after {0:?}")]
     Timeout(Duration),
@@ -46,16 +42,13 @@ pub enum RegistrationError {
 
 #[derive(Debug)]
 pub struct Registration {
-    pub(crate) pending: Vec<TransportMessage>,
-    pub(crate) result: Result<RegisterPeerResponse, RegistrationError>,
+    pub(crate) queue: Vec<TransportMessage>,
+    pub(crate) response: RegisterPeerResponse,
 }
 
 impl Registration {
-    fn new(
-        pending: Vec<TransportMessage>,
-        result: Result<RegisterPeerResponse, RegistrationError>,
-    ) -> Self {
-        Self { pending, result }
+    pub(crate) fn new(queue: Vec<TransportMessage>, response: RegisterPeerResponse) -> Self {
+        Self { queue, response }
     }
 }
 
@@ -71,7 +64,8 @@ async fn try_register<T: Transport>(
     let register_command = RegisterPeerCommand {
         peer: descriptor.into_protobuf(),
     };
-    let (_message_id, message) = TransportMessage::create(&peer, environment, &register_command);
+    let (registration_id, message) =
+        TransportMessage::create(&peer, environment, &register_command);
 
     // Subscribe to transport messages stream
     let mut rcv_rx = transport
@@ -89,34 +83,31 @@ async fn try_register<T: Transport>(
         .await
         .map_err(|e| RegistrationError::Transport(e.into()))?;
 
-    let mut pending = Vec::new();
+    let mut queue = Vec::new();
 
     while let Some(message) = rcv_rx.next().await {
         if let Some(completed) = message.decode_as::<MessageExecutionCompleted>() {
-            match completed {
+            let res = match completed {
                 Ok(completed) => {
-                    // TODO(oktal): check that the `source_command_id` is `message_id` and error
-                    // otherwise
-                    // We received the `RegisterPeerResponse`
-                    if let Some(response) = completed.decode_as::<RegisterPeerResponse>() {
-                        return Ok(Registration::new(
-                            pending,
-                            response.map_err(|e| RegistrationError::InvalidResponse(completed, e)),
-                        ));
-                    } else {
-                        // We received a message other than `RegisterPeerResponse`,
-                        // save it and keep waiting for the `RegisterPeerResponse`
-                        pending.push(message);
+                    let command_id = MessageId::from_protobuf(completed.command_id).value();
+                    if command_id != registration_id {
+                        return Err(RegistrationError::InvalidResponse(message));
+                    }
+
+                    match completed.decode_as::<RegisterPeerResponse>() {
+                        Some(Ok(response)) => Ok(Registration::new(queue, response)),
+                        Some(Err(e)) => Err(RegistrationError::Decode(message, e)),
+                        _ => Err(RegistrationError::InvalidResponse(message)),
                     }
                 }
                 // We failed to deserialize the `MessageExecutionCompleted`,
-                Err(e) => {
-                    return Ok(Registration::new(
-                        pending,
-                        Err(RegistrationError::Decode(message, e)),
-                    ));
-                }
-            }
+                Err(e) => Err(RegistrationError::Decode(message, e)),
+            };
+
+            return res;
+        } else {
+            // We received a message from an other peer during registration, queue it
+            queue.push(message);
         }
     }
 

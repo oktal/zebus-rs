@@ -14,11 +14,9 @@ use crate::{
 };
 
 use super::{
-    commands::{PingPeerCommand, RegisterPeerResponse},
-    event::PeerEvent,
-    events::PeerSubscriptionsForTypesUpdated,
+    commands::PingPeerCommand, event::PeerEvent, events::PeerSubscriptionsForTypesUpdated,
     Directory, DirectoryReader, MessageBinding, PeerDecommissioned, PeerDescriptor,
-    PeerNotResponding, PeerResponding, PeerStarted, PeerStopped,
+    PeerNotResponding, PeerResponding, PeerStarted, PeerStopped, Registration,
 };
 
 /// State of the memory directory
@@ -201,9 +199,9 @@ impl Directory for MemoryDirectory {
         state.subscribe().into()
     }
 
-    fn handle_registration(&self, response: RegisterPeerResponse) {
+    fn handle_registration(&self, registration: Registration) {
         let mut state = self.state.lock().unwrap();
-        state.add_handled(response);
+        state.add_handled(registration.response);
     }
 
     fn handler(&self) -> Self::Handler {

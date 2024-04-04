@@ -14,7 +14,7 @@ pub use descriptor::PeerDescriptor;
 pub use events::{PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted, PeerStopped};
 pub(crate) use registration::{Registration, RegistrationError};
 
-use self::{commands::RegisterPeerResponse, event::PeerEvent};
+use self::event::PeerEvent;
 use crate::{dispatch::InvokerService, Message, MessageDescriptor, Peer, PeerId};
 use futures_core::Stream;
 use std::{pin::Pin, sync::Arc};
@@ -68,7 +68,7 @@ pub(crate) trait Directory: Send + Sync + 'static {
     fn subscribe(&self) -> Self::EventStream;
 
     /// Handle [`RegisterPeerResponse`] response from the directory server
-    fn handle_registration(&self, response: RegisterPeerResponse);
+    fn handle_registration(&self, registration: Registration);
 
     /// Create a new instance of a [`Self::Handler`]
     fn handler(&self) -> Self::Handler;

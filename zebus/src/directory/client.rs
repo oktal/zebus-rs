@@ -2,7 +2,8 @@
 use chrono::Utc;
 use itertools::Itertools;
 use tokio::sync::broadcast;
-use tracing::debug;
+use tracing::{debug, error, warn};
+use zebus_core::MessageDescriptor;
 
 use crate::dispatch::handler::{InvokerHandler, MessageHandler};
 use crate::message_type_id::MessageTypeId;
@@ -18,13 +19,13 @@ use std::{
 };
 
 use super::{
-    commands::{PingPeerCommand, RegisterPeerResponse},
+    commands::PingPeerCommand,
     event::PeerEvent,
     events::{PeerSubscriptionsForTypesUpdated, SubscriptionsForType},
     Directory, DirectoryReader, PeerDecommissioned, PeerNotResponding, PeerResponding, PeerStarted,
     PeerStopped,
 };
-use super::{MessageBinding, PeerDescriptor};
+use super::{MessageBinding, PeerDescriptor, Registration};
 
 #[derive(Debug)]
 struct SubscriptionIndex(HashMap<String, PeerSubscriptionTree>);
@@ -223,6 +224,54 @@ impl DirectoryState {
         }
     }
 
+    fn try_handle(&mut self, message: &TransportMessage) -> Result<bool, prost::DecodeError> {
+        if Self::try_handle_as::<PeerStarted>(message, |msg| self.peer_started(msg))? {
+            return Ok(true);
+        }
+
+        if Self::try_handle_as::<PeerStopped>(message, |msg| self.peer_stopped(msg))? {
+            return Ok(true);
+        }
+
+        if Self::try_handle_as::<PeerDecommissioned>(message, |msg| self.peer_decommissioned(msg))?
+        {
+            return Ok(true);
+        }
+
+        if Self::try_handle_as::<PeerNotResponding>(message, |msg| self.peer_not_responding(msg))? {
+            return Ok(true);
+        }
+
+        if Self::try_handle_as::<PeerResponding>(message, |msg| self.peer_responding(msg))? {
+            return Ok(true);
+        }
+
+        if Self::try_handle_as::<PeerSubscriptionsForTypesUpdated>(message, |msg| {
+            self.peer_subscriptions_for_type_updated(msg)
+        })? {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    fn try_handle_as<M>(
+        message: &TransportMessage,
+        handle_fn: impl FnOnce(M),
+    ) -> Result<bool, prost::DecodeError>
+    where
+        M: prost::Message + MessageDescriptor + Default,
+    {
+        let handled = if let Some(msg) = message.decode_as::<M>() {
+            handle_fn(msg?);
+            true
+        } else {
+            false
+        };
+
+        Ok(handled)
+    }
+
     fn peer_started(&mut self, message: PeerStarted) {
         self.add_or_update(PeerDescriptor::from_protobuf(message.descriptor))
             .raise(PeerEvent::Started);
@@ -393,34 +442,6 @@ pub(crate) struct Client {
     state: Arc<Mutex<DirectoryState>>,
 }
 
-impl Client {
-    pub(crate) fn replay(&mut self, mut messages: Vec<TransportMessage>) -> Vec<TransportMessage> {
-        messages.retain(|m| self.replay_message(m));
-        messages
-    }
-
-    fn replay_message(&mut self, message: &TransportMessage) -> bool {
-        macro_rules! try_replay {
-            ($ty: ty, $handler: ident) => {
-                if let Some(Ok(event)) = message.decode_as::<$ty>() {
-                    self.state.lock().unwrap().$handler(event);
-                    return true;
-                }
-            };
-        }
-
-        try_replay!(PeerStarted, peer_started);
-        try_replay!(PeerStopped, peer_stopped);
-        try_replay!(PeerNotResponding, peer_not_responding);
-        try_replay!(PeerResponding, peer_responding);
-        try_replay!(
-            PeerSubscriptionsForTypesUpdated,
-            peer_subscriptions_for_type_updated
-        );
-        false
-    }
-}
-
 impl DirectoryReader for Client {
     fn get_peer(&self, peer_id: &PeerId) -> Option<PeerDescriptor> {
         let inner = self.state.lock().unwrap();
@@ -448,12 +469,31 @@ impl Directory for Client {
         inner.subscribe().into()
     }
 
-    fn handle_registration(&self, response: RegisterPeerResponse) {
+    fn handle_registration(&self, registration: Registration) {
         let mut inner = self.state.lock().unwrap();
-        for descriptor in response.peers {
+        // Register peers
+        for descriptor in registration.response.peers {
             inner
                 .add_or_update(PeerDescriptor::from_protobuf(descriptor))
                 .forget();
+        }
+
+        // Handle queued messages during registration
+        for message in registration.queue {
+            let msg_type = message
+                .message_type()
+                .expect("TransportMessage should always have a message type");
+            match inner.try_handle(&message) {
+                Ok(true) => {
+                    debug!("handled {msg_type} during registration")
+                }
+                Ok(false) => {
+                    warn!("received unknown {msg_type} message during registration")
+                }
+                Err(e) => {
+                    error!("failed to handle {msg_type} after registration: {e}")
+                }
+            }
         }
     }
 
@@ -553,6 +593,7 @@ mod tests {
 
     use super::*;
     use crate::bus::NoopBus;
+    use crate::directory::commands::RegisterPeerResponse;
     use crate::directory::event::PeerEventKind;
     use crate::directory::DirectoryReaderExt;
     use crate::dispatch::InvokerService;
@@ -691,9 +732,12 @@ mod tests {
     async fn handle_registration() {
         let fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
-        fixture.client.handle_registration(RegisterPeerResponse {
-            peers: descriptors.clone().into_protobuf(),
-        });
+        fixture.client.handle_registration(Registration::new(
+            Vec::new(),
+            RegisterPeerResponse {
+                peers: descriptors.clone().into_protobuf(),
+            },
+        ));
 
         for descriptor in &descriptors {
             let peer = &descriptor.peer;
@@ -710,9 +754,12 @@ mod tests {
     async fn handle_registration_does_not_raise_peer_started_event() {
         let mut fixture = Fixture::new();
         let descriptors = Fixture::create_descriptors(5);
-        fixture.client.handle_registration(RegisterPeerResponse {
-            peers: descriptors.into_protobuf(),
-        });
+        fixture.client.handle_registration(Registration::new(
+            Vec::new(),
+            RegisterPeerResponse {
+                peers: descriptors.into_protobuf(),
+            },
+        ));
 
         assert_eq!(fixture.try_recv().await, None);
     }
@@ -748,12 +795,15 @@ mod tests {
             has_debugger_attached: Some(false),
         };
 
-        fixture.client.handle_registration(RegisterPeerResponse {
-            peers: vec![
-                peer_desc_1.clone().into_protobuf(),
-                peer_desc_2.clone().into_protobuf(),
-            ],
-        });
+        fixture.client.handle_registration(Registration::new(
+            Vec::new(),
+            RegisterPeerResponse {
+                peers: vec![
+                    peer_desc_1.clone().into_protobuf(),
+                    peer_desc_2.clone().into_protobuf(),
+                ],
+            },
+        ));
 
         let peer_1 = fixture.client.get_peers_handling_message(&command_1);
         assert_eq!(peer_1, vec![peer_desc_1.peer]);
@@ -782,9 +832,12 @@ mod tests {
         });
         let peers: Vec<_> = descriptors.iter().cloned().map(|d| d.peer).collect();
 
-        fixture.client.handle_registration(RegisterPeerResponse {
-            peers: descriptors.clone().into_protobuf(),
-        });
+        fixture.client.handle_registration(Registration::new(
+            Vec::new(),
+            RegisterPeerResponse {
+                peers: descriptors.clone().into_protobuf(),
+            },
+        ));
 
         let peers_1 = fixture.client.get_peers_handling_message(&event_1);
         assert_eq!(peers_1, peers);
@@ -830,9 +883,12 @@ mod tests {
             .cloned()
             .collect_vec();
 
-        fixture.client.handle_registration(RegisterPeerResponse {
-            peers: descriptors.into_protobuf(),
-        });
+        fixture.client.handle_registration(Registration::new(
+            Vec::new(),
+            RegisterPeerResponse {
+                peers: descriptors.into_protobuf(),
+            },
+        ));
 
         let peers_1 = fixture.client.get_peers_handling_message(&event_1);
         assert_eq!(peers_1, descriptor_peers_1);

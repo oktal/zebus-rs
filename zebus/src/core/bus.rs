@@ -843,21 +843,19 @@ impl<T: Transport, D: Directory> Bus<T, D> {
                     register(&mut transport, descriptor, &environment, &configuration).await?;
 
                 // Handle peer directory response
-                // TODO(oktal): properly handle error
-                if let Ok(response) = registration.result {
-                    let peers = response
-                        .peers
-                        .clone()
-                        .into_iter()
-                        .map(PeerDescriptor::from_protobuf)
-                        .collect();
+                let peers = registration
+                    .response
+                    .peers
+                    .clone()
+                    .into_iter()
+                    .map(PeerDescriptor::from_protobuf)
+                    .collect();
 
-                    if let Err(e) = event_tx.send(BusEvent::Registered(peers)) {
-                        error!("failed to publish {:?}", e.0);
-                    }
-
-                    directory.handle_registration(response);
+                if let Err(e) = event_tx.send(BusEvent::Registered(peers)) {
+                    error!("failed to publish {:?}", e.0);
                 }
+
+                directory.handle_registration(registration);
 
                 // Start the dispatcher
                 dispatcher.start().map_err(Error::Dispatch)?;
