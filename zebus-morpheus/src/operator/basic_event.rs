@@ -4,7 +4,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use zebus::{
-    dispatch::{RouteHandler, Router},
+    dispatch::{InvokerHandler, MessageHandler},
     inject, Bus, Event,
 };
 
@@ -55,7 +55,7 @@ pub(crate) async fn start(opts: Opts, _shutdown: CancellationToken) -> anyhow::R
         .create_bus(
             "Zebus.Morpheus.BasicEvent.Operator",
             None,
-            Router::with_state(state).handles(handle_simulation_started.into_handler()),
+            MessageHandler::with_state(state).handles(handle_simulation_started.into_handler()),
         )
         .await?;
 

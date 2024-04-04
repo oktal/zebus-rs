@@ -1,6 +1,6 @@
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-use zebus::dispatch::{RouteHandler, Router};
+use zebus::dispatch::{InvokerHandler, MessageHandler};
 use zebus::{Bus, Command, ResponseMessage};
 
 use crate::opts::Opts;
@@ -38,7 +38,7 @@ pub(crate) async fn start(opts: Opts, shutdown: CancellationToken) -> anyhow::Re
         .create_bus(
             "Zebus.Morpheus.Echo.Operator",
             None,
-            Router::with_state(()).handles(handle_echo.into_handler()),
+            MessageHandler::with_state(()).handles(handle_echo.into_handler()),
         )
         .await?;
 

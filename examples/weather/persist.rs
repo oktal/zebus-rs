@@ -4,7 +4,7 @@ use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
 use tokio;
 use zebus::configuration::DefaultConfigurationProvider;
-use zebus::dispatch::{RouteHandler, Router};
+use zebus::dispatch::{InvokerHandler, MessageHandler};
 use zebus::transport::zmq::{ZmqSocketOptions, ZmqTransport, ZmqTransportConfiguration};
 use zebus::{inject, Bus, BusBuilder, BusConfiguration, ConfigurationProvider, Event, PeerId};
 
@@ -84,15 +84,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "example",
             &mut configuration,
         )?
-        .handles(Router::with_state(WeatherStationState::new()).handles(
-            sensor_temperature_collected.into_handler().bind(|binding| {
-                if let Some(routing) = routing {
-                    binding.name.matches(routing)
-                } else {
-                    binding.name.any()
-                }
-            }),
-        ))
+        .handles(
+            MessageHandler::with_state(WeatherStationState::new()).handles(
+                sensor_temperature_collected.into_handler().bind(|binding| {
+                    if let Some(routing) = routing {
+                        binding.name.matches(routing)
+                    } else {
+                        binding.name.any()
+                    }
+                }),
+            ),
+        )
         .with_transport(zmq)
         .create()
         .await?;

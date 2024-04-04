@@ -297,7 +297,7 @@ mod tests {
         bus::{self, CommandResult},
         core::MessagePayload,
         dispatch::{
-            router::{RouteHandler, RouteHandlerDescriptor, Router},
+            handler::{InvokerHandler, InvokerHandlerDescriptor, MessageHandler},
             DispatchRequest, DispatchResult, Dispatched,
         },
         handler,
@@ -354,9 +354,9 @@ mod tests {
         fn add<S, F>(&mut self, state: S, route_fn: F)
         where
             S: Clone + Send + 'static,
-            F: FnOnce(Router<S>) -> Router<S>,
+            F: FnOnce(MessageHandler<S>) -> MessageHandler<S>,
         {
-            let router = route_fn(Router::with_state(state));
+            let router = route_fn(MessageHandler::with_state(state));
             self.dispatcher
                 .add(Box::new(router))
                 .expect("failed to add handler");

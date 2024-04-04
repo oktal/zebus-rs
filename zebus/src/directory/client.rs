@@ -4,7 +4,7 @@ use itertools::Itertools;
 use tokio::sync::broadcast;
 use tracing::debug;
 
-use crate::dispatch::router::{RouteHandler, Router};
+use crate::dispatch::handler::{InvokerHandler, MessageHandler};
 use crate::message_type_id::MessageTypeId;
 use crate::proto::FromProtobuf;
 use crate::{
@@ -435,7 +435,7 @@ impl DirectoryReader for Client {
 
 impl Directory for Client {
     type EventStream = crate::sync::stream::BroadcastStream<PeerEvent>;
-    type Handler = Router<Arc<Mutex<DirectoryState>>>;
+    type Handler = MessageHandler<Arc<Mutex<DirectoryState>>>;
 
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -458,7 +458,7 @@ impl Directory for Client {
     }
 
     fn handler(&self) -> Self::Handler {
-        Router::with_state(Arc::clone(&self.state))
+        MessageHandler::with_state(Arc::clone(&self.state))
             .handles(peer_started.into_handler())
             .handles(peer_stopped.into_handler())
             .handles(peer_decommissioned.into_handler())

@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::io::{self, Read};
 use tokio;
 use zebus::configuration::DefaultConfigurationProvider;
-use zebus::dispatch::{RouteHandler, Router};
+use zebus::dispatch::{InvokerHandler, MessageHandler};
 use zebus::transport::zmq::{ZmqSocketOptions, ZmqTransport, ZmqTransportConfiguration};
 use zebus::{Bus, BusBuilder, BusConfiguration, Command, ConfigurationProvider, PeerId};
 
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let bus = BusBuilder::new()
         .configure_with(PeerId::new("Abc.Echo.0"), "example", &mut configuration)?
-        .handles(Router::with_state(()).handles(echo.into_handler()))
+        .handles(MessageHandler::with_state(()).handles(echo.into_handler()))
         .with_transport(zmq)
         .create()
         .await?;

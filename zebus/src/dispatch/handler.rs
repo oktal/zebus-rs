@@ -24,8 +24,8 @@ use super::{
     MessageInvokerDescriptor,
 };
 
-#[pin_project(project = RouteFutureProj)]
-pub enum RouteFuture<R, F>
+#[pin_project(project = HandlerFutureProj)]
+pub enum HandlerFuture<R, F>
 where
     R: IntoResponse,
     F: Future<Output = R>,
@@ -34,7 +34,7 @@ where
     Response(#[pin] F),
 }
 
-impl<R, F> Future for RouteFuture<R, F>
+impl<R, F> Future for HandlerFuture<R, F>
 where
     R: IntoResponse,
     F: Future<Output = R>,
@@ -46,8 +46,8 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         match self.project() {
-            RouteFutureProj::Error(e) => Poll::Ready(e.take()),
-            RouteFutureProj::Response(fut) => match fut.poll(cx) {
+            HandlerFutureProj::Error(e) => Poll::Ready(e.take()),
+            HandlerFutureProj::Response(fut) => match fut.poll(cx) {
                 Poll::Ready(resp) => Poll::Ready(resp.into_response()),
                 Poll::Pending => Poll::Pending,
             },
@@ -55,20 +55,20 @@ where
     }
 }
 
-pub type BoxRouteHandlerService = BoxService<InvokeRequest, Option<Response>, Infallible>;
+pub type BoxInvokerHandlerService = BoxService<InvokeRequest, Option<Response>, Infallible>;
 
 pub trait IntoHandler<S> {
-    fn into_handler(self, state: S) -> (BoxRouteHandlerService, MessageInvokerDescriptor);
+    fn into_handler(self, state: S) -> (BoxInvokerHandlerService, MessageInvokerDescriptor);
 }
 
 impl<S, H> IntoHandler<S> for H
 where
     H: HandlerDescriptor<S>,
-    H::Service: Into<BoxRouteHandlerService>,
+    H::Service: Into<BoxInvokerHandlerService>,
     H::Binding: Into<BindingKey>,
     S: Clone + Send + 'static,
 {
-    fn into_handler(self, state: S) -> (BoxRouteHandlerService, MessageInvokerDescriptor) {
+    fn into_handler(self, state: S) -> (BoxInvokerHandlerService, MessageInvokerDescriptor) {
         let descriptor = MessageInvokerDescriptor {
             invoker_type: self.name(),
             dispatch_queue: self.queue(),
@@ -80,7 +80,7 @@ where
     }
 }
 
-pub trait RouteHandlerDescriptor<Args> {
+pub trait InvokerHandlerDescriptor<Args> {
     type Message;
 
     /// Type of message handled by the handler
@@ -90,10 +90,10 @@ pub trait RouteHandlerDescriptor<Args> {
     fn name(&self) -> &'static str;
 }
 
-pub struct MakeRouteHandler<Args, S, H, Fut>
+pub struct MakeHandlerInvoker<Args, S, H, Fut>
 where
     Fut: Future<Output = Option<Response>>,
-    H: RouteHandler<Args, S, Future = Fut>,
+    H: InvokerHandler<Args, S, Future = Fut>,
     S: Clone + Send + 'static,
 {
     handler: H,
@@ -111,10 +111,10 @@ where
     M::bind(binding).into()
 }
 
-impl<Args, S, H, Fut> MakeRouteHandler<Args, S, H, Fut>
+impl<Args, S, H, Fut> MakeHandlerInvoker<Args, S, H, Fut>
 where
     Fut: Future<Output = Option<Response>> + Send + 'static,
-    H: RouteHandler<Args, S, Future = Fut>,
+    H: InvokerHandler<Args, S, Future = Fut>,
     S: Clone + Send + 'static,
 {
     fn new(handler: H) -> Self {
@@ -165,14 +165,14 @@ where
     }
 }
 
-impl<Args, S, H, Fut> HandlerDescriptor<S> for MakeRouteHandler<Args, S, H, Fut>
+impl<Args, S, H, Fut> HandlerDescriptor<S> for MakeHandlerInvoker<Args, S, H, Fut>
 where
     Fut: Future<Output = Option<Response>> + Send + 'static,
-    H: RouteHandler<Args, S, Future = Fut>,
+    H: InvokerHandler<Args, S, Future = Fut>,
     S: Clone + Send + 'static,
     Args: 'static,
 {
-    type Service = RouteHandlerService<Args, S, H, Fut>;
+    type Service = InvokerHandlerService<Args, S, H, Fut>;
     type Binding = BindingKey;
 
     fn service(self, state: S) -> Self::Service {
@@ -200,8 +200,8 @@ where
     }
 }
 
-pub trait RouteHandler<Args, S>:
-    Copy + Clone + Send + Sized + Any + RouteHandlerDescriptor<Args> + 'static
+pub trait InvokerHandler<Args, S>:
+    Copy + Clone + Send + Sized + Any + InvokerHandlerDescriptor<Args> + 'static
 where
     S: Clone + Send + 'static,
 {
@@ -209,19 +209,19 @@ where
 
     fn handle(self, req: InvokeRequest, state: S) -> Self::Future;
 
-    fn into_service(self, state: S) -> RouteHandlerService<Args, S, Self, Self::Future> {
-        RouteHandlerService::new(self, state)
+    fn into_service(self, state: S) -> InvokerHandlerService<Args, S, Self, Self::Future> {
+        InvokerHandlerService::new(self, state)
     }
 
-    fn into_handler(self) -> MakeRouteHandler<Args, S, Self, Self::Future> {
-        MakeRouteHandler::new(self)
+    fn into_handler(self) -> MakeHandlerInvoker<Args, S, Self, Self::Future> {
+        MakeHandlerInvoker::new(self)
     }
 }
 
-pub struct RouteHandlerService<Args, S, H, Fut>
+pub struct InvokerHandlerService<Args, S, H, Fut>
 where
     Fut: Future<Output = Option<Response>>,
-    H: RouteHandler<Args, S, Future = Fut>,
+    H: InvokerHandler<Args, S, Future = Fut>,
     S: Clone + Send + 'static,
 {
     handler: H,
@@ -229,10 +229,10 @@ where
     phantom: PhantomData<fn(Args) -> Fut>,
 }
 
-impl<Args, S, H, Fut> RouteHandlerService<Args, S, H, Fut>
+impl<Args, S, H, Fut> InvokerHandlerService<Args, S, H, Fut>
 where
     Fut: Future<Output = Option<Response>>,
-    H: RouteHandler<Args, S, Future = Fut>,
+    H: InvokerHandler<Args, S, Future = Fut>,
     S: Clone + Send + 'static,
 {
     fn new(handler: H, state: S) -> Self {
@@ -244,10 +244,10 @@ where
     }
 }
 
-impl<Args, S, H, Fut> Service<InvokeRequest> for RouteHandlerService<Args, S, H, Fut>
+impl<Args, S, H, Fut> Service<InvokeRequest> for InvokerHandlerService<Args, S, H, Fut>
 where
     Fut: Future<Output = Option<Response>>,
-    H: RouteHandler<Args, S, Future = Fut>,
+    H: InvokerHandler<Args, S, Future = Fut>,
     S: Clone + Send + 'static,
 {
     type Response = Option<Response>;
@@ -263,26 +263,26 @@ where
     }
 
     fn call(&mut self, req: InvokeRequest) -> Self::Future {
-        let future = RouteHandler::handle(self.handler, req, self.state.clone());
+        let future = InvokerHandler::handle(self.handler, req, self.state.clone());
         future.map(Ok as _)
     }
 }
 
-impl<Args, S, H, Fut> Into<BoxRouteHandlerService> for RouteHandlerService<Args, S, H, Fut>
+impl<Args, S, H, Fut> Into<BoxInvokerHandlerService> for InvokerHandlerService<Args, S, H, Fut>
 where
     Fut: Future<Output = Option<Response>> + Send + 'static,
-    H: RouteHandler<Args, S, Future = Fut>,
+    H: InvokerHandler<Args, S, Future = Fut>,
     S: Clone + Send + 'static,
     Args: 'static,
 {
-    fn into(self) -> BoxRouteHandlerService {
+    fn into(self) -> BoxInvokerHandlerService {
         self.boxed()
     }
 }
 
 macro_rules! impl_tuple {
     ($($arg:ident $t:tt),*) => {
-        impl<F, Fut, M, $($t,)* S, R> RouteHandler<(M, $($t,)*), S> for F
+        impl<F, Fut, M, $($t,)* S, R> InvokerHandler<(M, $($t,)*), S> for F
         where
             F: FnOnce(M, $($t,)*) -> Fut + Copy + Clone + Send + 'static,
             Fut: Future<Output = R> + Send + 'static,
@@ -291,27 +291,27 @@ macro_rules! impl_tuple {
             S: Clone + Send + 'static,
             R: IntoResponse + 'static,
         {
-            type Future = RouteFuture<R, Fut>;
+            type Future = HandlerFuture<R, Fut>;
 
             fn handle(self, req: InvokeRequest, state: S) -> Self::Future {
                 let dispatch = &req.dispatch;
                 $(
                     let $arg = match $t::extract(&dispatch, &state) {
                         Ok(arg) => arg,
-                        Err(e) => return RouteFuture::Error(e.into_response()),
+                        Err(e) => return HandlerFuture::Error(e.into_response()),
                     };
 
                 )*
                 let msg = inject::message::Message::extract(&dispatch, &state).map(|m| m.0);
 
                 match msg {
-                    Ok(msg) => RouteFuture::Response(self(msg, $($arg,)*)),
-                    Err(e) => RouteFuture::Error(e.into_response()),
+                    Ok(msg) => HandlerFuture::Response(self(msg, $($arg,)*)),
+                    Err(e) => HandlerFuture::Error(e.into_response()),
                 }
             }
         }
 
-        impl<F, Fut, M, $($t,)* R> RouteHandlerDescriptor<(M, $($t,)*)> for F
+        impl<F, Fut, M, $($t,)* R> InvokerHandlerDescriptor<(M, $($t,)*)> for F
         where
             F: FnOnce(M, $($t,)*) -> Fut + Copy + Clone + Send + 'static,
             Fut: Future<Output = R> + Send + 'static,
@@ -339,15 +339,15 @@ impl_tuple!(arg0 A, arg1 B, arg2 C, arg3 D);
 impl_tuple!(arg0 A, arg1 B, arg2 C, arg3 D, arg4 E);
 impl_tuple!(arg0 A, arg1 B, arg2 C, arg3 D, arg4 E, arg5 G);
 
-pub struct Router<S>
+pub struct MessageHandler<S>
 where
     S: Clone + Send + 'static,
 {
-    invokers: HashMap<&'static str, (MessageInvokerDescriptor, BoxRouteHandlerService)>,
+    invokers: HashMap<&'static str, (MessageInvokerDescriptor, BoxInvokerHandlerService)>,
     state: S,
 }
 
-impl<S> Router<S>
+impl<S> MessageHandler<S>
 where
     S: Clone + Send + 'static,
 {
@@ -359,7 +359,7 @@ where
     }
 }
 
-impl<S> Router<S>
+impl<S> MessageHandler<S>
 where
     S: Clone + Send + 'static,
 {
@@ -382,7 +382,7 @@ where
     }
 
     #[cfg(test)]
-    async fn route(&mut self, req: InvokeRequest) -> Option<Response> {
+    async fn handle(&mut self, req: InvokeRequest) -> Option<Response> {
         if let Some((_, service)) = self.invokers.get_mut(req.dispatch.message_type()) {
             service.call(req).await.expect("invokers are infaillible")
         } else {
@@ -391,7 +391,7 @@ where
     }
 }
 
-impl<S> Service<InvokeRequest> for Router<S>
+impl<S> Service<InvokeRequest> for MessageHandler<S>
 where
     S: Clone + Send + 'static,
 {
@@ -412,7 +412,7 @@ where
     }
 }
 
-impl<S> InvokerService for Router<S>
+impl<S> InvokerService for MessageHandler<S>
 where
     S: Clone + Send + 'static,
 {
@@ -449,7 +449,7 @@ mod test {
     where
         S: Clone + Send + 'static,
     {
-        router: Router<S>,
+        router: MessageHandler<S>,
         peer: Peer,
         environment: String,
     }
@@ -462,9 +462,9 @@ mod test {
     {
         fn new<F>(state: S, route_fn: F) -> Self
         where
-            F: FnOnce(Router<S>) -> Router<S>,
+            F: FnOnce(MessageHandler<S>) -> MessageHandler<S>,
         {
-            let router = Router::with_state(state);
+            let router = MessageHandler::with_state(state);
             Self {
                 router: route_fn(router),
                 peer: Peer::test(),
@@ -485,7 +485,7 @@ mod test {
             M: Message + MessageDescriptor + prost::Message + Clone + Default,
             F: FnOnce(TransportMessage, Arc<dyn Bus>) -> DispatchRequest,
         {
-            self.router.route(self.request_for(msg, req_fn)).await
+            self.router.handle(self.request_for(msg, req_fn)).await
         }
 
         fn request_for<M, F>(&self, msg: M, req_fn: F) -> InvokeRequest

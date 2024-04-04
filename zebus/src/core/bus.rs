@@ -1062,7 +1062,7 @@ mod tests {
     use crate::bus::CommandError;
     use crate::directory::commands::{RegisterPeerCommand, RegisterPeerResponse};
     use crate::directory::memory::MemoryDirectory;
-    use crate::dispatch::router::{RouteHandler, Router};
+    use crate::dispatch::handler::{InvokerHandler, MessageHandler};
     use crate::inject;
     use crate::message_type_id::MessageTypeId;
     use crate::proto::IntoProtobuf;
@@ -1080,7 +1080,7 @@ mod tests {
         fn with_handler<S>(
             configuration: BusConfiguration,
             state: S,
-            route_fn: impl FnOnce(Router<S>) -> Router<S>,
+            route_fn: impl FnOnce(MessageHandler<S>) -> MessageHandler<S>,
         ) -> Self
         where
             S: Clone + Send + 'static,
@@ -1091,7 +1091,7 @@ mod tests {
             let environment = "Test".to_string();
             let directory = MemoryDirectory::new();
 
-            let router = Router::with_state(state);
+            let router = MessageHandler::with_state(state);
 
             let mut dispatcher = MessageDispatcher::new();
             dispatcher

@@ -1,9 +1,9 @@
 mod context;
 mod dispatcher;
 mod future;
+pub mod handler;
 mod invoker;
 mod queue;
-pub mod router;
 
 use std::convert::Infallible;
 use std::{fmt::Display, sync::Arc};
@@ -21,9 +21,9 @@ use crate::{Bus, Message, MessageDescriptor, MessageId};
 pub(crate) use context::DispatchContext;
 pub(crate) use dispatcher::{Error, MessageDispatcher};
 use futures_core::future::BoxFuture;
+pub use handler::{IntoHandler, InvokerHandler, InvokerHandlerDescriptor, MessageHandler};
 pub(crate) use invoker::{HandlerResponse, MessageInvokerDescriptor};
 pub use invoker::{InvokeRequest, InvokerService};
-pub use router::{IntoHandler, RouteHandler, RouteHandlerDescriptor, Router};
 use tower_service::Service;
 
 /// A message to dispatch

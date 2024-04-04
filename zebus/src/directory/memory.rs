@@ -8,7 +8,7 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 
 use crate::{
-    dispatch::{RouteHandler, Router},
+    dispatch::{InvokerHandler, MessageHandler},
     inject::{self, State},
     BindingExpression, MessageDescriptor, Peer, PeerId, Subscription,
 };
@@ -189,7 +189,7 @@ async fn peer_subscriptions_for_type_updated(
 
 impl Directory for MemoryDirectory {
     type EventStream = crate::sync::stream::BroadcastStream<PeerEvent>;
-    type Handler = Router<Arc<Mutex<MemoryDirectoryState>>>;
+    type Handler = MessageHandler<Arc<Mutex<MemoryDirectoryState>>>;
 
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -207,7 +207,7 @@ impl Directory for MemoryDirectory {
     }
 
     fn handler(&self) -> Self::Handler {
-        Router::with_state(Arc::clone(&self.state))
+        MessageHandler::with_state(Arc::clone(&self.state))
             .handles(peer_started.into_handler())
             .handles(peer_stopped.into_handler())
             .handles(peer_decommissioned.into_handler())
