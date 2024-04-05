@@ -1,3 +1,4 @@
+directory_endpoints = ["tcp://localhost:7465"]
 registration_timeout = "1min"
 start_replay_timeout = "10s"
 is_persistent = false

@@ -7,6 +7,10 @@ edition = "2018"
 [dev-dependencies]
 
 [[example]]
+name = "quickstart"
+path = "quickstart/quickstart.rs"
+
+[[example]]
 name = "echo-service"
 path = "echo/service.rs"
 
