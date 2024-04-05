@@ -7,11 +7,15 @@
 //! Zebus abstracts away the complexities of transport and protocol layers, providing a simple and unified interface
 //! for communication between peers through a [`Bus`] interface.
 //!
-//! ```rust
-//! use tokio;
-//! use zebus::*;
-//!
+//! ```no_run
 //! use std::error::Error;
+//! use std::io::{self, Read};
+//! use tokio;
+
+//! use zebus::configuration::DefaultConfigurationProvider;
+//! use zebus::dispatch::{InvokerHandler, MessageHandler};
+//! use zebus::transport::zmq::{ZmqSocketOptions, ZmqTransport, ZmqTransportConfiguration};
+//! use zebus::{Bus, BusBuilder, BusConfiguration, Command, ConfigurationProvider, Event, PeerId};
 //!
 //! #[derive(prost::Message, Command, Clone)]
 //! #[zebus(namespace = "Echo")]
@@ -38,7 +42,7 @@
 //!
 //!     let bus = BusBuilder::new()
 //!         .configure_with(PeerId::new("Echo.0"), "example", &mut configuration)?
-//!         .handles(MessageHandler::with_state(()).handles(echo.into_handler()))
+//!         .with_handler(MessageHandler::with_state(()).handles(echo.into_handler()))
 //!         .with_transport(zmq)
 //!         .create()
 //!         .await?;

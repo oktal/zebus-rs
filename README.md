@@ -7,10 +7,14 @@ Zebus abstracts away the complexities of transport and protocol layers, providin
 between peers through a `Bus` interface.
 
 ```rs
-use tokio;
-use zebus::*;
-
 use std::error::Error;
+use std::io::{self, Read};
+use tokio;
+
+use zebus::configuration::DefaultConfigurationProvider;
+use zebus::dispatch::{InvokerHandler, MessageHandler};
+use zebus::transport::zmq::{ZmqSocketOptions, ZmqTransport, ZmqTransportConfiguration};
+use zebus::{Bus, BusBuilder, BusConfiguration, Command, ConfigurationProvider, Event, PeerId};
 
 #[derive(prost::Message, Command, Clone)]
 #[zebus(namespace = "Echo")]
