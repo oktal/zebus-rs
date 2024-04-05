@@ -1,3 +1,4 @@
+//! Provides configuration components for the bus
 pub mod bus;
 pub mod provider;
 

@@ -1,5 +1,4 @@
 //! Simple trait for helping along upcasting of dyn supertraits
-//! from https://docs.rs/upcast/latest/upcast/index.html
 //!
 //! ```
 //! # use zebus_core::{Upcast, UpcastFrom};

@@ -1,3 +1,4 @@
+//! Response types for handled commands
 use core::fmt;
 
 use super::RawMessage;
@@ -6,14 +7,14 @@ use crate::{
     MessageId, MessageTypeDescriptor,
 };
 
-/// Error code returned in [`MessageExecutionCompleted`] when a [`crate::Handler`] returned a
+/// Error code returned in [`MessageExecutionCompleted`] when a handler for a message returned a
 /// generic [`std::error::Error`]
 pub const HANDLER_ERROR_CODE: i32 = -10;
 
 /// Error code returned when an internal error occured
 pub const INTERNAL_ERROR: i32 = -20;
 
-/// A protobuf [`prost::Message`] message returned by a [`crate::Handler`]
+/// A protobuf [`prost::Message`] message returned by a message handler
 pub struct ResponseMessage<T>(pub T);
 
 impl<T> From<T> for ResponseMessage<T> {
@@ -22,7 +23,7 @@ impl<T> From<T> for ResponseMessage<T> {
     }
 }
 
-/// Response returned by a [`crate::Handler`]
+/// Response returned by a message handler
 ///
 /// Command handlers can complete and return a result back to the originator of a
 /// [`crate::Command`]
@@ -33,13 +34,15 @@ impl<T> From<T> for ResponseMessage<T> {
 /// - A standard [`std::error::Error`] raised by common Rust faillible functions
 #[derive(Debug)]
 pub enum Response {
-    /// A [`Message`] response returned by a [`crate::Handler`]. This contains the
-    /// [`MessageTypeDescriptor`] of the message as well as the raw protobuf-encoded payload of the
-    /// [`Message`]
+    /// A [`crate::Message`] response returned by a message handler.
+    ///
+    /// This contains the [`MessageTypeDescriptor`] of the message as well as the raw protobuf-encoded payload of the
+    /// [`crate::Message`]
     Message(RawMessage),
 
-    /// A business [`crate::Error`] error returned by a [`Handler`]. This contains the error code and the string
-    /// representation of the error
+    /// A business [`crate::Error`] error returned by a message handler.
+    ///
+    /// This contains the error code and the string representation of the error
     Error(i32, String),
 
     /// A standard Rust [`std::error::Error`] raised by common Rust faillible functions
@@ -80,23 +83,24 @@ impl Response {
 
 /// Trait for generating responses
 ///
-/// Types that implement this trait can be returned from a [`crate::Handler`]
+/// Types that implement this trait can be returned from a message handler
 /// This trait is implemented for common types
 pub trait IntoResponse {
     fn into_response(self) -> Option<Response>;
 }
 
-/// User error type that can be returned by a [`crate::Handler`]
+/// User error type that can be returned by a message handler
 pub trait Error: std::error::Error {
     /// Numeric representation of the underlying error
     fn code(&self) -> i32;
 }
 
-/// Error type that can be returned by a [`crate::Handler`].
+/// Error type that can be returned by a message handler.
+///
 /// A handler can fail it two ways.
 /// 1. Handling a message can succeed but yield a logical error
 /// 2. Handling a message can fail by invoking a faillible operation that failed, e.g an operation
-///    that yields a [`Result`](std::result::Result) and failed with an `Err`.
+///    that yields a [`Result`] and failed with an `Err`.
 ///    This would be the equivalent of an exception in other languages.
 #[derive(Debug)]
 pub enum HandlerError<E: Error> {

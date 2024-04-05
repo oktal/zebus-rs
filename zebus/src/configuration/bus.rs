@@ -1,3 +1,4 @@
+//! Configuration parameters for a [`Bus`](crate::Bus)
 use std::time::Duration;
 
 use rand::{seq::SliceRandom, thread_rng};
@@ -12,7 +13,7 @@ pub const DEFAULT_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default time to wait for when trying to replay messages from the persistence on startup
 pub const DEFAULT_START_REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default maximum batch size for [`crate::BatchedMessageHandler`]
+/// Default maximum batch size for batched message handler
 pub const DEFAULT_MAX_BATCH_SIZE: usize = 100;
 
 /// Configuration parameters for a [`Bus`](crate::Bus)
@@ -43,7 +44,7 @@ pub struct BusConfiguration {
     /// Indicates whether [MessageProcessingFailed](crate::lotus::MessageProcessingFailed) should be published on handler errors.
     pub enable_error_publication: bool,
 
-    /// Maximum batch size for [`crate::BatchedMessageHandler`]
+    /// Maximum batch size for a batched message handler
     pub message_batch_size: usize,
 }
 

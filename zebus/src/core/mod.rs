@@ -1,3 +1,4 @@
+//! Core bus components
 pub mod builder;
 mod bus;
 mod message;

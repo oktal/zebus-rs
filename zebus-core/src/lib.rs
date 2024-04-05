@@ -242,14 +242,13 @@ macro_rules! binding_key {
     };
 }
 
-/// Specifies the startup subscription mode for a message handler
+/// Specifies the startup subscription mode for a [`Message`]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SubscriptionMode {
-    /// A [`Subscription`] for the message handler will automatically be performed on startup
+    /// Automatically subscribe to the message at startup
     Auto,
 
-    /// The subscription for the message handler must be manually performed through the
-    /// [`bus::subscribe`)[crate::Bus::subscribe] function
+    /// The subscription for the message must be manually performed
     Manual,
 }
 

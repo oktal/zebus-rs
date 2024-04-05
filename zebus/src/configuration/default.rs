@@ -1,3 +1,4 @@
+//! Default configuration provider
 use crate::ConfigurationProvider;
 
 use config::{Config, ConfigError, Environment, File};
@@ -6,6 +7,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Default configuration provider
+///
+/// This [`ConfigurationProvider`] can provide a configuration through either:
+/// - A configuration file
+/// - `ZEBUS_*` environment variables
 #[derive(Default)]
 pub struct DefaultConfigurationProvider<T> {
     file: Option<PathBuf>,
@@ -13,6 +19,7 @@ pub struct DefaultConfigurationProvider<T> {
 }
 
 impl<T> DefaultConfigurationProvider<T> {
+    /// Load the requested configuration from a configuration f ile
     pub fn with_file(mut self, file: impl AsRef<Path>) -> Self {
         self.file = Some(file.as_ref().into());
         self

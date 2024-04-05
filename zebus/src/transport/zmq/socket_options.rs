@@ -47,7 +47,7 @@ pub struct ZmqSocketOptions {
     #[cfg_attr(feature = "config-provider", serde(with = "humantime_serde"))]
     pub recv_timeout: Option<Duration>,
 
-    /// Set [`KeepAliveOptions`] zmq socket options
+    /// Set keep alive zmq socket options
     pub keep_alive: Option<KeepAliveOptions>,
 }
 

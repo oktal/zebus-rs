@@ -1,3 +1,4 @@
+//! The main [`Bus`] interface to send commands, publish events and subscribe through the bus
 use core::fmt;
 use std::{any::Any, pin::Pin};
 
@@ -17,7 +18,7 @@ use crate::{
     BoxError, MessageId, MessageTypeDescriptor, MessageTypeId, Peer, PeerId,
 };
 
-/// Error raised when failing to register with the directory
+/// Error raised when failing to register to the directory
 #[derive(Debug)]
 pub struct RegistrationError {
     inner: Vec<(Peer, directory::RegistrationError)>,
@@ -106,7 +107,7 @@ pub enum Error {
     InvalidOperation,
 }
 
-/// A wrapper arround a [`std::result::Result`] type for bus-specific [`Error`]
+/// A wrapper arround a [`std::result::Result`] type for bus-specific `Error`
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// An error which can be returned when sending a command
@@ -170,6 +171,7 @@ impl From<MessageExecutionCompleted> for CommandResult {
     }
 }
 
+/// Trait for a [`Message`] that can be encoded as a binary representation
 pub trait EncodableMessage {
     fn encode_to_vec(&self) -> Vec<u8>;
 }
@@ -229,7 +231,7 @@ pub trait MessageExt: Message {
         TransportMessage::create(sender, environment, self)
     }
 
-    /// Create a [`MessageReplayed`] [`TransportMessage`] from this [`Message`]
+    /// Convert this message to a message replayed by the persistence
     fn as_replayed(
         &self,
         replay_id: uuid::Uuid,
@@ -253,13 +255,11 @@ impl<M: Message + ?Sized> MessageExt for M {}
 
 impl dyn Message {
     /// Returns `true` if the inner [`Message`] is of type `M`
-    /// This function implements semantic similar to [`std::any::Any::is`]
     pub fn is<M: MessageDescriptor>(&self) -> bool {
         self.name() == M::name()
     }
 
     /// Returns some reference to the concrete `M` message type if this [`Message`] is of type `M`
-    /// This function implements semantic similar to [`std::any::Any::downcast_ref`]
     pub fn downcast_ref<M: MessageDescriptor>(&self) -> Option<&M> {
         // Safety: we guarantee that the `Message` is of type `M` by checking prior to calling
         // `downcast_ref_unchecked`
@@ -268,7 +268,6 @@ impl dyn Message {
     }
 
     /// Returns some reference the concrete `M` message type if this [`Message`] is of type `M`
-    /// This function implements semantic similar to [`std::any::Any::downcast_ref_unchecked`]
     ///
     /// # Safety
     ///
@@ -292,7 +291,8 @@ impl<T: Any + crate::core::Message + prost::Message + DynClone + Send + Sync> Me
 impl<T: Message + crate::core::Command> Command for T {}
 impl<T: Message + crate::core::Event> Event for T {}
 
-/// A Bus
+/// Trait for a Bus.
+/// This is the entry point of a bus
 #[async_trait]
 pub trait Bus: Send + Sync + 'static {
     /// Configure the bus with the provided [`PeerId`] `peer_id` and `environment`
@@ -304,13 +304,17 @@ pub trait Bus: Send + Sync + 'static {
     /// Stop the bus
     async fn stop(&self) -> Result<()>;
 
-    /// Send a [`Command`] to the handling [`Peer`]
+    /// Send a [`Command`] to a corresponding [`Peer`]
+    ///
+    /// A [`Command`] must be directed towards a single recipient peer
     async fn send(&self, command: &dyn Command) -> CommandResult;
 
-    /// Send a [`Command`] to a destination [`Peer`]
+    /// Send a [`Command`] to a specific destination [`Peer`]
     async fn send_to(&self, command: &dyn Command, peer: Peer) -> CommandResult;
 
-    /// Send an [`Event`] to the handling [`Peer`] peers
+    /// Publish an [`Event`] through the bus
+    ///
+    /// An [`Event`] can be broadcasted to multiple peers
     async fn publish(&self, event: &dyn Event) -> Result<()>;
 }
 
@@ -321,7 +325,7 @@ pub enum BusEvent {
     Starting,
 
     /// Event raised when the bus is about to register with the directory
-    /// The event holds the [`PeerDescriptor`] descriptor of the current peer
+    /// The event holds the description of the current peer that has been registered through the bus
     Registering(PeerDescriptor),
 
     /// Event raised when the bus successfully registered to the directory with

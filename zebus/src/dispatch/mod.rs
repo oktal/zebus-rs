@@ -1,3 +1,4 @@
+//! Dispatch a [`Message`] to its corresponding handlers
 mod context;
 mod dispatcher;
 mod future;
@@ -286,7 +287,7 @@ impl Into<DispatchOutput> for Dispatched {
     }
 }
 
-/// A type that encapsulates a request to dispatch a [`DispatchMessage`]
+/// A type that encapsulates a request to dispatch a message
 pub struct DispatchRequest {
     message: DispatchMessage,
     bus: Arc<dyn Bus>,

@@ -1,8 +1,7 @@
 use crate::{Peer, PeerId};
 
 /// Represents the context associated with message sending
-/// This struct is used to encapsulate useful information
-/// for the [`crate::Transport`] layer when sending a message
+/// This struct is used to encapsulate useful information for the transport layer when sending a message
 /// to a list of recipient peers
 #[derive(Debug)]
 pub enum SendContext {

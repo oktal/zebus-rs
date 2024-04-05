@@ -45,7 +45,7 @@ impl HandlerResponse {
     }
 }
 
-/// Request to invoke a [`MessageHandlerInvoker`]
+/// Invoke a message handler for a [`DispatchRequest`]
 #[derive(Clone)]
 pub struct InvokeRequest {
     /// Original dispatch request

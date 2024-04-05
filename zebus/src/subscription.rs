@@ -63,7 +63,7 @@ impl Subscription {
         &self.message_type_id
     }
 
-    /// Tells whether this subscription matches a given [`MessageBinding`]
+    /// Tells whether this subscription matches a given message binding
     pub fn matches(&self, binding: &MessageBinding) -> bool {
         self.full_name() == binding.descriptor().full_name && self.binding() == binding.key()
     }
