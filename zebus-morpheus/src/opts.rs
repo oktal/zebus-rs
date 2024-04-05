@@ -52,7 +52,7 @@ impl Opts {
 
         let bus = BusBuilder::new()
             .configure(peer_id, self.environment.clone(), configuration)
-            .handles(handler)
+            .with_handler(handler)
             .with_transport(zmq)
             .create()
             .await?;

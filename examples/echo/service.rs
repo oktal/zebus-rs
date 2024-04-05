@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let bus = BusBuilder::new()
         .configure_with(PeerId::new("Abc.Echo.0"), "example", &mut configuration)?
-        .handles(MessageHandler::with_state(()).handles(echo.into_handler()))
+        .with_handler(MessageHandler::with_state(()).handles(echo.into_handler()))
         .with_transport(zmq)
         .create()
         .await?;

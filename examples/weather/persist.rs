@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "example",
             &mut configuration,
         )?
-        .handles(
+        .with_handler(
             MessageHandler::with_state(WeatherStationState::new()).handles(
                 sensor_temperature_collected.into_handler().bind(|binding| {
                     if let Some(routing) = routing {

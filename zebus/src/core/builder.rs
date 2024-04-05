@@ -146,7 +146,8 @@ impl BusBuilder<Configured> {
         }
     }
 
-    pub fn handles<H>(mut self, handler: H) -> Self
+    /// Register the provided message handlers
+    pub fn with_handler<H>(mut self, handler: H) -> Self
     where
         H: InvokerService + 'static,
     {

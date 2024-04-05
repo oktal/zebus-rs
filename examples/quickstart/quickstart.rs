@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Here, the bus will subscribe to every `MyEvent` with a `key` matching the literal `"my-key"` string
     let bus = BusBuilder::new()
         .configure_with(PeerId::new("Quickstart.0"), "example", &mut configuration)?
-        .handles(
+        .with_handler(
             MessageHandler::with_state(()).handles(
                 handle_my_event
                     .into_handler()
