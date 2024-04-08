@@ -1,4 +1,6 @@
-use std::{borrow::Cow, collections::HashMap, io::Write, sync::Arc, thread::JoinHandle};
+use std::{
+    borrow::Cow, collections::HashMap, io::Write, sync::Arc, thread::JoinHandle, time::Duration,
+};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -546,10 +548,11 @@ impl OutboundWorker {
 
             match peer_event {
                 PeerEvent::Decomissionned(descriptor) if !is_persistence_peer(&descriptor) => {
-                    match self.try_disconnect::<TerminateConnection>(descriptor.id(), encode_buf) {
-                        Some(r) => r,
-                        None => Ok(()),
-                    }
+                    self.try_spawn_disconnect::<TerminateConnection>(
+                        descriptor.id(),
+                        Some(self.configuration.wait_for_end_of_stream_ack_timeout),
+                    );
+                    Ok(())
                 }
                 // If a previously existing peer starts up with a new endpoint, make sure to disconnect
                 // the previous socket to avoid keeping stale sockets
@@ -631,16 +634,24 @@ impl OutboundWorker {
         Ok(socket)
     }
 
+    fn disconnect<S>(&mut self, peer: &PeerId, encode_buf: &mut Vec<u8>) -> Result<(), ZmqError>
+    where
+        S: DisconnectStrategy,
+    {
+        self.try_disconnect::<S>(peer, encode_buf)
+            .unwrap_or_else(|| Err(ZmqError::UnknownPeer(peer.clone())))
+    }
+
     fn try_disconnect<S>(
         &mut self,
-        peer_id: &PeerId,
+        peer: &PeerId,
         encode_buf: &mut Vec<u8>,
     ) -> Option<Result<(), ZmqError>>
     where
         S: DisconnectStrategy,
     {
-        self.outbound_sockets.remove(peer_id).map(|mut socket| {
-            info!("disconnecting peer {peer_id}");
+        self.outbound_sockets.remove(peer).map(|mut socket| {
+            info!("disconnecting peer {peer}");
 
             // Invoke the disconnect strategy
             S::disconnect(&mut socket, &self.peer, &self.environment, encode_buf)?;
@@ -655,12 +666,48 @@ impl OutboundWorker {
         })
     }
 
-    fn disconnect<S>(&mut self, peer_id: &PeerId, encode_buf: &mut Vec<u8>) -> Result<(), ZmqError>
+    fn try_spawn_disconnect<S>(
+        &mut self,
+        peer_id: &PeerId,
+        delay: Option<Duration>,
+    ) -> Option<tokio::task::JoinHandle<()>>
     where
         S: DisconnectStrategy,
     {
-        self.try_disconnect::<S>(peer_id, encode_buf)
-            .unwrap_or_else(|| Err(ZmqError::UnknownPeer(peer_id.clone())))
+        self.outbound_sockets.remove(&peer_id).map(|mut socket| {
+            let self_peer = self.peer.clone();
+            let environment = self.environment.clone();
+
+            let peer_id = peer_id.clone();
+
+            let disconnect = async move {
+                if let Some(delay) = delay {
+                    info!("waiting for {delay:#?} before disconnecting {peer_id}");
+                    tokio::time::sleep(delay).await;
+                }
+
+                info!("disconnecting peer {peer_id}");
+
+                let mut encode_buf = Vec::new();
+
+                // Invoke the disconnect strategy
+                S::disconnect(&mut socket, &self_peer, &environment, &mut encode_buf)?;
+
+                // Disconnect the underlying zmq socket
+                socket.disconnect().map_err(ZmqError::Outbound)?;
+
+                // Dropping the socket will close the underlying zmq file descriptor
+                drop(socket);
+
+                Ok::<_, ZmqError>(())
+            };
+
+            tokio::spawn(async move {
+                if let Err(e) = disconnect.await {
+                    error!("{e}");
+                }
+            })
+        })
     }
 
     async fn close_all(&mut self) -> Result<(), ZmqError> {
