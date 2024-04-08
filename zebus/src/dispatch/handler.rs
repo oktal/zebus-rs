@@ -111,6 +111,16 @@ where
     M::bind(binding).into()
 }
 
+fn bind_with<M, K, F>(key: K, bind_fn: F) -> BindingKey
+where
+    M: BindingExpression,
+    F: Fn(&mut <M as BindingExpression>::Binding, K),
+{
+    let mut binding = M::Binding::default();
+    bind_fn(&mut binding, key);
+    M::bind(binding).into()
+}
+
 impl<Args, S, H, Fut> MakeHandlerInvoker<Args, S, H, Fut>
 where
     Fut: Future<Output = Option<Response>> + Send + 'static,
@@ -151,6 +161,19 @@ where
             .push(bind::<H::Message, _>(bind_fn));
 
         self
+    }
+
+    pub fn bind_all<K, F>(self, keys: K, bind_fn: F) -> Self
+    where
+        H::Message: BindingExpression,
+        K: IntoIterator,
+        F: Fn(&mut <H::Message as BindingExpression>::Binding, K::Item),
+    {
+        let bindings = keys
+            .into_iter()
+            .map(|key| bind_with::<H::Message, _, _>(key, &bind_fn));
+
+        self.with_bindings(bindings)
     }
 
     pub fn with_bindings<B, I>(mut self, bindings: B) -> Self
