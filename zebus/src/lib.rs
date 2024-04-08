@@ -109,7 +109,7 @@ mod bcl;
 pub mod bus;
 pub mod configuration;
 pub mod core;
-mod directory;
+pub mod directory;
 pub mod dispatch;
 pub mod inject;
 pub mod lotus;

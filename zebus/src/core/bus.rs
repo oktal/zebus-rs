@@ -475,7 +475,7 @@ async fn register<T: Transport>(
     let timeout = configuration.registration_timeout;
     let mut error = RegistrationError::new();
     for directory_peer in directory_peers {
-        info!("register on directory {directory_peer}",);
+        info!("register on directory {directory_peer}");
 
         match directory::registration::register(
             transport,
