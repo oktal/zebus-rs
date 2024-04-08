@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::Extract;
 
 /// An extractor to extract a [`Bus`]
-pub struct Bus(Arc<dyn crate::Bus>);
+pub struct Bus(pub Arc<dyn crate::Bus>);
 
 impl<S> Extract<S> for Bus {
     type Rejection = ();
