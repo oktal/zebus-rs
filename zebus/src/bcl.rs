@@ -80,7 +80,7 @@ pub enum DateTimeError {
 
 #[derive(Copy, Clone, prost::Message)]
 pub struct DateTime {
-    #[prost(int64, tag = 1)]
+    #[prost(sint64, tag = 1)]
     pub value: i64,
 
     #[prost(enumeration = "TimeSpanScale", tag = 2)]
